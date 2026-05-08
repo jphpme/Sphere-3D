@@ -58,14 +58,16 @@ CLOUDFLARE_API_TOKEN
 CLOUDFLARE_ACCOUNT_ID
 ```
 
-Optional GitHub repository variable:
+Optional GitHub repository variable, only if bypassing the same-origin
+`/realtime/*` and `/forecast/*` asset proxy:
 
 ```text
 VITE_REALTIME_DASH_BASE_URL=https://pachamama-studios.stream/
 ```
 
-If the variable is not set, the workflow uses
-`https://pachamama-studios.stream/`.
+If the variable is not set, the app uses same-origin relative URLs. Cloudflare
+Pages Functions proxy those requests to `https://pachamama-studios.stream` and
+preserve byte-range headers for DASH playback.
 
 For a manual deploy from a local build:
 

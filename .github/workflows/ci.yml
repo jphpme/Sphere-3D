@@ -69,7 +69,7 @@ jobs:
       url: ${{ github.ref == 'refs/heads/main' && 'https://vr.ayni.eu.com/' || '' }}
     env:
       CLOUDFLARE_PAGES_PROJECT_NAME: ayni-vr
-      VITE_REALTIME_DASH_BASE_URL: ${{ vars.VITE_REALTIME_DASH_BASE_URL || 'https://pachamama-studios.stream/' }}
+      VITE_REALTIME_DASH_BASE_URL: ${{ vars.VITE_REALTIME_DASH_BASE_URL }}
     steps:
       - uses: actions/checkout@v4
         with:
