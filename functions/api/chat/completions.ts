@@ -67,6 +67,10 @@ const NATIVE_MULTIMODAL_MODELS = new Set([
   '@cf/meta/llama-4-scout-17b-16e-instruct',
 ])
 
+const THINKING_DEFAULT_OFF_MODELS = new Set([
+  '@cf/google/gemma-4-26b-a4b-it',
+])
+
 // Legacy vision models that need the separate-image-field API + Meta
 // community license acceptance. Kept for users who explicitly select
 // llama-3.2-11b-vision in their config; Gemma 4 and llama-4-scout supersede it for
@@ -124,6 +128,52 @@ function extractImageAndNormalise(
 // Workers AI default max_tokens is ~256 which truncates conversational responses.
 // 512 tokens ≈ 380 words — enough for Orbit's 150-word guideline with headroom.
 const DEFAULT_MAX_TOKENS = 512
+
+function applyModelInputDefaults(model: string, inputs: Record<string, unknown>): void {
+  if (!THINKING_DEFAULT_OFF_MODELS.has(model)) return
+
+  const existing = inputs.chat_template_kwargs
+  inputs.chat_template_kwargs = {
+    ...(existing && typeof existing === 'object' && !Array.isArray(existing)
+      ? existing as Record<string, unknown>
+      : {}),
+    enable_thinking: false,
+  }
+  inputs.reasoning_effort ??= null
+}
+
+function firstString(...values: unknown[]): string {
+  for (const value of values) {
+    if (typeof value === 'string' && value.length > 0) return value
+  }
+  return ''
+}
+
+function extractWorkersAIText(result: unknown): string {
+  if (!result || typeof result !== 'object') return ''
+
+  const obj = result as Record<string, unknown>
+  const choices = Array.isArray(obj.choices) ? obj.choices : []
+  const firstChoice = choices[0]
+  const choiceObj = firstChoice && typeof firstChoice === 'object'
+    ? firstChoice as Record<string, unknown>
+    : {}
+  const message = choiceObj.message && typeof choiceObj.message === 'object'
+    ? choiceObj.message as Record<string, unknown>
+    : {}
+  const delta = choiceObj.delta && typeof choiceObj.delta === 'object'
+    ? choiceObj.delta as Record<string, unknown>
+    : {}
+
+  return firstString(
+    obj.response,
+    obj.output_text,
+    obj.text,
+    message.content,
+    delta.content,
+    choiceObj.text,
+  )
+}
 
 // Basic per-IP rate limiting (in-memory, resets on deploy)
 const rateLimitMap = new Map<string, { count: number; resetAt: number }>()
@@ -275,6 +325,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         return out
       })
       const inputs: Record<string, unknown> = { messages: wfMessages, max_tokens: DEFAULT_MAX_TOKENS }
+      applyModelInputDefaults(cfModel, inputs)
       if (body.tools?.length) inputs.tools = body.tools
       const result = (await context.env.AI.run(cfModel, inputs)) as {
         response?: string
@@ -303,7 +354,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           index: 0,
           message: {
             role: 'assistant',
-            content: result.response ?? '',
+            content: extractWorkersAIText(result),
             ...(normalizedToolCalls?.length ? { tool_calls: normalizedToolCalls } : {}),
           },
           finish_reason: result.tool_calls?.length ? 'tool_calls' : 'stop',
@@ -414,12 +465,13 @@ async function visionStreamShim(
   await ensureLicenseAccepted(ai, model)
 
   const inputs: Record<string, unknown> = { messages, max_tokens: DEFAULT_MAX_TOKENS }
+  applyModelInputDefaults(model, inputs)
   if (image) inputs.image = [...image]
 
   let text: string
   try {
-    const result = (await ai.run(model, inputs)) as { response?: string }
-    text = result.response ?? ''
+    const result = await ai.run(model, inputs)
+    text = extractWorkersAIText(result)
     if (!text) {
       text = '[Vision model returned an empty response. Try rephrasing your question.]'
     }
@@ -468,7 +520,11 @@ async function streamResponse(
 ): Promise<Response> {
   const response = (await ai.run(
     model,
-    { messages, stream: true, max_tokens: DEFAULT_MAX_TOKENS },
+    (() => {
+      const inputs: Record<string, unknown> = { messages, stream: true, max_tokens: DEFAULT_MAX_TOKENS }
+      applyModelInputDefaults(model, inputs)
+      return inputs
+    })(),
     { returnRawResponse: true },
   )) as Response
 
@@ -509,8 +565,10 @@ async function streamResponse(
         try {
           const parsed = JSON.parse(payload)
 
+          const parsedText = extractWorkersAIText(parsed)
+
           // Skip usage-only chunks (response is null or empty with usage)
-          if (parsed.response === null || (parsed.response === '' && parsed.usage)) {
+          if (parsed.response === null || (parsed.response === '' && parsed.usage) || !parsedText) {
             continue
           }
 
@@ -521,7 +579,7 @@ async function streamResponse(
             model,
             choices: [{
               index: 0,
-              delta: { content: parsed.response },
+              delta: { content: parsedText },
               finish_reason: null,
             }],
           }
@@ -551,9 +609,10 @@ async function nonStreamResponse(
   image?: Uint8Array | null,
 ): Promise<Response> {
   const inputs: Record<string, unknown> = { messages, max_tokens: DEFAULT_MAX_TOKENS }
+  applyModelInputDefaults(model, inputs)
   if (image) inputs.image = [...image]
 
-  const result = (await ai.run(model, inputs)) as { response?: string }
+  const result = await ai.run(model, inputs)
 
   const payload = {
     id: `chatcmpl-${Date.now()}`,
@@ -563,7 +622,7 @@ async function nonStreamResponse(
     choices: [
       {
         index: 0,
-        message: { role: 'assistant', content: result.response ?? '' },
+        message: { role: 'assistant', content: extractWorkersAIText(result) },
         finish_reason: 'stop',
       },
     ],
@@ -617,6 +676,7 @@ async function toolStreamShim(
     messages: wfMessages,
     max_tokens: DEFAULT_MAX_TOKENS,
   }
+  applyModelInputDefaults(model, inputs)
   if (tools?.length) inputs.tools = tools
 
   type WorkersAIToolCall = {
@@ -659,12 +719,14 @@ async function toolStreamShim(
   const base = { id: chatId, object: 'chat.completion.chunk', created, model }
   const chunks: string[] = []
 
+  const resultText = extractWorkersAIText(result)
+
   // Text content chunk (if present)
-  if (result.response) {
+  if (resultText) {
     chunks.push(
       `data: ${JSON.stringify({
         ...base,
-        choices: [{ index: 0, delta: { content: result.response } }],
+        choices: [{ index: 0, delta: { content: resultText } }],
       })}\n\n`,
     )
   }
