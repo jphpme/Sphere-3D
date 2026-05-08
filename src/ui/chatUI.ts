@@ -29,7 +29,7 @@ const CHAT_OPENED_KEY = 'sos-docent-seen'
 const MAX_MESSAGES = 200
 const MAX_PERSISTED_MESSAGES = 100
 
-export type ChatVoiceStatus = 'unsupported' | 'idle' | 'listening' | 'transcribing' | 'thinking'
+export type ChatVoiceStatus = 'unsupported' | 'idle' | 'listening' | 'transcribing' | 'thinking' | 'speaking'
 
 export interface ChatVoiceState {
   status: ChatVoiceStatus
@@ -64,6 +64,8 @@ let isListening = false
 let voiceTranscriptBase = ''
 let voiceState: ChatVoiceState = { status: 'idle', transcript: '' }
 const voiceStateListeners = new Set<(state: ChatVoiceState) => void>()
+let responseAudio: HTMLAudioElement | null = null
+let responseAudioUrl: string | null = null
 let datasetPromptTimer: ReturnType<typeof setTimeout> | null = null
 /** Tier B dwell handle for the chat panel — non-null while the
  * panel is open. Started in openChat(), stopped in closeChat().
@@ -518,7 +520,7 @@ async function transcribeAndSendVoice(chunks: Blob[], type: string): Promise<voi
       headers: { 'Content-Type': audio.type || 'application/octet-stream' },
       body: audio,
     })
-    const data = await res.json().catch(() => ({})) as { text?: string; error?: string }
+    const data = await parseJsonResponse<{ text?: string; error?: string }>(res)
     if (!res.ok || !data.text?.trim()) {
       throw new Error(data.error || 'Voice transcription failed')
     }
@@ -526,7 +528,7 @@ async function transcribeAndSendVoice(chunks: Blob[], type: string): Promise<voi
     input.style.height = 'auto'
     input.style.height = Math.min(input.scrollHeight, 96) + 'px'
     setVoiceState('thinking', input.value)
-    await handleSend()
+    await handleSend({ voice: true })
   } catch (err) {
     logger.warn('[Chat] Voice transcription failed:', err)
     setVoiceState('idle')
@@ -536,6 +538,78 @@ async function transcribeAndSendVoice(chunks: Blob[], type: string): Promise<voi
 
 function joinSpeechText(base: string, addition: string): string {
   return [base.trim(), addition.trim()].filter(Boolean).join(' ').trim()
+}
+
+async function speakResponse(text: string): Promise<void> {
+  const spokenText = toSpeechText(text)
+  if (!spokenText) {
+    setVoiceState('idle', '')
+    return
+  }
+
+  stopResponseAudio()
+  setVoiceState('speaking', '')
+
+  try {
+    const res = await fetch('/api/voice/speak', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: spokenText }),
+    })
+    if (!res.ok) {
+      const data = await parseJsonResponse<{ error?: string }>(res)
+      throw new Error(data.error || 'Speech synthesis failed')
+    }
+    const audioBlob = await res.blob()
+    responseAudioUrl = URL.createObjectURL(audioBlob)
+    responseAudio = new Audio(responseAudioUrl)
+    responseAudio.onended = () => {
+      stopResponseAudio()
+      setVoiceState('idle', '')
+    }
+    responseAudio.onerror = () => {
+      stopResponseAudio()
+      setVoiceState('idle', '')
+    }
+    await responseAudio.play()
+  } catch (err) {
+    logger.warn('[Chat] Voice response playback failed:', err)
+    stopResponseAudio()
+    setVoiceState('idle', '')
+  }
+}
+
+async function parseJsonResponse<T>(res: Response): Promise<T> {
+  const text = await res.text().catch(() => '')
+  if (!text) return {} as T
+  try {
+    return JSON.parse(text) as T
+  } catch {
+    return { error: text } as T
+  }
+}
+
+function stopResponseAudio(): void {
+  if (responseAudio) {
+    responseAudio.pause()
+    responseAudio.src = ''
+    responseAudio = null
+  }
+  if (responseAudioUrl) {
+    URL.revokeObjectURL(responseAudioUrl)
+    responseAudioUrl = null
+  }
+}
+
+function toSpeechText(text: string): string {
+  return text
+    .replace(/<?<(LOAD|FLY|TIME|BOUNDS|MARKER|LABELS|REGION):[^>]+>>?\n?/g, '')
+    .replace(/\[\[LOAD:[^\]]+\]\]/g, '')
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '$1')
+    .replace(/\*\*(.+?)\*\*/g, '$1')
+    .replace(/[*_`>#]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
 }
 
 /** Wire DOM event listeners for the chat panel: trigger, input, send, settings, vision toggle. */
@@ -809,13 +883,15 @@ async function handleSettingsTest(): Promise<void> {
 
 // --- Send / receive ---
 
-async function handleSend(): Promise<void> {
+async function handleSend(options: { voice?: boolean } = {}): Promise<void> {
   const input = document.getElementById('chat-input') as HTMLTextAreaElement | null
   if (!input || !callbacks || isStreaming) return
 
   const text = input.value.trim()
   if (!text) return
   if (isListening) stopVoiceRecording()
+  const shouldSpeakResponse = options.voice === true
+  if (!shouldSpeakResponse) stopResponseAudio()
 
   // Add user message
   const userMsg: ChatMessage = {
@@ -1036,7 +1112,11 @@ async function handleSend(): Promise<void> {
   renderMessages()
   scrollToBottom()
   saveSession()
-  if (voiceState.status === 'thinking') setVoiceState('idle', '')
+  if (shouldSpeakResponse) {
+    void speakResponse(docentMsg.text)
+  } else if (voiceState.status === 'thinking' || voiceState.status === 'speaking') {
+    setVoiceState('idle', '')
+  }
   callbacks.announce('Docent responded')
 }
 

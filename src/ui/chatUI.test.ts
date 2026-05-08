@@ -18,6 +18,9 @@ import {
 
 const originalMediaDevicesDescriptor = Object.getOwnPropertyDescriptor(navigator, 'mediaDevices')
 const originalMediaRecorderDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'MediaRecorder')
+const originalAudioDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'Audio')
+const originalCreateObjectUrlDescriptor = Object.getOwnPropertyDescriptor(URL, 'createObjectURL')
+const originalRevokeObjectUrlDescriptor = Object.getOwnPropertyDescriptor(URL, 'revokeObjectURL')
 
 vi.mock('../services/docentService', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../services/docentService')>()
@@ -83,6 +86,9 @@ afterEach(() => {
   vi.restoreAllMocks()
   restoreProperty(navigator, 'mediaDevices', originalMediaDevicesDescriptor)
   restoreProperty(globalThis, 'MediaRecorder', originalMediaRecorderDescriptor)
+  restoreProperty(globalThis, 'Audio', originalAudioDescriptor)
+  restoreProperty(URL, 'createObjectURL', originalCreateObjectUrlDescriptor)
+  restoreProperty(URL, 'revokeObjectURL', originalRevokeObjectUrlDescriptor)
   resetDegradedForTests()
 })
 
@@ -347,7 +353,7 @@ describe('handleSend streaming', () => {
     })
   })
 
-  it('sends a final voice transcript as a chat message', async () => {
+  it('sends a final voice transcript as a chat message and speaks the answer', async () => {
     const { processMessage } = await import('../services/docentService')
     const mockedProcessMessage = vi.mocked(processMessage)
 
@@ -374,11 +380,28 @@ describe('handleSend streaming', () => {
         this.onstop?.(new Event('stop'))
       })
     }
+    const play = vi.fn(async () => undefined)
+    class MockAudio {
+      onended: (() => void) | null = null
+      onerror: (() => void) | null = null
+      src: string
+      constructor(src: string) {
+        this.src = src
+      }
+      play = play
+      pause = vi.fn()
+    }
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
       if (String(input).includes('/api/voice/transcribe')) {
         return new Response(JSON.stringify({ text: 'What are ocean currents?' }), {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      if (String(input).includes('/api/voice/speak')) {
+        return new Response(new Blob(['audio'], { type: 'audio/mpeg' }), {
+          status: 200,
+          headers: { 'Content-Type': 'audio/mpeg' },
         })
       }
       return new Response('{}', { status: 404 })
@@ -392,6 +415,9 @@ describe('handleSend streaming', () => {
       configurable: true,
     })
     Object.defineProperty(globalThis, 'MediaRecorder', { value: MockMediaRecorder, configurable: true })
+    Object.defineProperty(globalThis, 'Audio', { value: MockAudio, configurable: true })
+    Object.defineProperty(URL, 'createObjectURL', { value: vi.fn(() => 'blob:voice-answer'), configurable: true })
+    Object.defineProperty(URL, 'revokeObjectURL', { value: vi.fn(), configurable: true })
 
     initChatUI(makeCallbacks())
     document.getElementById('chat-voice-toggle')?.click()
@@ -413,6 +439,14 @@ describe('handleSend streaming', () => {
         undefined,
         undefined,
       )
+      expect(fetchSpy).toHaveBeenCalledWith(
+        '/api/voice/speak',
+        expect.objectContaining({
+          method: 'POST',
+          body: expect.stringContaining('Ocean currents move heat.'),
+        }),
+      )
+      expect(play).toHaveBeenCalled()
     })
   })
 
