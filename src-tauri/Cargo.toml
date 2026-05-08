@@ -1,8 +1,8 @@
 [package]
 name = "terraviz"
 version = "0.1.0"
-description = "Terraviz — NOAA Science On a Sphere desktop app"
-authors = ["Zyra Project"]
+description = "AYNI by Pachamama Studios - interactive Earth science globe"
+authors = ["Pachamama Studios"]
 edition = "2021"
 
 # Library target — required by Android (cdylib) and iOS (staticlib).

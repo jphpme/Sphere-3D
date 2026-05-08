@@ -71,6 +71,16 @@ describe('validateAssetInit', () => {
     expect(result.value.kind).toBe('data')
   })
 
+  it('accepts a DASH MPD data upload', () => {
+    const result = validateAssetInit({
+      kind: 'data',
+      mime: 'application/dash+xml',
+      size: 50_000,
+      content_digest: HAPPY_DIGEST,
+    })
+    expect(result.ok).toBe(true)
+  })
+
   it('accepts an image thumbnail', () => {
     const result = validateAssetInit({
       kind: 'thumbnail',
@@ -202,6 +212,7 @@ describe('maxSizeForKind', () => {
 describe('extForMime', () => {
   it('maps allowlist mimes onto the documented extensions', () => {
     expect(extForMime('video/mp4')).toBe('mp4')
+    expect(extForMime('application/dash+xml')).toBe('mpd')
     expect(extForMime('image/png')).toBe('png')
     expect(extForMime('image/jpeg')).toBe('jpg')
     expect(extForMime('image/webp')).toBe('webp')

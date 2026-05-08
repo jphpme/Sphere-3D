@@ -477,8 +477,36 @@ const datasetFragSrc = `#version 300 es
   in vec2 vUV;
   out vec4 fragColor;
 
+  vec4 premultiply(vec4 c) {
+    c.rgb *= c.a;
+    return c;
+  }
+
+  vec4 readDatasetTexel(ivec2 p) {
+    ivec2 size = textureSize(uDatasetTex, 0);
+    int x = int(mod(float(p.x), float(size.x)));
+    int y = clamp(p.y, 0, size.y - 1);
+    return texelFetch(uDatasetTex, ivec2(x, y), 0);
+  }
+
+  vec4 samplePremultipliedBilinear(vec2 uv) {
+    ivec2 size = textureSize(uDatasetTex, 0);
+    vec2 coord = uv * vec2(size) - 0.5;
+    ivec2 base = ivec2(floor(coord));
+    vec2 f = fract(coord);
+
+    vec4 c00 = premultiply(readDatasetTexel(base));
+    vec4 c10 = premultiply(readDatasetTexel(base + ivec2(1, 0)));
+    vec4 c01 = premultiply(readDatasetTexel(base + ivec2(0, 1)));
+    vec4 c11 = premultiply(readDatasetTexel(base + ivec2(1, 1)));
+
+    return mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
+  }
+
   void main() {
-    fragColor = texture(uDatasetTex, vUV);
+    vec4 color = samplePremultipliedBilinear(vUV);
+    if (color.a <= 0.001) discard;
+    fragColor = color;
   }
 `
 
@@ -1052,18 +1080,25 @@ export function createEarthTileLayer(): EarthTileLayerControl {
       gl2.cullFace(gl2.BACK)
       gl2.bindVertexArray(vao)
 
-      // --- Dataset overlay: opaque textured sphere (replaces earth effects) ---
+      // --- Dataset overlay: textured sphere over the current globe.
+      // Transparent VP9/DASH streams are straight-alpha media. Sampling
+      // them as ordinary RGBA leaks RGB from fully transparent pixels
+      // into edge texels, which shows up as white fringes around sparse
+      // overlays such as precipitation. The shader manually filters in
+      // premultiplied space, so use premultiplied alpha blending here.
       if (datasetActive && dataset && datasetTex) {
         // For video datasets, re-upload the current frame every render.
         // Also re-upload on forceVideoUpdate (scrubbing while paused).
         if (datasetVideo && datasetVideo.readyState >= 2 && (!datasetVideo.paused || forceVideoUpdate)) {
           gl2.bindTexture(gl2.TEXTURE_2D, datasetTex)
+          gl2.pixelStorei(gl2.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false)
           gl2.texImage2D(gl2.TEXTURE_2D, 0, gl2.RGBA, gl2.RGBA, gl2.UNSIGNED_BYTE, datasetVideo)
           forceVideoUpdate = false
           if (!datasetVideo.paused) mapRef?.triggerRepaint()
         }
 
-        gl2.disable(gl2.BLEND)
+        gl2.enable(gl2.BLEND)
+        gl2.blendFunc(gl2.ONE, gl2.ONE_MINUS_SRC_ALPHA)
         gl2.useProgram(dataset.program)
         gl2.uniformMatrix4fv(dataset.matrixLoc, false, matrix)
         gl2.uniform1f(dataset.radiusScaleLoc, terrainRadiusScale)
@@ -1074,6 +1109,7 @@ export function createEarthTileLayer(): EarthTileLayerControl {
 
         // Restore GL state and return — no earth effects when dataset is active
         gl2.bindVertexArray(null)
+        gl2.disable(gl2.BLEND)
         gl2.enable(gl2.DEPTH_TEST)
         gl2.disable(gl2.CULL_FACE)
         return
@@ -1372,6 +1408,7 @@ export function createEarthTileLayer(): EarthTileLayerControl {
         datasetTex = glRef.createTexture()
       }
       glRef.bindTexture(glRef.TEXTURE_2D, datasetTex)
+      glRef.pixelStorei(glRef.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false)
       const source = fitImageToMaxTextureSize(glRef, image)
       glRef.texImage2D(glRef.TEXTURE_2D, 0, glRef.RGBA, glRef.RGBA, glRef.UNSIGNED_BYTE, source)
       glRef.generateMipmap(glRef.TEXTURE_2D)
@@ -1390,6 +1427,7 @@ export function createEarthTileLayer(): EarthTileLayerControl {
       }
       // Initialize with a single frame — render loop will update per-frame
       glRef.bindTexture(glRef.TEXTURE_2D, datasetTex)
+      glRef.pixelStorei(glRef.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false)
       glRef.texImage2D(glRef.TEXTURE_2D, 0, glRef.RGBA, glRef.RGBA, glRef.UNSIGNED_BYTE, video)
       // No mipmaps for video — LINEAR only (regenerating mipmaps per frame is expensive)
       glRef.texParameteri(glRef.TEXTURE_2D, glRef.TEXTURE_MIN_FILTER, glRef.LINEAR)

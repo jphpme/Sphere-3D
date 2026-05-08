@@ -44,6 +44,7 @@ const DESCRIPTION_MIN_CUT = 200
 const VIDEO_LOAD_TIMEOUT_MS = 20000
 const FIRST_FRAME_FALLBACK_MS = 150
 const SCRUBBER_MAX = '1000'
+const DASH_PREFLIGHT_BYTES = 512
 
 /** Callbacks the dataset loader uses to communicate with the main app. */
 export interface DatasetLoaderCallbacks {
@@ -176,6 +177,35 @@ function tryLoadImage(urls: string[]): Promise<HTMLImageElement> {
 
 // --- Video loading ---
 
+async function assertDashManifestReachable(dashUrl: string): Promise<void> {
+  let res: Response
+  try {
+    res = await fetch(dashUrl, {
+      headers: { Accept: 'application/dash+xml, application/xml, text/xml, */*' },
+    })
+  } catch (err) {
+    throw new Error(
+      `Unable to fetch DASH MPD ${dashUrl}. If this is a Cloudflare R2 URL, check CORS and VITE_REALTIME_DASH_BASE_URL. ` +
+      `${err instanceof Error ? err.message : String(err)}`,
+    )
+  }
+
+  if (!res.ok) {
+    const hint = dashUrl.startsWith('/realtime/') || dashUrl.startsWith('/forecast/')
+      ? ' The DASH index contains relative R2 paths; set VITE_REALTIME_DASH_BASE_URL or add baseUrl to realtime-dash-datasets.json.'
+      : ''
+    throw new Error(`DASH MPD fetch failed for ${dashUrl}: ${res.status} ${res.statusText}.${hint}`)
+  }
+
+  const text = await res.text()
+  if (!/<MPD[\s>]/i.test(text.slice(0, DASH_PREFLIGHT_BYTES))) {
+    const hint = dashUrl.startsWith('/realtime/') || dashUrl.startsWith('/forecast/')
+      ? ' This usually means Vite served the app HTML instead of the R2 MPD. Set VITE_REALTIME_DASH_BASE_URL or add baseUrl to realtime-dash-datasets.json.'
+      : ''
+    throw new Error(`DASH MPD fetch for ${dashUrl} did not return an MPD document.${hint}`)
+  }
+}
+
 /** Load a video dataset via HLS streaming, set up the video texture, and configure playback controls. */
 export async function loadVideoDataset(
   dataset: Dataset,
@@ -185,10 +215,11 @@ export async function loadVideoDataset(
   playbackState: PlaybackState,
   callbacks: DatasetLoaderCallbacks,
   options: DatasetLoaderOptions = {},
-): Promise<{ hlsService: HLSService; videoTexture: VideoTextureHandle }> {
+): Promise<{ hlsService: HLSService; videoTexture: VideoTextureHandle; streamKind: 'hls' | 'dash' | 'direct' }> {
   const isPrimary = options.isPrimary ?? true
   const hlsService = new HLSService()
   const video = hlsService.createVideo()
+  let streamKind: 'hls' | 'dash' | 'direct' = 'direct'
 
   // Check for offline-cached version first
   const dl = await getDownload(dataset.id)
@@ -203,39 +234,67 @@ export async function loadVideoDataset(
       // Node-mode: fetch the manifest envelope directly. The backend
       // (`functions/api/v1/datasets/[id]/manifest.ts`) returns a
       // shape that's structurally identical to `VideoProxyResponse`
-      // for the fields the HLS path actually consumes (`hls`,
-      // `files[]`, `duration`, `title`, `id`) MINUS `dash` and
-      // PLUS a `kind: 'video' | 'image'` discriminator. Validate
+      // for the fields the stream path consumes (`hls`, `dash`,
+      // `files[]`, `duration`, `title`, `id`) PLUS a
+      // `kind: 'video' | 'image'` discriminator. Validate
       // `kind` first so an image dataset routed to the video loader
       // fails fast with a clear error rather than throwing at
       // `manifest.files.find(...)` later.
       const res = await apiFetch(dataset.dataLink, { headers: { Accept: 'application/json' } })
       if (!res.ok) throw new Error(`Manifest fetch failed: ${res.status} ${res.statusText}`)
-      const envelope = (await res.json()) as Omit<VideoProxyResponse, 'dash'> & {
+      const envelope = (await res.json()) as VideoProxyResponse & {
         kind: 'video' | 'image'
       }
       if (envelope.kind !== 'video') {
         throw new Error(`Expected a video manifest; got kind=${envelope.kind}.`)
       }
-      // Backfill `dash` so the type matches downstream consumers
-      // that only read it via index-access; HLS.js never looks at
-      // it, the desktop offline path doesn't either.
-      manifest = { ...envelope, dash: '' }
+      manifest = envelope
     } else {
-      const vimeoId = dataService.extractVimeoId(dataset.dataLink)
-      if (!vimeoId) throw new Error(`Could not extract Vimeo ID from: ${dataset.dataLink}`)
-      manifest = await hlsService.fetchManifest(vimeoId)
+      if (dataset.format === 'application/dash+xml' || /\.mpd(\?|#|$)/i.test(dataset.dataLink)) {
+        manifest = {
+          id: dataset.id,
+          title: dataset.title,
+          duration: 0,
+          dash: dataset.dataLink,
+          files: [],
+        }
+      } else if (/\.m3u8(\?|#|$)/i.test(dataset.dataLink)) {
+        manifest = {
+          id: dataset.id,
+          title: dataset.title,
+          duration: 0,
+          hls: dataset.dataLink,
+          files: [],
+        }
+      } else {
+        const vimeoId = dataService.extractVimeoId(dataset.dataLink)
+        if (!vimeoId) throw new Error(`Could not extract Vimeo ID from: ${dataset.dataLink}`)
+        manifest = await hlsService.fetchManifest(vimeoId)
+      }
     }
     logger.info('[App] Video manifest received:', { duration: manifest.duration, qualities: manifest.files.length })
 
     try {
-      await hlsService.loadStream(manifest.hls, video, isMobile)
+      if (manifest.hls) {
+        streamKind = 'hls'
+        await hlsService.loadStream(manifest.hls, video, isMobile)
+      } else if (manifest.dash) {
+        streamKind = 'dash'
+        await assertDashManifestReachable(manifest.dash)
+        await hlsService.loadDash(manifest.dash, video, isMobile)
+      } else {
+        throw new Error('No HLS or DASH stream URL in manifest')
+      }
     } catch (hlsError) {
-      logger.warn('[App] HLS failed, falling back to direct MP4:', hlsError)
       const mp4File = manifest.files.find(f => f.quality === '1080p')
         ?? manifest.files.find(f => f.quality === '720p')
         ?? manifest.files.find(f => f.width && f.link)
-      if (!mp4File) throw new Error('No playable video source found')
+      if (!mp4File) {
+        logger.warn('[App] Stream load failed and no direct MP4 fallback is available:', hlsError)
+        throw hlsError instanceof Error ? hlsError : new Error('Stream load failed')
+      }
+      logger.warn('[App] Stream load failed, falling back to direct MP4:', hlsError)
+      streamKind = 'direct'
       await hlsService.loadDirect(mp4File.link, video)
     }
   }
@@ -316,7 +375,7 @@ export async function loadVideoDataset(
   }
 
   logger.info('[App] Video dataset loaded, duration:', video.duration, 's')
-  return { hlsService, videoTexture }
+  return { hlsService, videoTexture, streamKind }
 }
 
 // --- Dataset info panel ---
@@ -402,7 +461,7 @@ export function displayDatasetInfo(
 
   if (e?.catalogUrl) {
     html += `<p class="info-section-label">Source</p>`
-    html += `<a href="${e.catalogUrl}" target="_blank" rel="noopener" class="info-catalog-link">View on NOAA SOS →</a>`
+    html += `<a href="${e.catalogUrl}" target="_blank" rel="noopener" class="info-catalog-link">View source catalog →</a>`
   }
 
   infoBody.innerHTML = html

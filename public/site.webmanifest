@@ -1,6 +1,6 @@
 {
-  "name": "Terraviz",
-  "short_name": "Terraviz",
+  "name": "AYNI",
+  "short_name": "AYNI",
   "icons": [
     {
       "src": "/icon-192.png",
@@ -20,7 +20,7 @@
     {
       "name": "Privacy Policy",
       "short_name": "Privacy",
-      "description": "Read what Terraviz collects and how to turn it off",
+      "description": "Read what AYNI collects and how to turn it off",
       "url": "/privacy"
     }
   ]

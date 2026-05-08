@@ -93,6 +93,10 @@ describe('validateDraftCreate', () => {
     expect(validateDraftCreate({ title: 'Hello world', format: 'video/mp4' })).toEqual([])
   })
 
+  it('accepts DASH manifests as dataset format', () => {
+    expect(validateDraftCreate({ title: 'Cloud forecast', format: 'application/dash+xml' })).toEqual([])
+  })
+
   it('rejects an unknown format', () => {
     const errs = validateDraftCreate({ title: 'Hi there', format: 'video/avi' })
     expect(errs.some(e => e.field === 'format' && e.code === 'invalid_value')).toBe(true)

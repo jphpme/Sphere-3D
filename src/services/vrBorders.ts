@@ -13,9 +13,10 @@
  * Tools menu iterates MapLibre renderers only and the VR globe is
  * a Three.js sphere.
  *
- * Implementation: an equirectangular PNG (black lines on transparent
- * alpha) painted onto a sphere at radius * 1.001. Scales with the
- * globe via `setScale()`, tracks position and rotation via
+ * Implementation: an equirectangular PNG (line alpha on transparent
+ * background) painted as translucent white onto a sphere at
+ * radius * 1.001. Scales with the globe via `setScale()`, tracks
+ * position and rotation via
  * `setPosition()` + `setQuaternion()` — kept as a sibling mesh
  * rather than a child of the globe so the caller (vrScene) can
  * batch transform updates at the same time as ground shadow sync.
@@ -47,6 +48,7 @@ const BORDERS_RADIUS_FACTOR = 1.001
  * when the user rotates.
  */
 const BORDERS_SEGMENTS = 64
+const BORDERS_OPACITY = 0.55
 
 /**
  * Lazy-loaded shared texture + promise. Returned by
@@ -141,13 +143,43 @@ export function createVrBorders(
     BORDERS_SEGMENTS,
     BORDERS_SEGMENTS,
   )
-  const material = new THREE_.MeshBasicMaterial({
+  const material = new THREE_.ShaderMaterial({
+    uniforms: {
+      uMap: { value: null as THREE.Texture | null },
+      uColor: { value: new THREE_.Color(0xffffff) },
+      uOpacity: { value: BORDERS_OPACITY },
+    },
+    vertexShader: `
+      varying vec2 vUv;
+
+      void main() {
+        vUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      precision highp float;
+
+      uniform sampler2D uMap;
+      uniform vec3 uColor;
+      uniform float uOpacity;
+      varying vec2 vUv;
+
+      void main() {
+        vec4 tex = texture2D(uMap, vUv);
+        float lineAlpha = tex.a * uOpacity;
+        if (lineAlpha < 0.01) discard;
+        gl_FragColor = vec4(uColor * lineAlpha, lineAlpha);
+      }
+    `,
     transparent: true,
-    // Texture slot is filled in asynchronously once the PNG loads.
-    // Until then, the mesh stays invisible via the .visible flag
-    // below so we never flash an untextured shell.
-    map: null,
     depthWrite: false,
+    depthTest: true,
+    blending: THREE_.CustomBlending,
+    blendEquation: THREE_.AddEquation,
+    blendSrc: THREE_.OneFactor,
+    blendDst: THREE_.OneMinusSrcAlphaFactor,
+    premultipliedAlpha: true,
     // `depthTest` STAYS enabled — unlike the HUD panels, borders
     // must read the globe's depth so lines on the back of the
     // sphere don't bleed through when the user is looking at the
@@ -161,6 +193,7 @@ export function createVrBorders(
   mesh.renderOrder = 1
 
   let textureLoadKicked = false
+  let hasTexture = false
   /**
    * True iff this handle has incremented {@link sharedHandleRefCount}
    * at least once and hasn't yet decremented in dispose. Tracked
@@ -185,7 +218,8 @@ export function createVrBorders(
     void loadSharedBordersTexture(THREE_).then(
       (tex) => {
         if (disposed) return
-        material.map = tex
+        material.uniforms.uMap.value = tex
+        hasTexture = true
         material.needsUpdate = true
       },
       () => {
@@ -213,14 +247,14 @@ export function createVrBorders(
         // otherwise wait for the load callback above to set the map
         // first (prevents a one-frame white sphere while the PNG
         // downloads).
-        if (material.map) mesh.visible = true
+        if (hasTexture) mesh.visible = true
         else {
           // Promise-based: become visible the instant the texture
           // resolves. Repeated setVisible(true) calls while loading
           // piggyback on the same promise thanks to the shared-cache
           // short-circuit at the top of loadSharedBordersTexture.
           void loadSharedBordersTexture(THREE_).then(() => {
-            if (!disposed && material.map) mesh.visible = true
+            if (!disposed && hasTexture) mesh.visible = true
           }).catch(() => { /* handled above */ })
         }
       } else {

@@ -35,14 +35,13 @@
     "src/utils/debounce.ts"
   ],
   "out": "dist/docs",
-  "name": "Terraviz — API Reference",
+  "name": "AYNI API Reference",
   "readme": "none",
   "excludePrivate": false,
   "excludeInternal": true,
   "includeVersion": true,
   "navigationLinks": {
-    "Live Site": "https://terraviz.zyra-project.org",
-    "GitHub": "https://github.com/zyra-project/terraviz"
+    "Original Project": "https://github.com/zyra-project/terraviz"
   },
   "categorizeByGroup": true,
   "sort": ["source-order"]

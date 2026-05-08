@@ -160,7 +160,7 @@ describe('displayDatasetInfo', () => {
     const link = document.querySelector('.info-catalog-link') as HTMLAnchorElement
     expect(link).not.toBeNull()
     expect(link.href).toContain('sos.noaa.gov')
-    expect(link.textContent).toContain('View on NOAA SOS')
+    expect(link.textContent).toContain('View source catalog')
   })
 
   it('toggles expand/collapse when header is clicked', () => {

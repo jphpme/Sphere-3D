@@ -12,6 +12,7 @@ import { apiFetch, getCatalogSource } from './catalogSource'
 const METADATA_URL = 'https://s3.dualstack.us-east-1.amazonaws.com/metadata.sosexplorer.gov/dataset.json'
 const ENRICHED_METADATA_URL = '/assets/sos_dataset_metadata.json'
 const NODE_CATALOG_URL = '/api/v1/catalog'
+const REALTIME_DASH_INDEX_URL = '/assets/realtime-dash-datasets.json'
 
 /**
  * Tour datasets from the upstream SOS catalog that we suppress from the UI
@@ -73,6 +74,26 @@ interface WireDataset {
   tourJsonUrl?: string
 }
 
+interface RealtimeDashIndex {
+  baseUrl?: string
+  generatedAt?: string
+  datasets?: RealtimeDashEntry[]
+}
+
+interface RealtimeDashEntry {
+  id: string
+  name?: string
+  display_name?: string
+  description?: string
+  provider?: string
+  type?: string
+  categories?: string[]
+  units?: string
+  mpd: string
+  thumbnail?: string
+  colorbar?: string
+}
+
 /**
  * Built-in tour datasets shared by the SOS-source and node-source
  * paths. Pulled out as a function so both call sites get identical
@@ -86,7 +107,7 @@ function sampleTourBuiltins(): Dataset[] {
       title: "Climate Connections — How Earth's Systems Tell One Story",
       format: 'tour/json',
       dataLink: '/assets/test-tour.json',
-      organization: 'Terraviz',
+      organization: 'Pachamama Studios',
       abstractTxt:
         "An educational tour exploring how climate change shows up across Earth's systems — temperature anomalies, Arctic sea ice loss, sea level rise, ocean acidification, the carbon cycle, and global vegetation. Six datasets, one connected story.",
       tags: ['Tours'],
@@ -98,14 +119,85 @@ function sampleTourBuiltins(): Dataset[] {
       title: 'Climate Futures — Three Paths to 2100',
       format: 'tour/json',
       dataLink: '/assets/climate-futures-tour.json',
-      organization: 'Terraviz',
+      organization: 'Pachamama Studios',
       abstractTxt:
-        "Compare three possible climate futures side by side using NOAA's SSP scenario models. Single-globe, two-globe, and four-globe layouts walk through air temperature, precipitation, sea surface temperature, and sea ice concentration across the SSP1 (Sustainability), SSP2 (Middle of the Road), and SSP5 (Fossil-fueled Development) pathways from 2015 to 2100.",
+        "Compare three possible climate futures side by side using SSP scenario models. Single-globe, two-globe, and four-globe layouts walk through air temperature, precipitation, sea surface temperature, and sea ice concentration across the SSP1 (Sustainability), SSP2 (Middle of the Road), and SSP5 (Fossil-fueled Development) pathways from 2015 to 2100.",
       tags: ['Tours'],
       weight: 49,
       thumbnailLink: '',
     },
   ]
+}
+
+function realtimeDashBaseUrl(index: RealtimeDashIndex): string {
+  const configured = (import.meta.env.VITE_REALTIME_DASH_BASE_URL as string | undefined)?.trim()
+  return configured || index.baseUrl?.trim() || ''
+}
+
+function resolveRealtimeDashAsset(pathOrUrl: string | undefined, baseUrl: string): string | undefined {
+  if (!pathOrUrl) return undefined
+  if (/^https?:\/\//i.test(pathOrUrl)) return pathOrUrl
+  const clean = pathOrUrl.replace(/^\/+/, '')
+  if (!baseUrl) return `/${clean}`
+  return new URL(clean, baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`).toString()
+}
+
+function prefixedRealtimeDashTitle(rawTitle: string, isForecast: boolean): string {
+  const cleanTitle = rawTitle.trim() || 'Untitled dataset'
+  const titleWithoutKind = cleanTitle.replace(/^(?:Real Time|Forecast):\s*/i, '')
+  return `${isForecast ? 'Forecast' : 'Real Time'}: ${titleWithoutKind}`
+}
+
+async function fetchRealtimeDashDatasets(): Promise<Dataset[]> {
+  try {
+    const res = await fetch(REALTIME_DASH_INDEX_URL, { headers: { Accept: 'application/json' } })
+    if (!res.ok) {
+      if (res.status !== 404) {
+        logger.warn(`[DataService] Real-time DASH index fetch failed: ${res.status} ${res.statusText}`)
+      }
+      return []
+    }
+
+    const index = (await res.json()) as RealtimeDashIndex
+    const entries = Array.isArray(index.datasets) ? index.datasets : []
+    const baseUrl = realtimeDashBaseUrl(index)
+    return entries
+      .filter(entry => entry.id && entry.mpd)
+      .map((entry, i) => {
+        const isForecast = entry.mpd.startsWith('forecast/') || entry.type === 'forecast'
+        const title = prefixedRealtimeDashTitle(entry.display_name ?? entry.name ?? entry.id, isForecast)
+        const categories = entry.categories ?? []
+        const tags = Array.from(new Set([
+          isForecast ? 'Forecast' : 'Real Time',
+          'DASH',
+          ...categories,
+          ...(entry.units ? [entry.units] : []),
+        ]))
+        return {
+          id: `R2_DASH_${entry.id}`,
+          title,
+          format: 'application/dash+xml',
+          dataLink: resolveRealtimeDashAsset(entry.mpd, baseUrl) ?? entry.mpd,
+          organization: entry.provider ? entry.provider.toUpperCase() : 'Cloudflare R2',
+          abstractTxt: entry.description,
+          thumbnailLink: resolveRealtimeDashAsset(entry.thumbnail, baseUrl),
+          legendLink: resolveRealtimeDashAsset(entry.colorbar, baseUrl),
+          tags,
+          realtimeKind: isForecast ? 'forecast' : 'real-time',
+          defaultBordersVisible: true,
+          weight: 10_000 - i,
+          enriched: {
+            description: entry.description,
+            categories: { Source: [isForecast ? 'Forecast' : 'Real Time'], Topic: categories },
+            keywords: tags,
+            dateAdded: index.generatedAt,
+          },
+        } satisfies Dataset
+      })
+  } catch (error) {
+    logger.warn('[DataService] Could not load real-time DASH index, continuing without it', error)
+    return []
+  }
 }
 
 /**
@@ -163,12 +255,14 @@ export class DataService {
       }
 
       const source = getCatalogSource()
+      const realtimeDashDatasets = await fetchRealtimeDashDatasets()
       if (source === 'node') {
         const datasets = await this.fetchDatasetsFromNode()
-        this.cache = { datasets }
+        const allDatasets = [...realtimeDashDatasets, ...datasets]
+        this.cache = { datasets: allDatasets }
         this.cacheTime = now
-        logger.info(`[DataService] Loaded ${datasets.length} datasets from node catalog`)
-        return datasets
+        logger.info(`[DataService] Loaded ${allDatasets.length} datasets from node catalog + real-time DASH index`)
+        return allDatasets
       }
 
       logger.info('[DataService] Fetching datasets from SOS API...')
@@ -189,7 +283,7 @@ export class DataService {
       // Build enriched lookup map by normalized title
       this.enrichedMap = this.buildEnrichedMap(enrichedData)
 
-      const rawDatasets = [...s3Response.data.datasets, ...sampleTourBuiltins()].map(
+      const rawDatasets = [...realtimeDashDatasets, ...s3Response.data.datasets, ...sampleTourBuiltins()].map(
         normaliseSourceFormat,
       )
 
@@ -415,7 +509,7 @@ export class DataService {
       if (timeInfo.startTime && timeInfo.endTime && dataset.period) {
         timeInfo.displayMode = 'temporal'
         timeInfo.hasTemporalData = true
-      } else if (dataset.format === 'video/mp4' && (timeInfo.startTime || timeInfo.endTime)) {
+      } else if (this.isVideoDataset(dataset) && (timeInfo.startTime || timeInfo.endTime)) {
         timeInfo.displayMode = 'temporal'
         timeInfo.hasTemporalData = true
       } else {
@@ -434,9 +528,9 @@ export class DataService {
     return this.isVideoDataset(dataset) || this.isImageDataset(dataset) || this.isTourDataset(dataset)
   }
 
-  /** True if the dataset format is `video/mp4`. */
+  /** True if the dataset format is a playable video or adaptive stream. */
   isVideoDataset(dataset: Dataset): boolean {
-    return dataset.format === 'video/mp4'
+    return dataset.format === 'video/mp4' || dataset.format === 'application/dash+xml'
   }
 
   /**

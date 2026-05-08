@@ -39,7 +39,8 @@ interface VideoBody {
   id: string
   title: string
   duration: number
-  hls: string
+  hls?: string
+  dash?: string
   files: Array<{ quality: string; type: string; link: string; size: number }>
 }
 
@@ -234,6 +235,26 @@ describe('GET /api/v1/datasets/{id}/manifest', () => {
     ])
   })
 
+  it('returns a DASH manifest for url:<href> + application/dash+xml format', async () => {
+    const sqlite = seedFixtures({ count: 1 })
+    sqlite
+      .prepare(
+        `UPDATE datasets SET data_ref = 'url:https://example.com/stream.mpd',
+                              format = 'application/dash+xml'
+         WHERE slug = 'dataset-0'`,
+      )
+      .run()
+    const env = { CATALOG_DB: asD1(sqlite), CATALOG_KV: makeKV() }
+    const ctx = makeCtx<'id'>({ env, params: { id: 'DS000AAAAAAAAAAAAAAAAAAAAA' } })
+    const res = await onRequestGet(ctx)
+    expect(res.status).toBe(200)
+    const body = await readJson<VideoBody>(res)
+    expect(body.kind).toBe('video')
+    expect(body.hls).toBeUndefined()
+    expect(body.dash).toBe('https://example.com/stream.mpd')
+    expect(body.files).toEqual([])
+  })
+
   it('returns the variant ladder for url:<href> + image format', async () => {
     const sqlite = seedFixtures({ count: 1 })
     sqlite
@@ -362,6 +383,29 @@ describe('GET /api/v1/datasets/{id}/manifest', () => {
     expect(body.kind).toBe('image')
     expect(body.variants).toEqual([])
     expect(body.fallback).toContain('mock-r2.localhost/terraviz-assets/datasets/x/asset.png')
+  })
+
+  it('resolves an r2: DASH manifest to a video manifest with a DASH playback URL', async () => {
+    const sqlite = seedFixtures({ count: 1 })
+    sqlite
+      .prepare(
+        `UPDATE datasets SET data_ref = 'r2:realtime/noaa/clouds/stream.mpd',
+                              format = 'application/dash+xml'
+         WHERE slug = 'dataset-0'`,
+      )
+      .run()
+    const env = {
+      CATALOG_DB: asD1(sqlite),
+      CATALOG_KV: makeKV(),
+      R2_PUBLIC_BASE: 'https://assets.example.com',
+    }
+    const ctx = makeCtx<'id'>({ env, params: { id: 'DS000AAAAAAAAAAAAAAAAAAAAA' } })
+    const res = await onRequestGet(ctx)
+    expect(res.status).toBe(200)
+    const body = await readJson<VideoBody>(res)
+    expect(body.kind).toBe('video')
+    expect(body.dash).toBe('https://assets.example.com/realtime/noaa/clouds/stream.mpd')
+    expect(body.files).toEqual([])
   })
 
   it('returns 503 r2_unconfigured when no R2 read-URL source is set', async () => {

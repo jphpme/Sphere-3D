@@ -60,7 +60,8 @@ interface VideoManifest {
   id: string
   title: string
   duration: number
-  hls: string
+  hls?: string
+  dash?: string
   files: VideoProxyFile[]
 }
 
@@ -155,6 +156,16 @@ async function fetchVimeoManifest(
  * MIME type so the frontend can choose the right code path.
  */
 function externalVideoManifest(id: string, href: string, format: string): VideoManifest {
+  if (format === 'application/dash+xml' || /\.mpd(\?|#|$)/i.test(href)) {
+    return {
+      kind: 'video',
+      id,
+      title: '',
+      duration: 0,
+      dash: href,
+      files: [],
+    }
+  }
   return {
     kind: 'video',
     id,
@@ -188,7 +199,7 @@ export async function resolveManifest(
     }
   }
 
-  const isVideo = row.format.startsWith('video/')
+  const isVideo = row.format.startsWith('video/') || row.format === 'application/dash+xml'
   const isImage = row.format.startsWith('image/')
 
   if (parsed.scheme === 'vimeo') {

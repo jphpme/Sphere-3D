@@ -151,8 +151,8 @@ function createGlobeStyle(): StyleSpecification {
         filter: ['==', 'class', 'ocean'],
         layout: { visibility: 'none' },
         paint: {
-          'line-color': 'rgba(0, 0, 0, 0.5)',
-          'line-width': ['interpolate', ['linear'], ['zoom'], 0, 2, 5, 4, 8, 5],
+          'line-color': 'rgba(0, 0, 0, 0.22)',
+          'line-width': ['interpolate', ['linear'], ['zoom'], 0, 1.4, 5, 2.6, 8, 3.2],
         },
       },
       {
@@ -163,8 +163,8 @@ function createGlobeStyle(): StyleSpecification {
         filter: ['==', 'class', 'ocean'],
         layout: { visibility: 'none' },
         paint: {
-          'line-color': 'rgba(255, 255, 255, 0.7)',
-          'line-width': ['interpolate', ['linear'], ['zoom'], 0, 0.6, 5, 1.5, 8, 2],
+          'line-color': 'rgba(255, 255, 255, 0.46)',
+          'line-width': ['interpolate', ['linear'], ['zoom'], 0, 0.45, 5, 1.1, 8, 1.6],
         },
       },
       {
@@ -175,8 +175,8 @@ function createGlobeStyle(): StyleSpecification {
         filter: ['all', ['==', 'admin_level', 2], ['!=', 'maritime', 1]],
         layout: { visibility: 'none' },
         paint: {
-          'line-color': 'rgba(0, 0, 0, 0.6)',
-          'line-width': ['interpolate', ['linear'], ['zoom'], 0, 2.5, 5, 5, 8, 6],
+          'line-color': 'rgba(0, 0, 0, 0.24)',
+          'line-width': ['interpolate', ['linear'], ['zoom'], 0, 1.6, 5, 3.2, 8, 4],
         },
       },
       {
@@ -187,8 +187,8 @@ function createGlobeStyle(): StyleSpecification {
         filter: ['all', ['==', 'admin_level', 2], ['!=', 'maritime', 1]],
         layout: { visibility: 'none' },
         paint: {
-          'line-color': 'rgba(255, 255, 255, 0.85)',
-          'line-width': ['interpolate', ['linear'], ['zoom'], 0, 0.8, 5, 2, 8, 3],
+          'line-color': 'rgba(255, 255, 255, 0.52)',
+          'line-width': ['interpolate', ['linear'], ['zoom'], 0, 0.6, 5, 1.4, 8, 2],
         },
       },
       {
@@ -690,7 +690,7 @@ export class MapRenderer implements GlobeRenderer {
     return show
   }
 
-  /** Show or hide boundary + coastline lines. */
+  /** Show or hide transparent country boundary + coastline reference lines. */
   toggleBoundaries(visible?: boolean): boolean {
     if (!this.map || !this.map.isStyleLoaded()) return false
     let current: string | undefined

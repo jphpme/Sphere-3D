@@ -299,7 +299,7 @@ function buildPanel(snapshot: ReturnType<typeof snapshotPanelCredits>, panelCoun
     </section>
     ${loadedHtml}
     <div class="privacy-ui-meta">
-      <a class="privacy-ui-policy-link" href="https://github.com/zyra-project/terraviz/blob/main/MISSION.md" target="_blank" rel="noopener">About TerraViz →</a>
+      <a class="privacy-ui-policy-link" href="https://github.com/zyra-project/terraviz/blob/main/MISSION.md" target="_blank" rel="noopener">Original TerraViz project citation →</a>
     </div>
   `
 

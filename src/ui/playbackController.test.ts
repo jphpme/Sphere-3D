@@ -116,6 +116,7 @@ describe('startPlaybackLoop / stopPlaybackLoop', () => {
 // ---------------------------------------------------------------------------
 describe('togglePlayPause', () => {
   beforeEach(() => {
+    vi.useRealTimers()
     document.body.innerHTML = '<button id="play-btn"></button>'
   })
 
@@ -144,6 +145,27 @@ describe('togglePlayPause', () => {
   it('does nothing when hlsService is null', () => {
     const appState = makeAppState()
     expect(() => togglePlayPause(null, appState, vi.fn())).not.toThrow()
+  })
+
+  it('nudges a video that starts playing but remains stalled at zero', () => {
+    vi.useFakeTimers()
+    const videoState = { paused: false, currentTime: 0, duration: 60 }
+    const video = {
+      get paused() { return videoState.paused },
+      get currentTime() { return videoState.currentTime },
+      set currentTime(v: number) { videoState.currentTime = v },
+      get duration() { return videoState.duration },
+      readyState: 4,
+    }
+    const hls = makeMockHls({ paused: true })
+    hls.getVideo = vi.fn().mockReturnValue(video)
+    const appState = makeAppState()
+
+    togglePlayPause(hls, appState, vi.fn())
+    vi.advanceTimersByTime(700)
+
+    expect(videoState.currentTime).toBeCloseTo(0.25)
+    expect(hls.play).toHaveBeenCalledTimes(2)
   })
 })
 

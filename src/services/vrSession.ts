@@ -22,6 +22,7 @@ import { createVrBrowse, type VrBrowseHandle } from './vrBrowse'
 import { createVrTourControls, type VrTourControlsHandle } from './vrTourControls'
 import { createVrTourOverlay, type VrTourOverlayHandle } from './vrTourOverlay'
 import { createVrTimeLabel, type VrTimeLabelHandle } from './vrTimeLabel'
+import { createVrLegendPanel, type VrLegendPanelHandle } from './vrLegendPanel'
 import { setVrTourOverlaySink } from '../ui/tourUI'
 import { createVrInteraction, type VrInteractionHandle } from './vrInteraction'
 import { createVrLoading, type VrLoadingHandle } from './vrLoading'
@@ -65,6 +66,8 @@ export interface VrSessionContext {
   getDatasetTexture(): VrDatasetTexture | null
   /** Dataset title for the HUD (primary panel). null/empty → "No dataset loaded". */
   getDatasetTitle(): string | null
+  /** Legend/colorbar image URL for the primary dataset, if available. */
+  getDatasetLegendUrl(): string | null
   /** Dataset id for the primary panel — used by analytics events
    * fired from inside VR (e.g. `vr_placement.layer_id`). Null when
    * no dataset is loaded. Telemetry-only: the HUD itself uses
@@ -215,6 +218,8 @@ interface ActiveSession {
   tourOverlay: VrTourOverlayHandle
   /** Floating date readout above the globe for datasets with time metadata. */
   timeLabel: VrTimeLabelHandle
+  /** AR-only floating legend/colorbar panel. Null for VR mode. */
+  legendPanel: VrLegendPanelHandle | null
   /** Loading scene shown during entry; null after fade-out + dispose. */
   loading: VrLoadingHandle | null
   /** AR-only spatial placement (hit-test reticle + Place button). Null when hit-test unavailable. */
@@ -461,20 +466,36 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     optionalFeatures.push('anchors')
   }
   let session: XRSession
+  let referenceSpaceType: XRReferenceSpaceType = 'local-floor'
   try {
     session = await navigator.xr.requestSession(sessionMode, {
       requiredFeatures: ['local-floor'],
       ...(optionalFeatures.length > 0 ? { optionalFeatures } : {}),
     })
   } catch (err) {
-    canvas.remove()
-    renderer.dispose()
-    throw err instanceof Error ? err : new Error(String(err))
+    if (!isAr) {
+      canvas.remove()
+      renderer.dispose()
+      throw err instanceof Error ? err : new Error(String(err))
+    }
+
+    logger.debug('[VR] AR local-floor session request failed; retrying with local reference space:', err)
+    referenceSpaceType = 'local'
+    try {
+      session = await navigator.xr.requestSession(sessionMode, {
+        ...(optionalFeatures.length > 0 ? { optionalFeatures } : {}),
+      })
+    } catch (fallbackErr) {
+      canvas.remove()
+      renderer.dispose()
+      throw fallbackErr instanceof Error ? fallbackErr : new Error(String(fallbackErr))
+    }
   }
 
   // Bind the session to the renderer. Three.js handles
   // makeXRCompatible + baseLayer setup internally.
   try {
+    renderer.xr.setReferenceSpaceType(referenceSpaceType)
     await renderer.xr.setSession(session as unknown as XRSession)
   } catch (err) {
     sessionTelemetry.exitReason = 'error'
@@ -550,6 +571,13 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
   // recompute from video.currentTime directly instead).
   const timeLabel = createVrTimeLabel(THREE_)
   scene.scene.add(timeLabel.mesh)
+
+  // AR-only legend/colorbar. In immersive sessions the DOM legend is
+  // not visible, so render the current dataset's legend as a small
+  // billboarded panel. VR mode keeps the scene lean and unchanged.
+  const legendPanel = isAr ? createVrLegendPanel(THREE_) : null
+  if (legendPanel) scene.scene.add(legendPanel.mesh)
+
   setVrTourOverlaySink({
     showText: (params) => tourOverlay.showText(params),
     hideText: (id) => tourOverlay.hideOverlay(id),
@@ -583,10 +611,10 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     hideAllQuestions: () => tourOverlay.hideAllQuestions(),
   })
 
-  // --- Spatial placement (AR-only) + local-floor ref space ---
+  // --- Spatial placement (AR-only) + placement ref space ---
   // Two separable capabilities:
   //
-  //   (a) local-floor reference space — used for resolving ANCHOR
+  //   (a) placement reference space — used for resolving ANCHOR
   //       poses each frame (`frame.getPose(anchor.anchorSpace,
   //       refSpace)`). An anchor restored from a persistent handle
   //       needs this even if the user never enters Place mode in
@@ -605,9 +633,16 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
   let placementRefSpace: XRReferenceSpace | null = null
   if (isAr) {
     try {
-      placementRefSpace = await session.requestReferenceSpace('local-floor')
+      placementRefSpace = await session.requestReferenceSpace(referenceSpaceType)
     } catch (err) {
-      logger.debug('[VR] local-floor reference space unavailable:', err)
+      logger.debug(`[VR] ${referenceSpaceType} reference space unavailable:`, err)
+      if (referenceSpaceType !== 'local') {
+        try {
+          placementRefSpace = await session.requestReferenceSpace('local')
+        } catch (fallbackErr) {
+          logger.debug('[VR] local reference space unavailable:', fallbackErr)
+        }
+      }
     }
 
     if ('requestHitTestSource' in session) {
@@ -979,6 +1014,7 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     tourControls,
     tourOverlay,
     timeLabel,
+    legendPanel,
     interaction,
     loading,
     placement,
@@ -1152,6 +1188,12 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     active.timeLabel.setText(ctx.getDatasetTimeLabel())
     active.timeLabel.update(active.camera, active.scene.globe.position)
 
+    // AR legend/colorbar. DOM overlays are invisible in immersive
+    // WebXR, so mirror the primary dataset's legend into a scene
+    // panel whenever one exists. Null hides the panel.
+    active.legendPanel?.setLegend(ctx.getDatasetLegendUrl(), ctx.getDatasetTitle())
+    active.legendPanel?.update(active.camera, active.scene.globe.position)
+
     // Borders overlay mirrors the shared view preference. 2D toggles
     // (Tools menu / tour envShowWorldBorder) write to the same
     // preference, so the VR globe stays in sync without a dedicated
@@ -1307,6 +1349,10 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     a.tourControls.dispose()
     a.scene.scene.remove(a.timeLabel.mesh)
     a.timeLabel.dispose()
+    if (a.legendPanel) {
+      a.scene.scene.remove(a.legendPanel.mesh)
+      a.legendPanel.dispose()
+    }
     // Clear the tourUI sink first so any in-flight `hideAll*` calls
     // from the tour engine (e.g. tour cleanup fired by stopTour()
     // during exit) don't land on the about-to-be-disposed manager.

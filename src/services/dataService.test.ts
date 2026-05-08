@@ -42,6 +42,10 @@ describe('DataService.isVideoDataset', () => {
     expect(dataService.isVideoDataset(makeDataset({ format: 'video/mp4' }))).toBe(true)
   })
 
+  it('returns true for application/dash+xml', () => {
+    expect(dataService.isVideoDataset(makeDataset({ format: 'application/dash+xml' }))).toBe(true)
+  })
+
   it('returns false for image/png', () => {
     expect(dataService.isVideoDataset(makeDataset({ format: 'image/png' }))).toBe(false)
   })
@@ -105,6 +109,7 @@ describe('normaliseSourceFormat', () => {
 
   it('passes other formats through unchanged', () => {
     expect(normaliseSourceFormat(makeDataset({ format: 'video/mp4' })).format).toBe('video/mp4')
+    expect(normaliseSourceFormat(makeDataset({ format: 'application/dash+xml' })).format).toBe('application/dash+xml')
     expect(normaliseSourceFormat(makeDataset({ format: 'image/png' })).format).toBe('image/png')
     expect(normaliseSourceFormat(makeDataset({ format: 'image/webp' })).format).toBe('image/webp')
     expect(normaliseSourceFormat(makeDataset({ format: 'tour/json' })).format).toBe('tour/json')

@@ -34,6 +34,7 @@ const SIZE_1_MB = 1 * 1024 * 1024
 const MIME_ALLOWLIST: Record<AssetKind, ReadonlySet<string>> = {
   data: new Set([
     'video/mp4',
+    'application/dash+xml',
     'image/png',
     'image/jpeg',
     'image/webp',
@@ -191,6 +192,8 @@ export function extForMime(mime: string): string {
   switch (mime) {
     case 'video/mp4':
       return 'mp4'
+    case 'application/dash+xml':
+      return 'mpd'
     case 'image/png':
       return 'png'
     case 'image/jpeg':

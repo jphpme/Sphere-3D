@@ -134,7 +134,7 @@ export function initToolsMenu(
         </button>
         <button type="button" class="tools-menu-item" id="tools-menu-borders" aria-pressed="false">
           <span class="tools-menu-item-check" aria-hidden="true"></span>
-          <span class="tools-menu-item-label">Borders</span>
+          <span class="tools-menu-item-label">Country borders</span>
         </button>
         <button type="button" class="tools-menu-item" id="tools-menu-terrain" aria-pressed="false">
           <span class="tools-menu-item-check" aria-hidden="true"></span>
@@ -188,6 +188,11 @@ export function initToolsMenu(
       </section>
       <section class="tools-menu-section" aria-label="About">
         <h4 class="tools-menu-section-title">About</h4>
+        <div class="tools-menu-about-note">
+          <strong>AYNI</strong><br>
+          Pachamama Studios<br>
+          <span>Built from the open-source TerraViz project and NOAA Science On a Sphere dataset catalog.</span>
+        </div>
         ${onOpenCredits ? `
         <button type="button" class="tools-menu-item" id="tools-menu-credits">
           <span class="tools-menu-item-check" aria-hidden="true"></span>
@@ -299,7 +304,7 @@ export function initToolsMenu(
     setBordersVisible(next)
     setButtonState(bordersBtn, next)
     emitSetting('borders', next ? 'on' : 'off')
-    announce?.(next ? 'Borders on' : 'Borders off')
+    announce?.(next ? 'Country borders on' : 'Country borders off')
   })
 
   terrainBtn.addEventListener('click', () => {
@@ -360,7 +365,7 @@ export function initToolsMenu(
     const { shareDataset, buildDatasetShareUrl } = await import('../services/shareService')
     const shared = await shareDataset({
       title: dataset.title,
-      text: `Check out "${dataset.title}" on Terraviz`,
+      text: `Check out "${dataset.title}" on AYNI`,
       url: buildDatasetShareUrl(dataset.id),
     })
     if (shared) announce?.('Dataset shared')

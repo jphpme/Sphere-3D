@@ -41,6 +41,11 @@ import type * as THREE from 'three'
 import { getSunPosition } from '../utils/time'
 import { getCloudTextureUrl } from '../utils/deviceCapability'
 import { logger } from '../utils/logger'
+import {
+  configureVrDatasetTexture,
+  createVrDatasetMaterial,
+  getVrDatasetTextureSize,
+} from './vrDatasetMaterial'
 
 /** Default radius if `options.radius` is omitted — matches the VR view. */
 const DEFAULT_RADIUS = 0.5
@@ -201,6 +206,16 @@ export interface PhotorealEarthOptions {
   readonly includeSun?: boolean
   /** Include a ground shadow plane below the globe. Default true. */
   readonly includeShadow?: boolean
+  /**
+   * Optional base fill composited behind transparent dataset pixels.
+   * Used by AR passthrough so sparse alpha datasets still read as a
+   * physical sphere instead of revealing the camera feed through empty
+   * texels.
+   */
+  readonly datasetBaseFill?: {
+    readonly color: number
+    readonly opacity: number
+  }
 }
 
 export interface PhotorealEarthHandle {
@@ -298,6 +313,7 @@ export function createPhotorealEarth(
   const includeClouds = options.includeClouds ?? true
   const includeSun = options.includeSun ?? true
   const includeShadow = options.includeShadow ?? true
+  const datasetBaseFill = options.datasetBaseFill
 
   const sunDistance = radius * SUN_DISTANCE_FACTOR
   const sunCoreScale = sunDistance * SUN_CORE_FRACTION
@@ -431,7 +447,7 @@ export function createPhotorealEarth(
 
   // 64×64 is plenty for a globe filling ~40° of the viewer's FOV.
   const geometry = new THREE_.SphereGeometry(radius, 64, 64)
-  const globe = new THREE_.Mesh(geometry, material)
+  const globe: THREE.Mesh<THREE.SphereGeometry, THREE.Material> = new THREE_.Mesh(geometry, material)
   globe.position.set(position.x, position.y, position.z)
   objects.push(globe)
 
@@ -812,6 +828,7 @@ export function createPhotorealEarth(
 
   // ── Texture state ─────────────────────────────────────────────────
   let activeDatasetTexture: THREE.Texture | null = null
+  let activeDatasetMaterial: THREE.ShaderMaterial | null = null
   /** Identity of the currently-loaded spec — element reference for change detection. */
   let activeKey: HTMLVideoElement | HTMLImageElement | null = null
   /**
@@ -834,6 +851,35 @@ export function createPhotorealEarth(
    * keep the effect disabled in that case.
    */
   let lightsTexture: THREE.Texture | null = null
+
+  function disposeActiveDatasetSurface(): void {
+    if (activeDatasetMaterial) {
+      activeDatasetMaterial.dispose()
+      activeDatasetMaterial = null
+    }
+    if (activeDatasetTexture) {
+      activeDatasetTexture.dispose()
+      activeDatasetTexture = null
+    }
+  }
+
+  function showDatasetTexture(texture: THREE.Texture, source: HTMLVideoElement | HTMLImageElement): void {
+    if (activeDatasetMaterial) {
+      activeDatasetMaterial.dispose()
+      activeDatasetMaterial = null
+    }
+    activeDatasetMaterial = createVrDatasetMaterial(THREE_, {
+      texture,
+      ...getVrDatasetTextureSize(source),
+      baseColor: datasetBaseFill?.color,
+      baseOpacity: datasetBaseFill?.opacity,
+    })
+    globe.material = activeDatasetMaterial
+  }
+
+  function showPlanetMaterial(): void {
+    if (globe.material !== material) globe.material = material
+  }
 
   /**
    * Walk a list of resolution tiers in ascending order, upgrading
@@ -958,10 +1004,7 @@ export function createPhotorealEarth(
       // Dispose any previously-loaded dataset texture. VideoTexture
       // holds a reference to the source <video> element and an
       // internal update scheduler; image Textures own a GPU buffer.
-      if (activeDatasetTexture) {
-        activeDatasetTexture.dispose()
-        activeDatasetTexture = null
-      }
+      disposeActiveDatasetSurface()
 
       // Cancel any pending video-frame-wait listeners from a
       // previous spec.
@@ -971,6 +1014,7 @@ export function createPhotorealEarth(
       }
 
       if (!spec) {
+        showPlanetMaterial()
         // Restore the full photoreal Earth stack — diffuse if CDN
         // loaded, specular fallback otherwise; specular ocean glint;
         // night-lights emissive gated by the day/night shader;
@@ -1030,14 +1074,12 @@ export function createPhotorealEarth(
         try { video.currentTime = video.currentTime } catch { /* no-op */ }
 
         const tex = new THREE_.VideoTexture(video)
-        tex.colorSpace = THREE_.SRGBColorSpace
-        tex.minFilter = THREE_.LinearFilter
-        tex.magFilter = THREE_.LinearFilter
+        configureVrDatasetTexture(THREE_, tex)
         activeDatasetTexture = tex
 
         if (video.readyState >= 2) {
           // Frame already decoded — swap immediately and signal ready.
-          material.map = tex
+          showDatasetTexture(tex, video)
           onReady?.()
         } else {
           // No frame yet — keep the base Earth visible instead of
@@ -1060,13 +1102,13 @@ export function createPhotorealEarth(
           // blocked — we swallow the error and rely on the listener
           // fallback. `video.muted = true` (set by hlsService) makes
           // this silent-autoplay-friendly per the browser policies.
+          showPlanetMaterial()
           material.map = baseEarthTexture
           const onFrame = () => {
             cancelPendingVideoListeners?.()
             cancelPendingVideoListeners = null
             if (activeKey !== video) return
-            material.map = tex
-            material.needsUpdate = true
+            showDatasetTexture(tex, video)
             onReady?.()
           }
           video.addEventListener('loadeddata', onFrame, { once: true })
@@ -1090,9 +1132,7 @@ export function createPhotorealEarth(
         // resolution-fallback dance), so we wrap the live
         // HTMLImageElement directly — no re-fetch, no async.
         const tex = new THREE_.Texture(spec.element)
-        tex.colorSpace = THREE_.SRGBColorSpace
-        tex.minFilter = THREE_.LinearFilter
-        tex.magFilter = THREE_.LinearFilter
+        configureVrDatasetTexture(THREE_, tex)
         tex.needsUpdate = true
         activeDatasetTexture = tex
         // Hide Earth decoration — same rationale as the video branch.
@@ -1109,7 +1149,7 @@ export function createPhotorealEarth(
         // Dataset mode lighting — see video branch.
         if (sunLight) sunLight.intensity = 0
         if (datasetAmbient) datasetAmbient.intensity = 1.6
-        material.map = tex
+        showDatasetTexture(tex, spec.element)
         activeKey = spec.element
         onReady?.()
       }
@@ -1194,11 +1234,8 @@ export function createPhotorealEarth(
         cancelPendingVideoListeners()
         cancelPendingVideoListeners = null
       }
-      if (activeDatasetTexture) {
-        activeDatasetTexture.dispose()
-        activeDatasetTexture = null
-        activeKey = null
-      }
+      disposeActiveDatasetSurface()
+      activeKey = null
       baseEarthTexture.dispose()
       specularMapTexture.dispose()
       baseDiffuseTexture?.dispose()

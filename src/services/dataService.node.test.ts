@@ -14,9 +14,19 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { DataService } from './dataService'
 
 const ORIGINAL_SOURCE = import.meta.env.VITE_CATALOG_SOURCE
+const ORIGINAL_REALTIME_DASH_BASE_URL = import.meta.env.VITE_REALTIME_DASH_BASE_URL
 
-function mockNodeCatalog(datasets: unknown[]) {
+function mockNodeCatalog(datasets: unknown[], realtimeIndex: unknown | null = null) {
   return vi.fn(async (input: RequestInfo | URL | string) => {
+    if (String(input) === '/assets/realtime-dash-datasets.json') {
+      if (realtimeIndex) {
+        return new Response(JSON.stringify(realtimeIndex), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      return new Response('', { status: 404 })
+    }
     expect(String(input)).toBe('/api/v1/catalog')
     return new Response(JSON.stringify({ datasets }), {
       status: 200,
@@ -28,6 +38,7 @@ function mockNodeCatalog(datasets: unknown[]) {
 describe('DataService — node-mode', () => {
   beforeEach(() => {
     ;(import.meta.env as Record<string, string>).VITE_CATALOG_SOURCE = 'node'
+    delete (import.meta.env as Record<string, string>).VITE_REALTIME_DASH_BASE_URL
   })
 
   afterEach(() => {
@@ -35,6 +46,11 @@ describe('DataService — node-mode', () => {
       delete (import.meta.env as Record<string, string>).VITE_CATALOG_SOURCE
     } else {
       ;(import.meta.env as Record<string, string>).VITE_CATALOG_SOURCE = ORIGINAL_SOURCE
+    }
+    if (ORIGINAL_REALTIME_DASH_BASE_URL === undefined) {
+      delete (import.meta.env as Record<string, string>).VITE_REALTIME_DASH_BASE_URL
+    } else {
+      ;(import.meta.env as Record<string, string>).VITE_REALTIME_DASH_BASE_URL = ORIGINAL_REALTIME_DASH_BASE_URL
     }
     vi.unstubAllGlobals()
   })
@@ -142,7 +158,46 @@ describe('DataService — node-mode', () => {
     const svc = new DataService()
     await svc.fetchDatasets()
     await svc.fetchDatasets()
-    expect(fetchStub).toHaveBeenCalledTimes(1)
+    expect(fetchStub).toHaveBeenCalledTimes(2)
+  })
+
+  it('prefixes real-time DASH titles and marks them for default borders', async () => {
+    vi.stubGlobal(
+      'fetch',
+      mockNodeCatalog([], {
+        baseUrl: 'https://cdn.example.com/ayni/',
+        generatedAt: '2026-05-06T09:02:10Z',
+        datasets: [
+          {
+            id: 'rt001',
+            display_name: 'Lightning',
+            type: 'stream',
+            categories: ['atmosphere'],
+            mpd: 'realtime/provider/lightning/stream.mpd',
+          },
+          {
+            id: 'fc001',
+            display_name: 'Forecast: Sea Level',
+            type: 'forecast',
+            categories: ['hydrosphere'],
+            mpd: 'forecast/provider/sea_level/stream.mpd',
+          },
+        ],
+      }),
+    )
+
+    const svc = new DataService()
+    const datasets = await svc.fetchDatasets()
+    const realtime = datasets.find(d => d.id === 'R2_DASH_rt001')
+    const forecast = datasets.find(d => d.id === 'R2_DASH_fc001')
+
+    expect(realtime?.title).toBe('Real Time: Lightning')
+    expect(realtime?.realtimeKind).toBe('real-time')
+    expect(realtime?.defaultBordersVisible).toBe(true)
+    expect(realtime?.dataLink).toBe('https://cdn.example.com/ayni/realtime/provider/lightning/stream.mpd')
+    expect(forecast?.title).toBe('Forecast: Sea Level')
+    expect(forecast?.realtimeKind).toBe('forecast')
+    expect(forecast?.defaultBordersVisible).toBe(true)
   })
 
   it('preserves legacyId from the wire shape and falls back on lookup (1d/T)', async () => {

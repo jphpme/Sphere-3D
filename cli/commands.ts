@@ -263,6 +263,7 @@ const UPLOAD_KINDS = new Set([
 
 const MIME_BY_EXT: Record<string, string> = {
   '.mp4': 'video/mp4',
+  '.mpd': 'application/dash+xml',
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
   '.jpeg': 'image/jpeg',

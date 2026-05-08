@@ -7,7 +7,7 @@
  *
  * The canonical set mirrors the publisher API's `FORMAT_VALUES`
  * allow-list (`functions/api/v1/_lib/validators.ts`):
- * `video/mp4`, `image/png`, `image/jpeg`, `image/webp`,
+ * `video/mp4`, `application/dash+xml`, `image/png`, `image/jpeg`, `image/webp`,
  * `tour/json`. Anything a publisher can upload, the SPA can
  * render.
  *
@@ -21,6 +21,7 @@
  */
 export type DatasetFormat =
   | 'video/mp4'
+  | 'application/dash+xml'
   | 'image/png'
   | 'image/jpeg'
   | 'image/webp'
@@ -60,6 +61,18 @@ export interface Dataset {
   thumbnailLink?: string
   legendLink?: string
   tags?: string[]
+  /**
+   * Client-side classification for the built-in live DASH catalog.
+   * Used for UI grouping/defaults without changing the upstream
+   * catalog shape.
+   */
+  realtimeKind?: 'real-time' | 'forecast'
+  /**
+   * When true, the app enables the shared country/coastline border
+   * overlay when this dataset loads. The Tools menu border checkbox
+   * can still turn it off.
+   */
+  defaultBordersVisible?: boolean
   
   // Temporal metadata
   startTime?: string  // ISO 8601
@@ -119,8 +132,8 @@ export interface VideoProxyResponse {
   id: string
   title: string
   duration: number
-  hls: string
-  dash: string
+  hls?: string
+  dash?: string
   files: Array<{
     quality: string
     width?: number
@@ -705,7 +718,7 @@ export type ScreenClass = 'mobile' | 'tablet' | '1080p' | '2k' | '4k+'
  * `environment='production'` but `build_channel='internal'`. */
 export type BuildChannel = 'public' | 'internal' | 'canary'
 export type VrCapability = 'none' | 'vr' | 'ar' | 'both'
-export type LayerSource = 'network' | 'cache' | 'hls' | 'image'
+export type LayerSource = 'network' | 'cache' | 'hls' | 'dash' | 'image'
 export type LoadTrigger = 'browse' | 'orbit' | 'tour' | 'url' | 'default'
 export type UnloadReason = 'replaced' | 'home' | 'tour' | 'manual'
 export type FeedbackContext = 'general' | 'ai_response'

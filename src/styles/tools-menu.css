@@ -157,6 +157,28 @@
     color: var(--color-text-dim);
 }
 
+.tools-menu-about-note {
+    margin: 0 0 0.45rem;
+    padding: 0.5rem 0.6rem;
+    color: var(--color-text-muted);
+    font-size: var(--component-tools-menu-item-font-size);
+    line-height: 1.35;
+    background: var(--white-o04);
+    border: 1px solid var(--white-o08);
+    border-radius: var(--component-tools-menu-item-radius);
+}
+
+.tools-menu-about-note strong {
+    color: var(--color-text);
+    font-weight: 600;
+}
+
+.tools-menu-about-note span {
+    display: block;
+    margin-top: 0.35rem;
+    color: var(--color-text-dim);
+}
+
 .tools-menu-item {
     display: flex;
     align-items: center;

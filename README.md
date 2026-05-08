@@ -19,7 +19,8 @@ A WebGL-based globe that streams environmental data from the [Science On a Spher
 - Interactive 3D globe with MapLibre GL JS (rotation, zoom, inertia on desktop and mobile, geographic labels, boundaries, 3D terrain)
 - NASA GIBS tile-based Earth (Blue Marble day, Black Marble night lights with progressive zoom detail, specular highlights, sun lighting, real-time cloud overlay, atmosphere)
 - Static image datasets with resolution fallback (4096/2048/1024) and download progress
-- HLS video streaming via Vimeo proxy with adaptive bitrate, playback controls, and audio
+- HLS and DASH video streaming with adaptive bitrate, playback controls, and audio
+- Real-time and forecast DASH dataset registry for Cloudflare R2-hosted MPD streams
 - Time synchronization with ISO 8601 parsing and scrubber
 - **Orbit** — an AI digital docent that answers questions, explains datasets, and loads them onto the globe by conversation (hybrid LLM + local keyword engine, configurable to any OpenAI-compatible provider)
 - **Multi-globe comparison** — View 2 or 4 synchronised globes side-by-side, each showing a different dataset. Camera motion locks across panels; time-series animations sync by real-world date. Switch layouts from the Tools menu.
@@ -51,7 +52,9 @@ The app is a single-page application built with TypeScript, MapLibre GL JS, and 
 
 **`dataService.ts`** is the data layer. It fetches the NOAA dataset catalog from S3 and a local enriched metadata file in parallel, then cross-references them by title to merge in descriptions, categories, keywords, and related datasets. Results are cached for an hour.
 
-**`hlsService.ts`** manages video streaming. It fetches a manifest from the Vimeo proxy, sets up HLS.js with adaptive bitrate selection, and falls back to direct MP4 if HLS fails. It also detects whether the stream has an audio track.
+**`hlsService.ts`** manages video streaming. It fetches manifests from the Vimeo proxy, sets up HLS.js or dash.js with adaptive bitrate selection, and falls back to direct MP4 when a manifest provides one. It also detects whether the stream has an audio track.
+
+Real-time and forecast DASH datasets live in `public/assets/realtime-dash-datasets.json`. Each row points to an MPD path in Cloudflare R2; set `VITE_REALTIME_DASH_BASE_URL` in `.env.local` to the public R2 origin so paths such as `realtime/noaa/clouds/stream.mpd` resolve correctly. R2 must allow browser CORS for MPD, segment, thumbnail, and legend requests.
 
 **`browseUI.ts`** builds the dataset browser panel — the search box, category chips, sub-category filters, sorting, and the scrollable list of expandable dataset cards. When a user selects a dataset, it calls back to `main.ts` to load it.
 

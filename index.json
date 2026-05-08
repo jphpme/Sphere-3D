@@ -1,0 +1,725 @@
+{
+  "schemaVersion": "1.0",
+  "generatedAt": "2026-05-06T09:02:10Z",
+  "count": 43,
+  "datasets": [
+    {
+      "id": "dd8d0519809a65aa",
+      "name": "aircraft_tracking",
+      "display_name": "Aircraft Traffic",
+      "description": "Real-time global aircraft positions from the OpenSky Network ADS-B receiver network. Shows airborne commercial and general aviation traffic. Flight corridors and daily aviation patterns clearly visible. Updated hourly.",
+      "provider": "opensky",
+      "type": "stream",
+      "categories": [
+        "humans"
+      ],
+      "units": "Aircraft",
+      "mpd": "realtime/opensky/aircraft_tracking/stream.mpd",
+      "dsa": "realtime/opensky/aircraft_tracking/aircraft_tracking.dsa",
+      "thumbnail": "realtime/opensky/aircraft_tracking/thumbnail_small.png",
+      "colorbar": "realtime/opensky/aircraft_tracking/aircraft_tracking_colorbar.png"
+    },
+    {
+      "id": "45a6cc288e9bfe19",
+      "name": "ais_traffic",
+      "display_name": "Vessel Traffic (AIS)",
+      "description": "Real-time global vessel traffic from AIS (Automatic Identification System) transponders via AISStream.io. Shows individual vessel positions updated every 6 minutes with glowing green points on a transparent overlay. Terrestrial AIS coverage.",
+      "provider": "aisstream",
+      "type": "stream",
+      "categories": [
+        "hydrosphere",
+        "humans"
+      ],
+      "units": "Vessels",
+      "mpd": "realtime/aisstream/ais_traffic/stream.mpd",
+      "dsa": "realtime/aisstream/ais_traffic/ais_traffic.dsa",
+      "thumbnail": "realtime/aisstream/ais_traffic/thumbnail_small.png",
+      "colorbar": "realtime/aisstream/ais_traffic/ais_traffic_colorbar.png"
+    },
+    {
+      "id": "4402a334ffc68f68",
+      "name": "aod550",
+      "display_name": "Aerosol Optical Depth",
+      "description": "Global aerosol optical depth at 550 nm from the Copernicus Atmosphere Monitoring Service (CAMS). Measures atmospheric aerosol loading \u2014 dust storms, wildfire smoke, and pollution appear as bright hotspots. 0.4\u00b0 resolution, daily.",
+      "provider": "era5",
+      "type": "stream",
+      "categories": [
+        "atmosphere"
+      ],
+      "units": "AOD",
+      "mpd": "realtime/era5/aod550/stream.mpd",
+      "dsa": "realtime/era5/aod550/aod550.dsa",
+      "thumbnail": "realtime/era5/aod550/thumbnail_small.png",
+      "colorbar": "realtime/era5/aod550/aod550_colorbar.png"
+    },
+    {
+      "id": "ae3eeed0e8b1e4fd",
+      "name": "aod550_forecast",
+      "display_name": "Forecast: Aerosol Optical Depth",
+      "description": "5-day global aerosol optical depth forecast at 550 nm from the Copernicus Atmosphere Monitoring Service (CAMS). Shows predicted evolution of dust storms, wildfire smoke plumes, and pollution events. 3-hourly timesteps (41 frames) from the latest 00Z forecast run. 0.4\u00b0 resolution with transparent overlay.",
+      "provider": "era5",
+      "type": "forecast",
+      "categories": [
+        "atmosphere",
+        "climate"
+      ],
+      "units": "AOD",
+      "mpd": "forecast/era5/aod550_forecast/stream.mpd",
+      "dsa": "forecast/era5/aod550_forecast/aod550_forecast.dsa",
+      "thumbnail": "forecast/era5/aod550_forecast/thumbnail_small.png",
+      "colorbar": "forecast/era5/aod550_forecast/aod550_forecast_colorbar.png"
+    },
+    {
+      "id": "be44f5516e18956c",
+      "name": "ch4",
+      "display_name": "Methane (CH4)",
+      "description": "Global column-mean methane molar fraction from the Copernicus Atmosphere Monitoring Service (CAMS) greenhouse gas forecasts. Assimilates TROPOMI satellite observations for high accuracy. Wetlands, fossil fuel extraction, rice paddies, and landfills are visible as persistent hotspots. 0.1\u00b0 resolution, daily, ~2-day latency.",
+      "provider": "era5",
+      "type": "stream",
+      "categories": [
+        "atmosphere",
+        "climate"
+      ],
+      "units": "ppb",
+      "mpd": "realtime/era5/ch4/stream.mpd",
+      "dsa": "realtime/era5/ch4/ch4.dsa",
+      "thumbnail": "realtime/era5/ch4/thumbnail_small.png",
+      "colorbar": "realtime/era5/ch4/ch4_colorbar.png"
+    },
+    {
+      "id": "968f366e7b9c47bd",
+      "name": "city_air_quality",
+      "display_name": "City Air Quality",
+      "description": "Real-time Air Quality Index (AQI) for cities worldwide from the World Air Quality Index project (aqicn.org). Stations are aggregated to a 0.5\u00b0 grid showing the worst reading per area. Color-coded by EPA AQI categories: green (good, 0-50), yellow (moderate, 51-100), orange (unhealthy for sensitive groups, 101-150), red (unhealthy, 151-200), purple (very unhealthy, 201-300), maroon (hazardous, 301+). Updated every 6 hours.",
+      "provider": "waqi",
+      "type": "stream",
+      "categories": [
+        "humans"
+      ],
+      "units": "AQI",
+      "mpd": "realtime/waqi/city_air_quality/stream.mpd",
+      "dsa": "realtime/waqi/city_air_quality/city_air_quality.dsa",
+      "thumbnail": "realtime/waqi/city_air_quality/thumbnail_small.png",
+      "colorbar": "realtime/waqi/city_air_quality/city_air_quality_colorbar.png"
+    },
+    {
+      "id": "3104672217a708ea",
+      "name": "city_air_quality_equi",
+      "display_name": "City Air Quality (Sphere)",
+      "description": "Real-time Air Quality Index (AQI) for cities worldwide, with equirectangular compensation for spherical display projection. Circles are horizontally stretched by 1/cos(latitude) so they appear round on a sphere. Same data as City Air Quality.",
+      "provider": "waqi",
+      "type": "stream",
+      "categories": [
+        "humans"
+      ],
+      "units": "AQI",
+      "mpd": "realtime/waqi/city_air_quality_equi/stream.mpd",
+      "dsa": "realtime/waqi/city_air_quality_equi/city_air_quality_equi.dsa",
+      "thumbnail": "realtime/waqi/city_air_quality_equi/thumbnail_small.png",
+      "colorbar": "realtime/waqi/city_air_quality_equi/city_air_quality_equi_colorbar.png"
+    },
+    {
+      "id": "de607183ec1dcc5f",
+      "name": "clouds",
+      "display_name": "Global Cloud Cover",
+      "description": "Real-time global cloud cover composite from geostationary weather satellites. Updated every 10 minutes at 4K resolution with transparent clear-sky areas for overlay. Source: NOAA Science On a Sphere.",
+      "provider": "noaa",
+      "type": "stream",
+      "categories": [
+        "atmosphere"
+      ],
+      "units": "%",
+      "mpd": "realtime/noaa/clouds/stream.mpd",
+      "dsa": "realtime/noaa/clouds/clouds.dsa",
+      "thumbnail": "realtime/noaa/clouds/thumbnail_small.png",
+      "colorbar": "realtime/noaa/clouds/clouds_colorbar.png"
+    },
+    {
+      "id": "99c8494d158a576a",
+      "name": "coral_bleaching",
+      "display_name": "Coral Bleaching Alert",
+      "description": "Daily global coral bleaching alert from NOAA Coral Reef Watch. Shows 7-day maximum bleaching heat stress levels \u2014 from No Stress (blue) through Watch, Warning, Alert Level 1 and Alert Level 2 (red). 4096x2048 RGBA with alpha transparency. ~3-day latency.",
+      "provider": "noaa",
+      "type": "stream",
+      "categories": [
+        "hydrosphere",
+        "biosphere"
+      ],
+      "units": "Alert Level",
+      "mpd": "realtime/noaa/coral_bleaching/stream.mpd",
+      "dsa": "realtime/noaa/coral_bleaching/coral_bleaching.dsa",
+      "thumbnail": "realtime/noaa/coral_bleaching/thumbnail_small.png",
+      "colorbar": "realtime/noaa/coral_bleaching/coral_bleaching_colorbar.png"
+    },
+    {
+      "id": "c07ce84ab9651a13",
+      "name": "drought",
+      "display_name": "US Drought Monitor",
+      "description": "Weekly US Drought Monitor classification from D0 (abnormally dry) to D4 (exceptional drought). A partnership between NOAA, USDA, and the National Drought Mitigation Center. Source: NOAA Science On a Sphere real-time feed.",
+      "provider": "noaa",
+      "type": "stream",
+      "categories": [
+        "climate",
+        "hydrosphere"
+      ],
+      "units": "D0-D4",
+      "mpd": "realtime/noaa/drought/stream.mpd",
+      "dsa": "realtime/noaa/drought/drought.dsa",
+      "thumbnail": "realtime/noaa/drought/thumbnail_small.png",
+      "colorbar": "realtime/noaa/drought/drought_colorbar.png"
+    },
+    {
+      "id": "4f5fcaf7fb73620a",
+      "name": "fires",
+      "display_name": "Active Fires (NOAA SOS)",
+      "description": "Daily global active fire detections from VIIRS and MODIS satellite instruments, showing wildfire and agricultural burning activity. Source: NOAA Science On a Sphere real-time feed.",
+      "provider": "noaa",
+      "type": "stream",
+      "categories": [
+        "biosphere",
+        "humans"
+      ],
+      "units": "Detection",
+      "mpd": "realtime/noaa/fires/stream.mpd",
+      "dsa": "realtime/noaa/fires/fires.dsa",
+      "thumbnail": "realtime/noaa/fires/thumbnail_small.png",
+      "colorbar": "realtime/noaa/fires/fires_colorbar.png"
+    },
+    {
+      "id": "0d90ca8cac5e16e4",
+      "name": "firms_fires",
+      "display_name": "Active Fires (FIRMS)",
+      "description": "Daily global active fire detections from NASA's Fire Information for Resource Management System (FIRMS). Uses VIIRS and MODIS instruments to detect thermal anomalies associated with wildfires, agricultural burns, and industrial flares.",
+      "provider": "firms",
+      "type": "stream",
+      "categories": [
+        "land"
+      ],
+      "units": "Detections",
+      "mpd": "realtime/firms/firms_fires/stream.mpd",
+      "dsa": "realtime/firms/firms_fires/firms_fires.dsa",
+      "thumbnail": "realtime/firms/firms_fires/thumbnail_small.png",
+      "colorbar": "realtime/firms/firms_fires/firms_fires_colorbar.png"
+    },
+    {
+      "id": "16f4feb5ad771865",
+      "name": "gdacs_disasters",
+      "display_name": "Disaster Alerts (GDACS)",
+      "description": "Active global disaster events from the Global Disaster Alerting Coordination System (UN/EC). Tracks earthquakes, floods, tropical cyclones, wildfires, volcanic eruptions, and droughts worldwide. Color-coded by severity: Green (advisory), Orange (watch), Red (alert). Updated every 6 minutes.",
+      "provider": "gdacs",
+      "type": "stream",
+      "categories": [
+        "lithosphere",
+        "atmosphere",
+        "health"
+      ],
+      "units": "Severity",
+      "mpd": "realtime/gdacs/gdacs_disasters/stream.mpd",
+      "dsa": "realtime/gdacs/gdacs_disasters/gdacs_disasters.dsa",
+      "thumbnail": "realtime/gdacs/gdacs_disasters/thumbnail_small.png",
+      "colorbar": "realtime/gdacs/gdacs_disasters/gdacs_disasters_colorbar.png"
+    },
+    {
+      "id": "80d3e164603c38f6",
+      "name": "gdelt_events",
+      "display_name": "Global Events (GDELT)",
+      "description": "Global political events from the GDELT Project, compiled from news sources worldwide every 15 minutes. Shows cooperation (blue) and conflict (red) events geocoded to specific locations. Covers protests, diplomatic exchanges, military actions, and more. ~73,000 events per day.",
+      "provider": "gdelt",
+      "type": "stream",
+      "categories": [
+        "humans"
+      ],
+      "units": "Events",
+      "mpd": "realtime/gdelt/gdelt_events/stream.mpd",
+      "dsa": "realtime/gdelt/gdelt_events/gdelt_events.dsa",
+      "thumbnail": "realtime/gdelt/gdelt_events/thumbnail_small.png",
+      "colorbar": "realtime/gdelt/gdelt_events/gdelt_events_colorbar.png"
+    },
+    {
+      "id": "eeaa0d52c4fce867",
+      "name": "geocolor",
+      "display_name": "GeoColor Satellite Composite",
+      "description": "Near-global true-color/infrared composite from 5 geostationary satellites: GOES-East (19), GOES-West (18), Meteosat-12, Meteosat-9, and Himawari-9. Daytime shows true color; nighttime shows IR cloud composite with city lights. Updated every 10 minutes via CIRA SLIDER.",
+      "provider": "geocolor_composite",
+      "type": "stream",
+      "categories": [
+        "atmosphere",
+        "art"
+      ],
+      "units": "",
+      "mpd": "realtime/geocolor_composite/geocolor/stream.mpd",
+      "dsa": "realtime/geocolor_composite/geocolor/geocolor.dsa",
+      "thumbnail": "realtime/geocolor_composite/geocolor/thumbnail_small.png",
+      "colorbar": "realtime/geocolor_composite/geocolor/geocolor_colorbar.png"
+    },
+    {
+      "id": "17535c02e13e2722",
+      "name": "gfw_traffic",
+      "display_name": "Marine Vessel Traffic (GFW)",
+      "description": "Daily global marine vessel traffic heatmap from Global Fishing Watch. Shows AIS-based vessel presence for fishing, cargo, tanker, and other vessel types. 0.1\u00b0 grid resolution with ~96-hour latency.",
+      "provider": "gfw",
+      "type": "stream",
+      "categories": [
+        "hydrosphere",
+        "humans"
+      ],
+      "units": "Vessels",
+      "mpd": "realtime/gfw/gfw_traffic/stream.mpd",
+      "dsa": "realtime/gfw/gfw_traffic/gfw_traffic.dsa",
+      "thumbnail": "realtime/gfw/gfw_traffic/thumbnail_small.png",
+      "colorbar": "realtime/gfw/gfw_traffic/gfw_traffic_colorbar.png"
+    },
+    {
+      "id": "28a1118b4662d47b",
+      "name": "glm_lightning",
+      "display_name": "Lightning",
+      "description": "Global lightning detections combining GOES-16/18 Geostationary Lightning Mapper (Americas, satellite) with Blitzortung community VLF network (~1800 stations, 83 countries, ground-based). Updated hourly with glowing white points on a transparent overlay.",
+      "provider": "goes_glm",
+      "type": "stream",
+      "categories": [
+        "atmosphere"
+      ],
+      "units": "Flashes/hr",
+      "mpd": "realtime/goes_glm/glm_lightning/stream.mpd",
+      "dsa": "realtime/goes_glm/glm_lightning/glm_lightning.dsa",
+      "thumbnail": "realtime/goes_glm/glm_lightning/thumbnail_small.png",
+      "colorbar": "realtime/goes_glm/glm_lightning/glm_lightning_colorbar.png"
+    },
+    {
+      "id": "f476c8d643e869f3",
+      "name": "imerg_precip",
+      "display_name": "Precipitation (IMERG)",
+      "description": "Half-hourly near-real-time global precipitation estimates from NASA IMERG (GPM satellite constellation). Shows rain and snow intensity worldwide with vivid color mapping. 3600x1800 resolution, ~same-day latency. Source: NOAA Science On a Sphere.",
+      "provider": "noaa",
+      "type": "stream",
+      "categories": [
+        "atmosphere",
+        "hydrosphere"
+      ],
+      "units": "mm/hr",
+      "mpd": "realtime/noaa/imerg_precip/stream.mpd",
+      "dsa": "realtime/noaa/imerg_precip/imerg_precip.dsa",
+      "thumbnail": "realtime/noaa/imerg_precip/thumbnail_small.png",
+      "colorbar": "realtime/noaa/imerg_precip/imerg_precip_colorbar.png"
+    },
+    {
+      "id": "490d2f4ef0a45dd3",
+      "name": "land_surface_temp",
+      "display_name": "Land Surface Temperature",
+      "description": "Near-real-time global land surface temperature from the Copernicus Land Monitoring Service. Derived from geostationary satellite thermal infrared observations at ~5 km resolution. Updated hourly with ~1h latency. Cloud-covered, nighttime, and ocean areas are transparent.",
+      "provider": "cdse_lst",
+      "type": "stream",
+      "categories": [
+        "climate",
+        "atmosphere"
+      ],
+      "units": "\u00b0C",
+      "mpd": "realtime/cdse_lst/land_surface_temp/stream.mpd",
+      "dsa": "realtime/cdse_lst/land_surface_temp/land_surface_temp.dsa",
+      "thumbnail": "realtime/cdse_lst/land_surface_temp/thumbnail_small.png",
+      "colorbar": "realtime/cdse_lst/land_surface_temp/land_surface_temp_colorbar.png"
+    },
+    {
+      "id": "7ca8520c5536c190",
+      "name": "marine_heatwaves",
+      "display_name": "Marine Heatwaves",
+      "description": "Daily global marine heatwave detection using Hobday et al. (2018) categorization. Compares Copernicus Marine OSTIA SST against 1991-2020 NOAA OISST climatology. Categories: Moderate (yellow), Strong (orange), Severe (red), Extreme (dark red). Transparent overlay at 0.25\u00b0 resolution.",
+      "provider": "copernicus_marine",
+      "type": "stream",
+      "categories": [
+        "hydrosphere",
+        "climate"
+      ],
+      "units": "Category",
+      "mpd": "realtime/copernicus_marine/marine_heatwaves/stream.mpd",
+      "dsa": "realtime/copernicus_marine/marine_heatwaves/marine_heatwaves.dsa",
+      "thumbnail": "realtime/copernicus_marine/marine_heatwaves/thumbnail_small.png",
+      "colorbar": "realtime/copernicus_marine/marine_heatwaves/marine_heatwaves_colorbar.png"
+    },
+    {
+      "id": "d90d66ee907c1303",
+      "name": "modis",
+      "display_name": "MODIS True Color",
+      "description": "Daily global true-color imagery from NASA's MODIS (Moderate Resolution Imaging Spectroradiometer) instrument aboard the Terra and Aqua satellites. Source: NOAA Science On a Sphere real-time feed.",
+      "provider": "noaa",
+      "type": "stream",
+      "categories": [
+        "biosphere",
+        "atmosphere"
+      ],
+      "units": "",
+      "mpd": "realtime/noaa/modis/stream.mpd",
+      "dsa": "realtime/noaa/modis/modis.dsa",
+      "thumbnail": "realtime/noaa/modis/thumbnail_small.png",
+      "colorbar": "realtime/noaa/modis/modis_colorbar.png"
+    },
+    {
+      "id": "43c500ad2e20d7be",
+      "name": "no2",
+      "display_name": "Nitrogen Dioxide (NO2)",
+      "description": "Global surface-level nitrogen dioxide concentration from NASA GEOS-CF atmospheric composition model. NO2 is a direct marker of traffic, industrial, and power plant emissions \u2014 cities, highways, and shipping lanes light up vividly. 0.25\u00b0 resolution, hourly, ~1-day latency.",
+      "provider": "geos_cf",
+      "type": "stream",
+      "categories": [
+        "atmosphere",
+        "health"
+      ],
+      "units": "ppb",
+      "mpd": "realtime/geos_cf/no2/stream.mpd",
+      "dsa": "realtime/geos_cf/no2/no2.dsa",
+      "thumbnail": "realtime/geos_cf/no2/thumbnail_small.png",
+      "colorbar": "realtime/geos_cf/no2/no2_colorbar.png"
+    },
+    {
+      "id": "00ac4e7bed14a54b",
+      "name": "ocean_currents",
+      "display_name": "Ocean Currents",
+      "description": "Daily global ocean surface currents and temperature from the Copernicus Marine Global Ocean Physics Analysis and Forecast system at 0.083 degree (~8 km). Animated particle flow shows current direction and speed over a rainbow temperature background (-2 to 32 C). Updated daily.",
+      "provider": "copernicus_marine",
+      "type": "stream",
+      "categories": [
+        "hydrosphere",
+        "climate"
+      ],
+      "units": "\u00b0C",
+      "mpd": "realtime/copernicus_marine/ocean_currents/stream.mpd",
+      "dsa": "realtime/copernicus_marine/ocean_currents/ocean_currents.dsa",
+      "thumbnail": "realtime/copernicus_marine/ocean_currents/thumbnail_small.png",
+      "colorbar": "realtime/copernicus_marine/ocean_currents/ocean_currents_colorbar.png"
+    },
+    {
+      "id": "e1b809ba0aa9beb1",
+      "name": "ocean_currents_vangogh",
+      "display_name": "Ocean Currents (Van Gogh)",
+      "description": "Global ocean surface currents visualized as dense flowing particle trails in the style of van Gogh's Starry Night. Swirling indigo-cyan-gold trails over a dark sea surface temperature background. CMEMS GLO12 at 0.083\u00b0 resolution.",
+      "provider": "copernicus_marine",
+      "type": "stream",
+      "categories": [
+        "hydrosphere",
+        "climate"
+      ],
+      "units": "\u00b0C",
+      "mpd": "realtime/copernicus_marine/ocean_currents_vangogh/stream.mpd",
+      "dsa": "realtime/copernicus_marine/ocean_currents_vangogh/ocean_currents_vangogh.dsa",
+      "thumbnail": "realtime/copernicus_marine/ocean_currents_vangogh/thumbnail_small.png",
+      "colorbar": "realtime/copernicus_marine/ocean_currents_vangogh/ocean_currents_vangogh_colorbar.png"
+    },
+    {
+      "id": "bb2364e7af4847b5",
+      "name": "pm25",
+      "display_name": "Air Quality (PM2.5)",
+      "description": "Global surface-level PM2.5 particulate matter concentration from NASA GEOS-CF atmospheric composition model. Green areas indicate clean air, red areas indicate hazardous pollution levels. 0.25\u00b0 resolution, hourly, ~1-day latency.",
+      "provider": "geos_cf",
+      "type": "stream",
+      "categories": [
+        "atmosphere",
+        "health"
+      ],
+      "units": "\u00b5g/m\u00b3",
+      "mpd": "realtime/geos_cf/pm25/stream.mpd",
+      "dsa": "realtime/geos_cf/pm25/pm25.dsa",
+      "thumbnail": "realtime/geos_cf/pm25/thumbnail_small.png",
+      "colorbar": "realtime/geos_cf/pm25/pm25_colorbar.png"
+    },
+    {
+      "id": "45d491294d260ca4",
+      "name": "quakes",
+      "display_name": "Earthquakes",
+      "description": "Daily global earthquake activity showing recent seismic events. Point sizes indicate magnitude, colors indicate depth. Source: NOAA Science On a Sphere real-time feed (USGS data).",
+      "provider": "noaa",
+      "type": "stream",
+      "categories": [
+        "lithosphere"
+      ],
+      "units": "km depth",
+      "mpd": "realtime/noaa/quakes/stream.mpd",
+      "dsa": "realtime/noaa/quakes/quakes.dsa",
+      "thumbnail": "realtime/noaa/quakes/thumbnail_small.png",
+      "colorbar": "realtime/noaa/quakes/quakes_colorbar.png"
+    },
+    {
+      "id": "38dd8316a6632627",
+      "name": "sea_level_forecast",
+      "display_name": "Forecast: Sea Level",
+      "description": "48-hour global sea level forecast from the Copernicus Marine Global Ocean Physics Analysis and Forecast system. 2-hourly timesteps showing total sea level including tides, storm surge, and ocean dynamics. Deep blue (low) to cyan (high) with transparent land. Replaced daily.",
+      "provider": "copernicus_marine",
+      "type": "forecast",
+      "categories": [
+        "hydrosphere",
+        "climate"
+      ],
+      "units": "m",
+      "mpd": "forecast/copernicus_marine/sea_level_forecast/stream.mpd",
+      "dsa": "forecast/copernicus_marine/sea_level_forecast/sea_level_forecast.dsa",
+      "thumbnail": "forecast/copernicus_marine/sea_level_forecast/thumbnail_small.png",
+      "colorbar": "forecast/copernicus_marine/sea_level_forecast/sea_level_forecast_colorbar.png"
+    },
+    {
+      "id": "4ef1e5ca421ca501",
+      "name": "si10",
+      "display_name": "Surface Wind Speed",
+      "description": "Global wind speed and direction at 10 m above ground from ERA5 reanalysis by ECMWF. Visualized as animated wind particles flowing across the globe at 0.25\u00b0 (~31 km) resolution.",
+      "provider": "era5",
+      "type": "stream",
+      "categories": [
+        "atmosphere"
+      ],
+      "units": "m/s",
+      "mpd": "realtime/era5/si10/stream.mpd",
+      "dsa": "realtime/era5/si10/si10.dsa",
+      "thumbnail": "realtime/era5/si10/thumbnail_small.png",
+      "colorbar": "realtime/era5/si10/si10_colorbar.png"
+    },
+    {
+      "id": "f80b6172fdea8ed9",
+      "name": "snow_ice",
+      "display_name": "Snow & Ice Extent",
+      "description": "Daily global snow and ice coverage derived from satellite observations. Shows the extent of snow cover on land and sea-ice in polar regions. Source: NOAA Science On a Sphere real-time feed.",
+      "provider": "noaa",
+      "type": "stream",
+      "categories": [
+        "cryosphere"
+      ],
+      "units": "% Coverage",
+      "mpd": "realtime/noaa/snow_ice/stream.mpd",
+      "dsa": "realtime/noaa/snow_ice/snow_ice.dsa",
+      "thumbnail": "realtime/noaa/snow_ice/thumbnail_small.png",
+      "colorbar": "realtime/noaa/snow_ice/snow_ice_colorbar.png"
+    },
+    {
+      "id": "f1fa2947d82cd40a",
+      "name": "so2",
+      "display_name": "Sulphur Dioxide (SO2)",
+      "description": "Global total column sulphur dioxide from the Copernicus Atmosphere Monitoring Service (CAMS). SO2 is a marker of volcanic eruptions, coal-fired power plants, and industrial smelters \u2014 plumes from active volcanoes and major emission sources are clearly visible. 0.4\u00b0 resolution, daily, ~1-day latency.",
+      "provider": "era5",
+      "type": "stream",
+      "categories": [
+        "atmosphere"
+      ],
+      "units": "DU",
+      "mpd": "realtime/era5/so2/stream.mpd",
+      "dsa": "realtime/era5/so2/so2.dsa",
+      "thumbnail": "realtime/era5/so2/thumbnail_small.png",
+      "colorbar": "realtime/era5/so2/so2_colorbar.png"
+    },
+    {
+      "id": "2b76be4ea1b4fa80",
+      "name": "sst",
+      "display_name": "Sea Surface Temperature",
+      "description": "Global sea surface temperature from ERA5 reanalysis by ECMWF. Ocean temperatures from -5 \u00b0C to +35 \u00b0C at 0.25\u00b0 (~31 km) resolution using the turbo colormap.",
+      "provider": "era5",
+      "type": "stream",
+      "categories": [
+        "hydrosphere",
+        "climate"
+      ],
+      "units": "\u00b0C",
+      "mpd": "realtime/era5/sst/stream.mpd",
+      "dsa": "realtime/era5/sst/sst.dsa",
+      "thumbnail": "realtime/era5/sst/thumbnail_small.png",
+      "colorbar": "realtime/era5/sst/sst_colorbar.png"
+    },
+    {
+      "id": "dc25f43743658ce1",
+      "name": "sst_anomaly",
+      "display_name": "SST Anomaly",
+      "description": "Daily global sea surface temperature anomaly from NOAA NESDIS. Shows departures from the long-term average \u2014 warm anomalies (red) and cold anomalies (blue) \u2014 useful for tracking El Nino/La Nina patterns. Source: NOAA Science On a Sphere.",
+      "provider": "noaa",
+      "type": "stream",
+      "categories": [
+        "hydrosphere",
+        "climate"
+      ],
+      "units": "\u00b0C",
+      "mpd": "realtime/noaa/sst_anomaly/stream.mpd",
+      "dsa": "realtime/noaa/sst_anomaly/sst_anomaly.dsa",
+      "thumbnail": "realtime/noaa/sst_anomaly/thumbnail_small.png",
+      "colorbar": "realtime/noaa/sst_anomaly/sst_anomaly_colorbar.png"
+    },
+    {
+      "id": "2435d42ce553da5d",
+      "name": "stofs_baroclinic",
+      "display_name": "Forecast: STOFS Baroclinic Sea Level",
+      "description": "7-day global baroclinic sea level forecast from the STOFS-2D-Global shadow system (ADCIRC model) operated by Notre Dame CHL. Includes thermohaline and steric effects absent from the barotropic run, producing density-driven circulation patterns. 168 hourly frames. Jet colormap from -1.5m (blue) to +1.5m (red) with transparent land. Replaced daily.",
+      "provider": "stofs",
+      "type": "forecast",
+      "categories": [
+        "hydrosphere",
+        "climate"
+      ],
+      "units": "m",
+      "mpd": "forecast/stofs/stofs_baroclinic/stream.mpd",
+      "dsa": "forecast/stofs/stofs_baroclinic/stofs_baroclinic.dsa",
+      "thumbnail": "forecast/stofs/stofs_baroclinic/thumbnail_small.png",
+      "colorbar": "forecast/stofs/stofs_baroclinic/stofs_baroclinic_colorbar.png"
+    },
+    {
+      "id": "315151fbae73b30a",
+      "name": "stofs_sea_level",
+      "display_name": "Forecast: STOFS Sea Level",
+      "description": "7-day global sea level forecast from the STOFS-2D-Global shadow system (ADCIRC model) operated by Notre Dame's Computational Hydraulics Laboratory. 168 hourly frames showing combined water level (storm surge + astronomical tides). Jet colormap from -1.5m (blue) to +1.5m (red) with transparent land. Replaced daily.",
+      "provider": "stofs",
+      "type": "forecast",
+      "categories": [
+        "hydrosphere",
+        "climate"
+      ],
+      "units": "m",
+      "mpd": "forecast/stofs/stofs_sea_level/stream.mpd",
+      "dsa": "forecast/stofs/stofs_sea_level/stofs_sea_level.dsa",
+      "thumbnail": "forecast/stofs/stofs_sea_level/thumbnail_small.png",
+      "colorbar": "forecast/stofs/stofs_sea_level/stofs_sea_level_colorbar.png"
+    },
+    {
+      "id": "a2a1d88870eee0a3",
+      "name": "surface_o3",
+      "display_name": "Ground-Level Ozone (O3)",
+      "description": "Global surface-level ozone concentration from NASA GEOS-CF atmospheric composition model. Ground-level ozone is a respiratory irritant formed by sunlight reacting with precursor pollutants. Peaks in summer afternoons. The most widespread air quality problem worldwide. 0.25\u00b0 resolution, hourly, ~1-day latency.",
+      "provider": "geos_cf",
+      "type": "stream",
+      "categories": [
+        "atmosphere",
+        "health"
+      ],
+      "units": "ppb",
+      "mpd": "realtime/geos_cf/surface_o3/stream.mpd",
+      "dsa": "realtime/geos_cf/surface_o3/surface_o3.dsa",
+      "thumbnail": "realtime/geos_cf/surface_o3/thumbnail_small.png",
+      "colorbar": "realtime/geos_cf/surface_o3/surface_o3_colorbar.png"
+    },
+    {
+      "id": "3b477921f536a82c",
+      "name": "t2m",
+      "display_name": "Surface Temperature",
+      "description": "Global 2-meter air temperature from ERA5 reanalysis by ECMWF. Hourly snapshots at 0.25\u00b0 (~31 km) resolution, colored from -60 \u00b0C (deep blue) to +40 \u00b0C (deep red) using the turbo colormap.",
+      "provider": "era5",
+      "type": "stream",
+      "categories": [
+        "atmosphere",
+        "climate"
+      ],
+      "units": "\u00b0C",
+      "mpd": "realtime/era5/t2m/stream.mpd",
+      "dsa": "realtime/era5/t2m/t2m.dsa",
+      "thumbnail": "realtime/era5/t2m/thumbnail_small.png",
+      "colorbar": "realtime/era5/t2m/t2m_colorbar.png"
+    },
+    {
+      "id": "8ac733dce1e9acea",
+      "name": "tcc",
+      "display_name": "Cloud Cover (ERA5)",
+      "description": "Global total cloud cover fraction from ERA5 reanalysis by ECMWF. Shows cloud density from clear skies (transparent) to fully overcast (white) at 0.25\u00b0 (~31 km) resolution.",
+      "provider": "era5",
+      "type": "stream",
+      "categories": [
+        "atmosphere"
+      ],
+      "units": "fraction",
+      "mpd": "realtime/era5/tcc/stream.mpd",
+      "dsa": "realtime/era5/tcc/tcc.dsa",
+      "thumbnail": "realtime/era5/tcc/thumbnail_small.png",
+      "colorbar": "realtime/era5/tcc/tcc_colorbar.png"
+    },
+    {
+      "id": "9f26e4dbecd5d2de",
+      "name": "tp",
+      "display_name": "Precipitation",
+      "description": "Global total precipitation (rain and snow) from ERA5 reanalysis by ECMWF. Hourly accumulations at 0.25\u00b0 (~31 km) resolution, with transparent dry areas for overlay use.",
+      "provider": "era5",
+      "type": "stream",
+      "categories": [
+        "atmosphere",
+        "hydrosphere"
+      ],
+      "units": "mm",
+      "mpd": "realtime/era5/tp/stream.mpd",
+      "dsa": "realtime/era5/tp/tp.dsa",
+      "thumbnail": "realtime/era5/tp/thumbnail_small.png",
+      "colorbar": "realtime/era5/tp/tp_colorbar.png"
+    },
+    {
+      "id": "c4cd12e9ba829603",
+      "name": "utci",
+      "display_name": "Heat Stress (UTCI)",
+      "description": "Universal Thermal Climate Index from ERA5-HEAT (Copernicus). The gold standard for human thermal comfort, accounting for temperature, humidity, wind speed, and solar radiation. Rendered with the WMO 10-band UTCI stress scale (Br\u00f6de et al. 2012): blues for cold stress (< -40 to 9 \u00b0C), green for the no-thermal-stress comfort zone (9 to 26 \u00b0C), and yellow \u2192 orange \u2192 red for escalating heat stress (26 to > 46 \u00b0C). 0.25\u00b0 resolution, hourly, ~5-day latency.",
+      "provider": "era5",
+      "type": "stream",
+      "categories": [
+        "atmosphere",
+        "health",
+        "climate"
+      ],
+      "units": "\u00b0C",
+      "mpd": "realtime/era5/utci/stream.mpd",
+      "dsa": "realtime/era5/utci/utci.dsa",
+      "thumbnail": "realtime/era5/utci/thumbnail_small.png",
+      "colorbar": "realtime/era5/utci/utci_colorbar.png"
+    },
+    {
+      "id": "d96a4b6f8524c70c",
+      "name": "uv_index",
+      "display_name": "Forecast: UV Index",
+      "description": "5-day global UV index forecast from the Copernicus Atmosphere Monitoring Service (CAMS). Hourly timesteps showing biologically effective UV dose at the surface. Higher values mean greater sunburn and skin cancer risk. Rendered with the WHO/WMO 5-band UV Index scale: Low 0-2 (green), Moderate 3-5 (yellow), High 6-7 (orange), Very High 8-10 (red), Extreme 11+ (violet). 0.4\u00b0 resolution, replaced daily.",
+      "provider": "era5",
+      "type": "forecast",
+      "categories": [
+        "atmosphere",
+        "health"
+      ],
+      "units": "UVI",
+      "mpd": "forecast/era5/uv_index/stream.mpd",
+      "dsa": "forecast/era5/uv_index/uv_index.dsa",
+      "thumbnail": "forecast/era5/uv_index/thumbnail_small.png",
+      "colorbar": "forecast/era5/uv_index/uv_index_colorbar.png"
+    },
+    {
+      "id": "299574b2b44343f0",
+      "name": "vegetation",
+      "display_name": "Vegetation Index (NDVI)",
+      "description": "Weekly global Normalized Difference Vegetation Index (NDVI) showing plant health and greenness. Green areas indicate healthy vegetation, brown/yellow areas indicate sparse or stressed vegetation. Source: NOAA Science On a Sphere real-time feed.",
+      "provider": "noaa",
+      "type": "stream",
+      "categories": [
+        "biosphere"
+      ],
+      "units": "NDVI",
+      "mpd": "realtime/noaa/vegetation/stream.mpd",
+      "dsa": "realtime/noaa/vegetation/vegetation.dsa",
+      "thumbnail": "realtime/noaa/vegetation/thumbnail_small.png",
+      "colorbar": "realtime/noaa/vegetation/vegetation_colorbar.png"
+    },
+    {
+      "id": "3fa669c76a394c4c",
+      "name": "viirs_earth_view",
+      "display_name": "Earth View (VIIRS)",
+      "description": "Daily satellite view from the VIIRS Day/Night Band on Suomi NPP. Shows the entire Earth from a polar orbit \u2014 cloud patterns, the day-night terminator, and city lights visible on the nighttime side. Grayscale composite at 1 km resolution. Source: NASA GIBS.",
+      "provider": "gibs",
+      "type": "stream",
+      "categories": [
+        "humans",
+        "atmosphere"
+      ],
+      "units": "Radiance",
+      "mpd": "realtime/gibs/viirs_earth_view/stream.mpd",
+      "dsa": "realtime/gibs/viirs_earth_view/viirs_earth_view.dsa",
+      "thumbnail": "realtime/gibs/viirs_earth_view/thumbnail_small.png",
+      "colorbar": "realtime/gibs/viirs_earth_view/viirs_earth_view_colorbar.png"
+    },
+    {
+      "id": "079d9e07de727292",
+      "name": "wind_vangogh",
+      "display_name": "Wind (Van Gogh)",
+      "description": "Global wind speed and direction at 10 m visualized as dense flowing particle trails in the style of van Gogh's Starry Night. Swirling indigo-cyan-gold trails over a dark Blue Marble background. ERA5 reanalysis at 0.25\u00b0 resolution.",
+      "provider": "era5",
+      "type": "stream",
+      "categories": [
+        "atmosphere"
+      ],
+      "units": "m/s",
+      "mpd": "realtime/era5/wind_vangogh/stream.mpd",
+      "dsa": "realtime/era5/wind_vangogh/wind_vangogh.dsa",
+      "thumbnail": "realtime/era5/wind_vangogh/thumbnail_small.png",
+      "colorbar": "realtime/era5/wind_vangogh/wind_vangogh_colorbar.png"
+    }
+  ]
+}

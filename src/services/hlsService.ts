@@ -3,6 +3,7 @@
  */
 
 import Hls from 'hls.js'
+import { MediaPlayer, type MediaPlayerClass, type MediaPlayerEvent } from 'dashjs'
 import { logger } from '../utils/logger'
 import { reportError } from '../analytics'
 
@@ -19,8 +20,8 @@ export interface VideoProxyResponse {
   id: string
   title: string
   duration: number
-  hls: string
-  dash: string
+  hls?: string
+  dash?: string
   files: VideoProxyFile[]
 }
 
@@ -33,6 +34,7 @@ const MAX_ERROR_RETRIES = 3
 
 export class HLSService {
   private hls: Hls | null = null
+  private dash: MediaPlayerClass | null = null
   video: HTMLVideoElement | null = null
 
   /**
@@ -79,6 +81,10 @@ export class HLSService {
       if (this.hls) {
         this.hls.destroy()
         this.hls = null
+      }
+      if (this.dash) {
+        this.dash.destroy()
+        this.dash = null
       }
 
       if (Hls.isSupported()) {
@@ -169,6 +175,61 @@ export class HLSService {
   }
 
   /**
+   * Load a DASH MPD stream into the video element.
+   */
+  loadDash(dashUrl: string, video: HTMLVideoElement, mobile = false): Promise<void> {
+    return new Promise((resolve, reject) => {
+      if (this.hls) {
+        this.hls.destroy()
+        this.hls = null
+      }
+      if (this.dash) {
+        this.dash.destroy()
+        this.dash = null
+      }
+
+      if (!('MediaSource' in window)) {
+        reject(new Error('DASH playback requires MediaSource support'))
+        return
+      }
+
+      const player = MediaPlayer().create()
+      this.dash = player
+
+      const cleanup = () => {
+        player.off('streamInitialized', onReady)
+        player.off('canPlay', onReady)
+        player.off('error', onError)
+      }
+      const onReady = () => {
+        cleanup()
+        logger.info('[DASH] Stream ready')
+        resolve()
+      }
+      const onError = (event: MediaPlayerEvent) => {
+        cleanup()
+        const detail = (event as MediaPlayerEvent & { error?: unknown }).error ?? event
+        const message = typeof detail === 'string' ? detail : JSON.stringify(detail)
+        logger.warn('[DASH] Playback error:', message)
+        reportError('hls', new Error(message))
+        reject(new Error(`DASH playback error: ${message}`))
+      }
+
+      player.on('streamInitialized', onReady)
+      player.on('canPlay', onReady)
+      player.on('error', onError)
+      player.updateSettings({
+        streaming: {
+          abr: {
+            autoSwitchBitrate: { video: true, audio: true },
+          },
+        },
+      } as any)
+      player.initialize(video, dashUrl, false)
+    })
+  }
+
+  /**
    * Load a direct MP4 file (fallback when HLS fails)
    */
   loadDirect(mp4Url: string, video: HTMLVideoElement): Promise<void> {
@@ -254,6 +315,10 @@ export class HLSService {
     if (this.hls) {
       this.hls.destroy()
       this.hls = null
+    }
+    if (this.dash) {
+      this.dash.destroy()
+      this.dash = null
     }
     if (this.video) {
       this.video.pause()

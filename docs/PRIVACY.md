@@ -1,8 +1,8 @@
-# Privacy Policy — Terraviz
+# Privacy Policy — AYNI
 
 <!-- internal-only -->
 **Draft for review.** This document is the canonical source for the
-privacy policy that ships at [`/privacy`](https://terraviz.pages.dev/privacy).
+privacy policy that ships at `/privacy`.
 `public/privacy.html` is generated from this file by
 `scripts/build-privacy-page.ts` — edit the Markdown, not the HTML.
 Needs legal review before release. See
@@ -20,7 +20,7 @@ Last updated: **draft**
 
 ## Summary — in plain language
 
-Terraviz is a NOAA Science On a Sphere viewer. We want to
+AYNI is an interactive Earth science globe from Pachamama Studios. We want to
 make it better without spying on you. This page explains exactly what
 the app records, what it never records, and how you turn everything
 off.
@@ -43,8 +43,11 @@ sold, shared with advertisers, or used for profiling.
 
 ## 1. Who runs this
 
-Terraviz is developed by [Zyra Project](https://github.com/zyra-project).
-Source code: <https://github.com/zyra-project/terraviz>.
+AYNI is operated by Pachamama Studios.
+
+AYNI is built from the open-source TerraViz project and uses the NOAA
+Science On a Sphere dataset catalog as a source for many datasets.
+Original project source: <https://github.com/zyra-project/terraviz>.
 
 Contact for privacy questions: *[TBD — populate before release]*.
 
@@ -195,7 +198,7 @@ covered in sections 4 and 5:
 
 ### Crash reports (separate, per-crash consent)
 
-If Terraviz crashes in a way you notice — the globe goes
+If AYNI crashes in a way you notice — the globe goes
 blank, the app freezes, or a failure dialog appears — we may ask
 you if you want to send a crash report for *that specific crash*.
 This is a one-time prompt, per crash. Nothing is sent unless you
@@ -235,7 +238,7 @@ leaving your device, by the nature of how AI models work.
   (for example, OpenAI, Ollama running on your own computer, or a
   self-hosted endpoint), messages go directly to that provider. Our
   proxy is not involved, and their privacy policy governs what
-  happens to those messages. Terraviz has no visibility
+  happens to those messages. AYNI has no visibility
   into the contents
 - **We do not keep a copy** of your Orbit messages on our servers.
   Our proxy forwards the request, streams back the response, and
@@ -261,7 +264,7 @@ Rating a reply is a feedback action, **not** telemetry. See section
 
 ## 5. Feedback submissions
 
-Terraviz has two feedback surfaces, and both store the
+AYNI has two feedback surfaces, and both store the
 content you submit so we can read, triage, and act on it. Storing
 your feedback text is the whole point of feedback — this section
 exists so you know exactly what each surface captures.
@@ -413,7 +416,7 @@ any feature.
 
 ## 9. Children's privacy
 
-Terraviz is an educational tool and is used in classrooms.
+AYNI is an educational tool and may be used in classrooms.
 We collect no personal information from any user, regardless of age.
 Essential-mode analytics contain no information that could identify a
 child (or anyone else) individually. Research mode, Orbit ratings,

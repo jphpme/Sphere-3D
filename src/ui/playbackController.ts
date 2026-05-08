@@ -13,6 +13,9 @@ const LOOP_RESTART_DELAY_MS = 2000
 const VIDEO_END_THRESHOLD = 0.05
 const SCRUBBER_MAX = 1000
 const DEFAULT_FRAME_STEP = 1 / 30
+const PLAY_START_STALL_CHECK_MS = 700
+const PLAY_START_STALL_EPSILON = 0.03
+const PLAY_START_NUDGE_SECONDS = 0.25
 
 export interface PlaybackState {
   playbackUpdateId: number | null
@@ -111,6 +114,7 @@ export function togglePlayPause(
     hlsService.play()?.catch(e => {
       logger.warn('[App] Play failed:', e)
     })
+    recoverPlaybackIfStalledAtStart(hlsService)
     appState.isPlaying = true
   } else {
     hlsService.pause()
@@ -118,6 +122,47 @@ export function togglePlayPause(
   }
   updatePlayButton(hlsService.paused)
   announce(hlsService.paused ? 'Playback paused' : 'Playback started')
+}
+
+/**
+ * Some generated DASH timelines do not start advancing from exactly
+ * t=0 until the user performs a seek. Mirror that user action with a
+ * tiny automatic nudge, but only when playback is genuinely stuck at
+ * the beginning after the play gesture.
+ */
+function recoverPlaybackIfStalledAtStart(hlsService: HLSService): void {
+  const video = hlsService.getVideo()
+  if (!video || !Number.isFinite(video.duration) || video.duration <= 0) return
+
+  const startedAt = video.currentTime
+  if (startedAt > PLAY_START_NUDGE_SECONDS) return
+
+  window.setTimeout(() => {
+    const currentVideo = hlsService.getVideo()
+    if (
+      !currentVideo ||
+      currentVideo.paused ||
+      !Number.isFinite(currentVideo.duration) ||
+      currentVideo.duration <= 0
+    ) {
+      return
+    }
+
+    if (currentVideo.currentTime > startedAt + PLAY_START_STALL_EPSILON) return
+
+    const maxSeek = Math.max(0, currentVideo.duration - VIDEO_END_THRESHOLD)
+    const target = Math.min(PLAY_START_NUDGE_SECONDS, maxSeek)
+    if (target <= currentVideo.currentTime) return
+
+    logger.debug('[App] Playback stalled at start; nudging playhead:', {
+      from: currentVideo.currentTime,
+      to: target,
+    })
+    currentVideo.currentTime = target
+    hlsService.play()?.catch(e => {
+      logger.warn('[App] Play recovery failed:', e)
+    })
+  }, PLAY_START_STALL_CHECK_MS)
 }
 
 /** Seek to the beginning of the video and pause playback. */

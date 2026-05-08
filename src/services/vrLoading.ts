@@ -3,7 +3,7 @@
  *
  * Faithful to the 2D visual language: small dark-blue sphere with a
  * subtle pulse, two concentric rings spinning at different speeds and
- * directions, "Terraviz" title + subtitle, thin progress bar,
+ * directions, AYNI title + subtitle, thin progress bar,
  * status text. Replaces the 2D HTML loading screen with a spatial
  * version while the WebXR session is starting up and the dataset
  * texture is decoding.
@@ -78,8 +78,8 @@ export interface VrLoadingHandle {
 }
 
 /**
- * Draw the title canvas. "Terraviz" big uppercase + "Science On
- * a Sphere" subtitle in accent — mirrors the 2D headings.
+ * Draw the title canvas. AYNI title + Pachamama Studios subtitle
+ * in accent, mirroring the 2D headings.
  */
 function drawTitle(ctx: CanvasRenderingContext2D): void {
   ctx.clearRect(0, 0, TITLE_CANVAS_WIDTH, TITLE_CANVAS_HEIGHT)
@@ -89,7 +89,7 @@ function drawTitle(ctx: CanvasRenderingContext2D): void {
   ctx.textBaseline = 'middle'
   // Letter-spacing isn't a Canvas2D property — fake it by drawing
   // each letter with a fixed advance. Matches 2D's letter-spacing: 0.25em.
-  const titleText = 'TERRAVIZ'
+  const titleText = 'AYNI'
   const letterSpacingPx = 12
   const letterWidth = ctx.measureText('M').width // approx em width
   const totalWidth = titleText.length * (letterWidth * 0.55 + letterSpacingPx)
@@ -102,7 +102,7 @@ function drawTitle(ctx: CanvasRenderingContext2D): void {
   // Subtitle in accent
   ctx.fillStyle = '#4da6ff'
   ctx.font = '500 32px system-ui, -apple-system, sans-serif'
-  ctx.fillText('SCIENCE ON A SPHERE', TITLE_CANVAS_WIDTH / 2, TITLE_CANVAS_HEIGHT / 2 + 64)
+  ctx.fillText('PACHAMAMA STUDIOS', TITLE_CANVAS_WIDTH / 2, TITLE_CANVAS_HEIGHT / 2 + 64)
 }
 
 /** Draw the status text canvas. */

@@ -453,7 +453,7 @@ export function showBrowseUI(
       if (visDev) metaHtml += `<div class="browse-card-meta"><strong>Visualization:</strong> ${escapeHtml(visDev)}</div>`
       if (timeRange) metaHtml += `<div class="browse-card-meta"><strong>Time range:</strong> ${timeRange}</div>`
       if (dateAdded) metaHtml += `<div class="browse-card-meta"><strong>Added:</strong> ${escapeHtml(dateAdded)}</div>`
-      if (catalogUrl) metaHtml += `<div class="browse-card-meta"><a href="${escapeAttr(catalogUrl)}" target="_blank" rel="noopener" style="color: #4da6ff; text-decoration: none; font-size: 0.65rem;">View in SOS catalog \u2197</a></div>`
+      if (catalogUrl) metaHtml += `<div class="browse-card-meta"><a href="${escapeAttr(catalogUrl)}" target="_blank" rel="noopener" style="color: #4da6ff; text-decoration: none; font-size: 0.65rem;">View source catalog \u2197</a></div>`
 
       const keywordsHtml = keywords.length
         ? `<div class="browse-card-keywords">${keywords.slice(0, MAX_CARD_KEYWORDS).map(k => `<span class="browse-card-keyword" data-keyword="${escapeAttr(k)}" role="button" tabindex="0" aria-label="Filter by ${escapeAttr(k)}">${escapeHtml(k)}</span>`).join('')}</div>`
