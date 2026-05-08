@@ -41,7 +41,13 @@ function toolBody(overrides: Record<string, unknown> = {}): Record<string, unkno
 
 describe('/api/chat/completions Gemma handling', () => {
   it('disables Gemma thinking mode before calling Workers AI', async () => {
-    const run = vi.fn(async () => ({ response: 'ok' }))
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('data: {"response":"ok"}\n\ndata: [DONE]\n\n'))
+        controller.close()
+      },
+    })
+    const run = vi.fn(async () => new Response(stream))
 
     const res = await onRequestPost(makeCtx(toolBody(), run))
     const text = await res.text()
@@ -50,18 +56,41 @@ describe('/api/chat/completions Gemma handling', () => {
     expect(run).toHaveBeenCalledWith(
       '@cf/google/gemma-4-26b-a4b-it',
       expect.objectContaining({
+        stream: true,
         chat_template_kwargs: { enable_thinking: false },
         reasoning_effort: null,
       }),
+      { returnRawResponse: true },
     )
+    const inputs = (run as ReturnType<typeof vi.fn>).mock.calls[0]?.[1] as unknown as Record<string, unknown>
+    expect(inputs).not.toHaveProperty('tools')
   })
 
-  it('streams text when Workers AI returns OpenAI-style choices content', async () => {
+  it('streams text when Workers AI raw stream returns OpenAI-style choices content', async () => {
+    const payload = JSON.stringify({
+      choices: [{ delta: { content: 'ok from choices' } }],
+    })
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(`data: ${payload}\n\ndata: [DONE]\n\n`))
+        controller.close()
+      },
+    })
+    const run = vi.fn(async () => new Response(stream))
+
+    const res = await onRequestPost(makeCtx(toolBody(), run))
+    const text = await res.text()
+
+    expect(text).toContain('"content":"ok from choices"')
+    expect(text).toContain('data: [DONE]')
+  })
+
+  it('streams text when a tool-capable Workers AI model returns choices content', async () => {
     const run = vi.fn(async () => ({
       choices: [{ message: { role: 'assistant', content: 'ok from choices' } }],
     }))
 
-    const res = await onRequestPost(makeCtx(toolBody(), run))
+    const res = await onRequestPost(makeCtx(toolBody({ model: 'llama-4-scout' }), run))
     const text = await res.text()
 
     expect(text).toContain('"content":"ok from choices"')

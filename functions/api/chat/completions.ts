@@ -53,7 +53,6 @@ const MODEL_MAP: Record<string, string> = {
 // model instead of stripping them, and routes through `toolStreamShim` so
 // the response tool_calls are wrapped in OpenAI-format SSE chunks.
 const TOOL_CALLING_MODELS = new Set([
-  '@cf/google/gemma-4-26b-a4b-it',
   '@cf/meta/llama-4-scout-17b-16e-instruct',
   '@cf/meta/llama-3.3-70b-instruct-fp8-fast',
   '@hf/nousresearch/hermes-2-pro-mistral-7b',
