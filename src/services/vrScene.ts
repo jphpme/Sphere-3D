@@ -56,7 +56,7 @@ const GLOBE_RADIUS = 0.5
 
 /** Clamps on zoom so the globe never vanishes into the user's head or flies off. */
 export const MIN_GLOBE_SCALE = 0.3
-export const MAX_GLOBE_SCALE = 2.5
+export const MAX_GLOBE_SCALE = 5
 
 /** Max simultaneous globes. Quest 2 has 1-2 H.264 decoders; 4 at
  *  the 4K/8K tier will push those hard. Capped defensively; the

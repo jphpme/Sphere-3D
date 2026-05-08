@@ -41,6 +41,7 @@ import { logger } from '../utils/logger'
  * when the user leans in close.
  */
 const BORDERS_RADIUS_FACTOR = 1.001
+const INTERIOR_BORDERS_RADIUS_FACTOR = 0.999
 
 /**
  * Sphere tessellation. Borders use the same resolution as the
@@ -143,6 +144,11 @@ export function createVrBorders(
     BORDERS_SEGMENTS,
     BORDERS_SEGMENTS,
   )
+  const interiorGeometry = new THREE_.SphereGeometry(
+    globeRadius * INTERIOR_BORDERS_RADIUS_FACTOR,
+    BORDERS_SEGMENTS,
+    BORDERS_SEGMENTS,
+  )
   const material = new THREE_.ShaderMaterial({
     uniforms: {
       uMap: { value: null as THREE.Texture | null },
@@ -180,13 +186,18 @@ export function createVrBorders(
     blendSrc: THREE_.OneFactor,
     blendDst: THREE_.OneMinusSrcAlphaFactor,
     premultipliedAlpha: true,
+    side: THREE_.DoubleSide,
     // `depthTest` STAYS enabled — unlike the HUD panels, borders
     // must read the globe's depth so lines on the back of the
     // sphere don't bleed through when the user is looking at the
-    // near side. The 0.1% radius offset gives us the depth
-    // headroom to avoid z-fighting with the globe surface.
+    // near side. The paired exterior/interior 0.1% radius offsets
+    // give us the depth headroom to avoid z-fighting while keeping
+    // borders visible when the user steps inside the globe.
   })
+  const interiorMaterial = material.clone()
   const mesh = new THREE_.Mesh(geometry, material)
+  const interiorMesh = new THREE_.Mesh(interiorGeometry, interiorMaterial)
+  mesh.add(interiorMesh)
   mesh.visible = false
   // Render after the globe's dataset texture so alpha blend layers
   // lines on top rather than the globe writing over the shell.
@@ -219,8 +230,10 @@ export function createVrBorders(
       (tex) => {
         if (disposed) return
         material.uniforms.uMap.value = tex
+        interiorMaterial.uniforms.uMap.value = tex
         hasTexture = true
         material.needsUpdate = true
+        interiorMaterial.needsUpdate = true
       },
       () => {
         // loadSharedBordersTexture already logged; stay invisible on
@@ -279,6 +292,8 @@ export function createVrBorders(
       disposed = true
       geometry.dispose()
       material.dispose()
+      interiorGeometry.dispose()
+      interiorMaterial.dispose()
       // Decrement based on `refIncremented` (whether we ever took
       // a ref) rather than `textureLoadKicked` (current load state):
       // a load that failed and reset `textureLoadKicked` must still
