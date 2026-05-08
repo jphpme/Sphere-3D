@@ -96,6 +96,14 @@ export interface VrSessionContext {
   isPlaying(): boolean
   /** Called when the user taps play/pause in VR. Toggles the primary's video. */
   togglePlayPause(): void
+  /** Current primary video time in seconds. 0 for image/no-video datasets. */
+  getPlaybackTime(): number
+  /** Current primary video duration in seconds. 0 when unavailable. */
+  getPlaybackDuration(): number
+  /** Stop primary video playback and seek to the beginning. */
+  stopPlayback(): void
+  /** Seek primary video by normalized progress fraction, 0..1. */
+  seekPlayback(fraction: number): void
   /** Drives the HUD mute icon variant (speaker vs speaker-slash). */
   isMuted(): boolean
   /** Called when the user taps the HUD mute button. Flips `video.muted`. */
@@ -790,6 +798,8 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     isPlaying: ctx.isPlaying(),
     hasVideo: ctx.hasVideoDataset(),
     isMuted: ctx.isMuted(),
+    currentTime: ctx.getPlaybackTime(),
+    duration: ctx.getPlaybackDuration(),
     panelCount: ctx.getPanelCount(),
     primaryIndex: ctx.getPrimaryIndex(),
     browseOpen: browse.isVisible(),
@@ -915,19 +925,23 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
       }
     },
     onHudAction: (action) => {
-      if (action === 'play-pause') {
+      if (action.kind === 'play-pause') {
         ctx.togglePlayPause()
-      } else if (action === 'mute') {
+      } else if (action.kind === 'stop') {
+        ctx.stopPlayback()
+      } else if (action.kind === 'seek') {
+        ctx.seekPlayback(action.fraction)
+      } else if (action.kind === 'mute') {
         // Flip the primary video's muted flag. The per-frame
         // hud.setState pipes ctx.isMuted() back through so the
         // icon updates on the next redraw.
         ctx.toggleMute()
-      } else if (action === 'browse') {
+      } else if (action.kind === 'browse') {
         // Toggle the in-VR dataset browse panel. Its `isVisible`
         // feeds `hud.setState({ browseOpen })` each frame, so the
         // next render shows the button in its active-state color.
         browse.setVisible(!browse.isVisible())
-      } else if (action === 'exit-vr') {
+      } else if (action.kind === 'exit-vr') {
         // Programmatic exit — fires the 'end' event, which routes
         // through the same teardown path as headset-initiated exits.
         void session.end().catch(err =>
@@ -1168,6 +1182,8 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
       isPlaying: ctx.isPlaying(),
       hasVideo: ctx.hasVideoDataset(),
       isMuted: ctx.isMuted(),
+      currentTime: ctx.getPlaybackTime(),
+      duration: ctx.getPlaybackDuration(),
       panelCount,
       primaryIndex: ctx.getPrimaryIndex(),
       browseOpen: active.browse.isVisible(),

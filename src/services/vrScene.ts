@@ -276,6 +276,7 @@ export function createVrScene(
       map: earth.baseDiffuseTexture ?? earth.baseEarthTexture,
       specular: new THREE_.Color(0x444444),
       shininess: 30,
+      side: THREE_.DoubleSide,
     })
     const mesh = new THREE_.Mesh(
       new THREE_.SphereGeometry(GLOBE_RADIUS, 64, 64),

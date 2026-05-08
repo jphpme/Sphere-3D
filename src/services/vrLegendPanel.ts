@@ -21,7 +21,7 @@ const BORDER_COLOR = 'rgba(255, 255, 255, 0.14)'
 const TITLE_COLOR = '#e8eaf0'
 const MUTED_COLOR = 'rgba(232, 234, 240, 0.68)'
 
-const POSITION_OFFSET = { x: 0.62, y: 0.15, z: 0.12 } as const
+const POSITION_OFFSET = { x: -0.62, y: 0.15, z: 0.12 } as const
 
 export interface VrLegendPanelHandle {
   readonly mesh: THREE.Mesh

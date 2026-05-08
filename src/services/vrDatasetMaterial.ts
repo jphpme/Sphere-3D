@@ -113,5 +113,6 @@ export function createVrDatasetMaterial(
     blendSrc: THREE_.OneFactor,
     blendDst: THREE_.OneMinusSrcAlphaFactor,
     premultipliedAlpha: true,
+    side: THREE_.DoubleSide,
   })
 }

@@ -1515,6 +1515,30 @@ class InteractiveSphere {
       togglePlayPause: () => togglePlayPause(
         this.hlsService, this.appState, (m) => this.announce(m),
       ),
+      getPlaybackTime: () => {
+        const video = this.hlsService?.video
+        return video && Number.isFinite(video.currentTime) ? video.currentTime : 0
+      },
+      getPlaybackDuration: () => {
+        const duration = this.hlsService?.duration
+        return Number.isFinite(duration) && (duration as number) > 0 ? duration as number : 0
+      },
+      stopPlayback: () => {
+        if (!this.hlsService) return
+        this.hlsService.currentTime = 0
+        this.hlsService.pause()
+        this.appState.isPlaying = false
+        this.playback.scrubbing = true
+        this.announce('Playback stopped')
+      },
+      seekPlayback: (fraction: number) => {
+        const video = this.hlsService?.video
+        const duration = this.hlsService?.duration
+        if (!video || !Number.isFinite(duration) || (duration as number) <= 0) return
+        video.currentTime = Math.max(0, Math.min(1, fraction)) * (duration as number)
+        this.playback.scrubbing = true
+        this.emitPlaybackAction('seek')
+      },
       isMuted: () => {
         // Read directly off the primary's <video> element —
         // hlsService sets it muted by default for autoplay

@@ -407,6 +407,7 @@ export function createPhotorealEarth(
     shininess: EARTH_SHININESS,
     emissiveMap: null,
     emissive: new THREE_.Color(0xffffff),
+    side: THREE_.DoubleSide,
   })
 
   // Shader patch: gate the emissive map (night city lights) to the

@@ -88,6 +88,14 @@ function browseActionsEqual(a: VrBrowseAction, b: VrBrowseAction): boolean {
   return true // kind === 'close' — no payload to compare
 }
 
+function hudActionsEqual(a: VrHudAction, b: VrHudAction): boolean {
+  if (a.kind !== b.kind) return false
+  if (a.kind === 'seek' && b.kind === 'seek') {
+    return Math.abs(a.fraction - b.fraction) < 0.08
+  }
+  return true
+}
+
 /**
  * Thumbstick reading below this magnitude is treated as zero. Quest
  * thumbsticks rest slightly off-center; without a deadzone the globe
@@ -414,6 +422,15 @@ export function createVrInteraction(
   const placeArmed: boolean[] = [false, false]
   /** Per-controller browse action armed on selectstart (DOM click semantics). */
   const browseArmed: (VrBrowseAction | null)[] = [null, null]
+  type BrowseDragState =
+    | { kind: 'idle' }
+    | {
+        kind: 'browse'
+        controllerIndex: 0 | 1
+        lastCanvasY: number
+        totalDelta: number
+      }
+  let browseDrag: BrowseDragState = { kind: 'idle' }
   /** Per-controller tour-control action armed on selectstart (DOM click semantics). */
   const tourArmed: (VrTourControlsAction | null)[] = [null, null]
   /** Per-controller tour-overlay interactive action armed on selectstart (question answer / continue). */
@@ -527,8 +544,8 @@ export function createVrInteraction(
 
   function pickHit(controller: THREE.XRTargetRaySpace):
     | { kind: 'hud'; action: VrHudAction }
-    | { kind: 'browse'; action: VrBrowseAction }
-    | { kind: 'browse-scroll' }
+    | { kind: 'browse'; action: VrBrowseAction; uv: { x: number; y: number } }
+    | { kind: 'browse-scroll'; uv: { x: number; y: number } }
     | { kind: 'tour-control'; action: VrTourControlsAction }
     | { kind: 'tour-overlay'; action: VrTourInteractiveAction }
     | { kind: 'overlay-drag'; overlayId: string; mesh: THREE.Mesh }
@@ -548,14 +565,12 @@ export function createVrInteraction(
     if (ctx.browse.isVisible()) {
       const browseHits = raycaster.intersectObject(ctx.browse.mesh, false)
       if (browseHits.length > 0 && browseHits[0].uv) {
-        const action = ctx.browse.hitTest({
-          x: browseHits[0].uv.x,
-          y: browseHits[0].uv.y,
-        })
-        if (action) return { kind: 'browse', action }
+        const uv = { x: browseHits[0].uv.x, y: browseHits[0].uv.y }
+        const action = ctx.browse.hitTest(uv)
+        if (action) return { kind: 'browse', action, uv }
         // Ray hit the panel but not a button/card — still counts as
         // a browse hit for scroll purposes.
-        return { kind: 'browse-scroll' }
+        return { kind: 'browse-scroll', uv }
       }
     }
 
@@ -851,10 +866,22 @@ export function createVrInteraction(
 
     if (hit.kind === 'browse') {
       browseArmed[index] = hit.action
+      browseDrag = {
+        kind: 'browse',
+        controllerIndex: index,
+        lastCanvasY: (1 - hit.uv.y) * BROWSE_DRAG_CANVAS_HEIGHT,
+        totalDelta: 0,
+      }
       return
     }
 
     if (hit.kind === 'browse-scroll') {
+      browseDrag = {
+        kind: 'browse',
+        controllerIndex: index,
+        lastCanvasY: (1 - hit.uv.y) * BROWSE_DRAG_CANVAS_HEIGHT,
+        totalDelta: 0,
+      }
       // Ray hit the panel body (not a button/card) — no action to arm.
       return
     }
@@ -919,7 +946,7 @@ export function createVrInteraction(
       // Only fire if the user is still pointing at the same action
       // as when they pressed — otherwise they slid off the button
       // and cancelled.
-      if (hit?.kind === 'hud' && hit.action === hudArmed[index]) {
+      if (hit?.kind === 'hud' && hudActionsEqual(hit.action, hudArmed[index]!)) {
         ctx.onHudAction(hudArmed[index]!)
         // Tier B: HUD button activated. Magnitude is always 1 —
         // the event is presence/absence, not intensity.
@@ -932,13 +959,20 @@ export function createVrInteraction(
     if (browseArmed[index]) {
       const controller = controllers[index]
       const hit = pickHit(controller)
-      if (hit?.kind === 'browse') {
+      const dragged =
+        browseDrag.kind === 'browse' &&
+        browseDrag.controllerIndex === index &&
+        Math.abs(browseDrag.totalDelta) > BROWSE_DRAG_CLICK_CANCEL_THRESHOLD
+      if (!dragged && hit?.kind === 'browse') {
         const armed = browseArmed[index]!
         if (browseActionsEqual(armed, hit.action)) {
           ctx.onBrowseAction(hit.action)
         }
       }
       browseArmed[index] = null
+    }
+    if (browseDrag.kind === 'browse' && browseDrag.controllerIndex === index) {
+      browseDrag = { kind: 'idle' }
     }
     // Tour controls: same press-and-release-on-same-target click semantics.
     if (tourArmed[index]) {
@@ -1343,6 +1377,8 @@ export function createVrInteraction(
   /** Poll thumbstick Y across controllers and scale globe accordingly. */
   /** Scroll speed for the browse panel: canvas pixels per second at full thumbstick deflection. */
   const BROWSE_SCROLL_SPEED = 400
+  const BROWSE_DRAG_CANVAS_HEIGHT = 600
+  const BROWSE_DRAG_CLICK_CANCEL_THRESHOLD = 12
 
   function updateThumbstickZoom(deltaSeconds: number): void {
     // Each Quest controller maps axes [2, 3] to the thumbstick
@@ -1455,6 +1491,23 @@ export function createVrInteraction(
         // the globe if it moves in AR placement.
         dragScratchOffset.sub(ctx.globe.position)
         ctx.tourOverlay.setOverlayCustomOffset(overlayDrag.overlayId, dragScratchOffset)
+      }
+
+      if (browseDrag.kind === 'browse') {
+        const controller = controllers[browseDrag.controllerIndex]
+        setRaycasterFromController(controller)
+        const hits = ctx.browse.isVisible()
+          ? raycaster.intersectObject(ctx.browse.mesh, false)
+          : []
+        if (hits.length > 0 && hits[0].uv) {
+          const currentY = (1 - hits[0].uv.y) * BROWSE_DRAG_CANVAS_HEIGHT
+          const delta = browseDrag.lastCanvasY - currentY
+          if (delta !== 0) {
+            ctx.browse.scroll(delta)
+            browseDrag.totalDelta += delta
+            browseDrag.lastCanvasY = currentY
+          }
+        }
       }
 
       // Velocity tracker only runs during user-driven rotation;
