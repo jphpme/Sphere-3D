@@ -84,7 +84,11 @@ jobs:
         id: deploy
         run: |
           set -o pipefail
-          BRANCH_NAME="${{ github.event_name == 'pull_request' && github.head_ref || github.ref_name }}"
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            BRANCH_NAME="production"
+          else
+            BRANCH_NAME="${{ github.event_name == 'pull_request' && github.head_ref || github.ref_name }}"
+          fi
           # Stream wrangler output live AND capture it for preview-URL extraction.
           # The previous `DEPLOY_OUTPUT=$(wrangler ...)` pattern silently swallowed
           # wrangler errors: under `bash -e` the command substitution aborts the

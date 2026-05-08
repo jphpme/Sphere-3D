@@ -47,9 +47,10 @@ Pages Functions bindings are configured in the Cloudflare dashboard, not only in
 
 ## Automatic Deploys
 
-Pushes to `main` deploy automatically through `.github/workflows/ci.yml`.
+Pushes to GitHub `main` deploy automatically through `.github/workflows/ci.yml`.
 The workflow builds the app and uploads `dist/` to the Cloudflare Pages
-project `ayni-vr`.
+project `ayni-vr` using Cloudflare's `production` branch, which is what
+updates the `vr.ayni.eu.com` custom domain.
 
 Required GitHub repository secrets:
 
