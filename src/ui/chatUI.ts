@@ -582,10 +582,14 @@ async function speakResponse(text: string): Promise<void> {
 async function parseJsonResponse<T>(res: Response): Promise<T> {
   const text = await res.text().catch(() => '')
   if (!text) return {} as T
+  const contentType = res.headers.get('Content-Type') || ''
+  if (!contentType.includes('application/json') && /<html|<!doctype/i.test(text)) {
+    return { error: `Voice service returned ${res.status} ${res.statusText || 'error'}` } as T
+  }
   try {
     return JSON.parse(text) as T
   } catch {
-    return { error: text } as T
+    return { error: text.slice(0, 240) } as T
   }
 }
 
