@@ -29,49 +29,7 @@ const CHAT_OPENED_KEY = 'sos-docent-seen'
 const MAX_MESSAGES = 200
 const MAX_PERSISTED_MESSAGES = 100
 
-interface SpeechRecognitionAlternativeLike {
-  transcript: string
-}
-
-interface SpeechRecognitionResultLike {
-  readonly isFinal: boolean
-  readonly length: number
-  item(index: number): SpeechRecognitionAlternativeLike
-  [index: number]: SpeechRecognitionAlternativeLike
-}
-
-interface SpeechRecognitionEventLike extends Event {
-  readonly resultIndex: number
-  readonly results: {
-    readonly length: number
-    item(index: number): SpeechRecognitionResultLike
-    [index: number]: SpeechRecognitionResultLike
-  }
-}
-
-interface SpeechRecognitionErrorEventLike extends Event {
-  readonly error: string
-}
-
-interface SpeechRecognitionLike extends EventTarget {
-  continuous: boolean
-  interimResults: boolean
-  lang: string
-  onend: ((event: Event) => void) | null
-  onerror: ((event: SpeechRecognitionErrorEventLike) => void) | null
-  onresult: ((event: SpeechRecognitionEventLike) => void) | null
-  start(): void
-  stop(): void
-  abort(): void
-}
-
-type SpeechRecognitionConstructor = new () => SpeechRecognitionLike
-type SpeechWindow = Window & {
-  SpeechRecognition?: SpeechRecognitionConstructor
-  webkitSpeechRecognition?: SpeechRecognitionConstructor
-}
-
-export type ChatVoiceStatus = 'unsupported' | 'idle' | 'listening' | 'transcribing' | 'thinking' | 'speaking'
+export type ChatVoiceStatus = 'unsupported' | 'idle' | 'listening' | 'transcribing' | 'thinking'
 
 export interface ChatVoiceState {
   status: ChatVoiceStatus
@@ -98,14 +56,12 @@ let messages: ChatMessage[] = []
 let isOpen = false
 let isStreaming = false
 let settingsOpen = false
-let recognition: SpeechRecognitionLike | null = null
 let mediaRecorder: MediaRecorder | null = null
 let voiceStream: MediaStream | null = null
 let voiceStopTimer: ReturnType<typeof setTimeout> | null = null
 let voiceChunks: Blob[] = []
 let isListening = false
 let voiceTranscriptBase = ''
-let voiceHadFinalResult = false
 let voiceState: ChatVoiceState = { status: 'idle', transcript: '' }
 const voiceStateListeners = new Set<(state: ChatVoiceState) => void>()
 let datasetPromptTimer: ReturnType<typeof setTimeout> | null = null
@@ -401,7 +357,7 @@ export function hideChatTrigger(): void {
 }
 
 export function getChatVoiceState(): ChatVoiceState {
-  const supported = isVoiceCaptureSupported() && isSpeechSynthesisSupported()
+  const supported = isVoiceCaptureSupported()
   if (!supported) return { status: 'unsupported', transcript: voiceState.transcript }
   return { ...voiceState }
 }
@@ -424,27 +380,17 @@ function setVoiceState(status: ChatVoiceStatus, transcript = voiceState.transcri
   }
 }
 
-function getSpeechRecognitionConstructor(): SpeechRecognitionConstructor | null {
-  if (typeof window === 'undefined') return null
-  const speechWindow = window as SpeechWindow
-  return speechWindow.SpeechRecognition ?? speechWindow.webkitSpeechRecognition ?? null
-}
-
 function isVoiceCaptureSupported(): boolean {
   return typeof navigator !== 'undefined' &&
     !!navigator.mediaDevices?.getUserMedia &&
     typeof MediaRecorder !== 'undefined'
 }
 
-function isSpeechSynthesisSupported(): boolean {
-  return typeof window !== 'undefined' && 'speechSynthesis' in window && typeof SpeechSynthesisUtterance !== 'undefined'
-}
-
 function setupVoiceControl(): void {
   const btn = document.getElementById('chat-voice-toggle') as HTMLButtonElement | null
   if (!btn) return
 
-  const supported = isVoiceCaptureSupported() && isSpeechSynthesisSupported()
+  const supported = isVoiceCaptureSupported()
   setVoiceState(supported ? 'idle' : 'unsupported', '')
   btn.disabled = !supported
   btn.title = supported ? 'Ask with voice' : 'Voice is not supported in this browser'
@@ -456,7 +402,7 @@ function setupVoiceControl(): void {
 function setVoiceUI(listening: boolean): void {
   const btn = document.getElementById('chat-voice-toggle') as HTMLButtonElement | null
   if (!btn) return
-  const supported = isVoiceCaptureSupported() && isSpeechSynthesisSupported()
+  const supported = isVoiceCaptureSupported()
   if (!supported) {
     setVoiceState('unsupported')
     btn.title = 'Voice is not supported in this browser'
@@ -481,12 +427,11 @@ function startVoiceInput(): void {
   const input = document.getElementById('chat-input') as HTMLTextAreaElement | null
   if (!isVoiceCaptureSupported() || !input || isStreaming) {
     callbacks?.announce('Voice input is unavailable')
-    setVoiceState(isVoiceCaptureSupported() && isSpeechSynthesisSupported() ? 'idle' : 'unsupported')
+    setVoiceState(isVoiceCaptureSupported() ? 'idle' : 'unsupported')
     return
   }
 
   voiceTranscriptBase = input.value.trim()
-  voiceHadFinalResult = false
 
   navigator.mediaDevices.getUserMedia({
     audio: {
@@ -580,9 +525,8 @@ async function transcribeAndSendVoice(chunks: Blob[], type: string): Promise<voi
     input.value = joinSpeechText(voiceTranscriptBase, data.text)
     input.style.height = 'auto'
     input.style.height = Math.min(input.scrollHeight, 96) + 'px'
-    voiceHadFinalResult = true
     setVoiceState('thinking', input.value)
-    await handleSend({ voice: true })
+    await handleSend()
   } catch (err) {
     logger.warn('[Chat] Voice transcription failed:', err)
     setVoiceState('idle')
@@ -592,33 +536,6 @@ async function transcribeAndSendVoice(chunks: Blob[], type: string): Promise<voi
 
 function joinSpeechText(base: string, addition: string): string {
   return [base.trim(), addition.trim()].filter(Boolean).join(' ').trim()
-}
-
-function speakResponse(text: string): void {
-  if (!isSpeechSynthesisSupported()) return
-  const spokenText = toSpeechText(text)
-  if (!spokenText) return
-
-  window.speechSynthesis.cancel()
-  const utterance = new SpeechSynthesisUtterance(spokenText)
-  utterance.lang = navigator.language || 'en-US'
-  utterance.rate = 1
-  utterance.pitch = 1
-  utterance.onend = () => setVoiceState('idle', '')
-  utterance.onerror = () => setVoiceState('idle', '')
-  setVoiceState('speaking', '')
-  window.speechSynthesis.speak(utterance)
-}
-
-function toSpeechText(text: string): string {
-  return text
-    .replace(/<?<(LOAD|FLY|TIME|BOUNDS|MARKER|LABELS|REGION):[^>]+>>?\n?/g, '')
-    .replace(/\[\[LOAD:[^\]]+\]\]/g, '')
-    .replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '$1')
-    .replace(/\*\*(.+?)\*\*/g, '$1')
-    .replace(/[*_`>#]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim()
 }
 
 /** Wire DOM event listeners for the chat panel: trigger, input, send, settings, vision toggle. */
@@ -892,15 +809,13 @@ async function handleSettingsTest(): Promise<void> {
 
 // --- Send / receive ---
 
-async function handleSend(options: { voice?: boolean } = {}): Promise<void> {
+async function handleSend(): Promise<void> {
   const input = document.getElementById('chat-input') as HTMLTextAreaElement | null
   if (!input || !callbacks || isStreaming) return
 
   const text = input.value.trim()
   if (!text) return
   if (isListening) stopVoiceRecording()
-  const shouldSpeakResponse = options.voice === true
-  if (shouldSpeakResponse) setVoiceState('thinking', text)
 
   // Add user message
   const userMsg: ChatMessage = {
@@ -1121,10 +1036,7 @@ async function handleSend(options: { voice?: boolean } = {}): Promise<void> {
   renderMessages()
   scrollToBottom()
   saveSession()
-  if (shouldSpeakResponse) {
-    speakResponse(docentMsg.text)
-    if (!toSpeechText(docentMsg.text)) setVoiceState('idle', '')
-  }
+  if (voiceState.status === 'thinking') setVoiceState('idle', '')
   callbacks.announce('Docent responded')
 }
 
@@ -1134,7 +1046,7 @@ function setSendEnabled(enabled: boolean): void {
   const input = document.getElementById('chat-input') as HTMLTextAreaElement | null
   if (input) input.disabled = !enabled
   const voiceBtn = document.getElementById('chat-voice-toggle') as HTMLButtonElement | null
-  if (voiceBtn) voiceBtn.disabled = !enabled || !isVoiceCaptureSupported() || !isSpeechSynthesisSupported()
+  if (voiceBtn) voiceBtn.disabled = !enabled || !isVoiceCaptureSupported()
 }
 
 // --- Rendering ---

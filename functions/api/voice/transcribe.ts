@@ -2,7 +2,8 @@
  * Cloudflare Pages Function - /api/voice/transcribe
  *
  * Accepts a short microphone recording and transcribes it through
- * Workers AI Whisper. The browser records audio; the server owns ASR.
+ * Cloudflare's proxied GPT-4o transcription model. The browser records
+ * audio; the server owns ASR.
  */
 
 interface Env {
@@ -11,7 +12,7 @@ interface Env {
   }
 }
 
-const TRANSCRIBE_MODEL = '@cf/openai/whisper-large-v3-turbo'
+const TRANSCRIBE_MODEL = 'openai/gpt-4o-transcribe'
 const MAX_AUDIO_BYTES = 5 * 1024 * 1024
 const ALLOWED_ORIGINS = new Set([
   'http://localhost:5173',
@@ -60,11 +61,13 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
 function extractTranscript(result: unknown): string {
   if (!result || typeof result !== 'object') return ''
   const obj = result as Record<string, unknown>
-  const transcriptionInfo = obj.transcription_info && typeof obj.transcription_info === 'object'
-    ? obj.transcription_info as Record<string, unknown>
-    : {}
-  const text = obj.text ?? transcriptionInfo.text
+  const text = obj.text
   return typeof text === 'string' ? text.trim() : ''
+}
+
+function audioDataUri(mimeType: string | null, audio: ArrayBuffer): string {
+  const type = mimeType?.split(';')[0] || 'audio/webm'
+  return `data:${type};base64,${arrayBufferToBase64(audio)}`
 }
 
 export const onRequestOptions: PagesFunction<Env> = async (context) => {
@@ -101,10 +104,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
   try {
     const result = await context.env.AI.run(TRANSCRIBE_MODEL, {
-      audio: arrayBufferToBase64(audio),
-      task: 'transcribe',
-      vad_filter: true,
-      condition_on_previous_text: false,
+      file: audioDataUri(context.request.headers.get('Content-Type'), audio),
+      temperature: 0,
     })
     const text = extractTranscript(result)
     if (!text) {

@@ -174,14 +174,14 @@ function drawSpeaker(ctx: CanvasRenderingContext2D, rect: Rect, muted: boolean, 
 
 function drawVoice(ctx: CanvasRenderingContext2D, rect: Rect, status: ChatVoiceStatus): void {
   const enabled = status !== 'unsupported'
-  drawButtonBackplate(ctx, rect, status === 'listening' || status === 'speaking')
+  drawButtonBackplate(ctx, rect, status === 'listening')
   const cx = rect.x + rect.w / 2
   const cy = rect.y + rect.h / 2
   ctx.strokeStyle = !enabled
     ? MUTED
     : status === 'listening'
       ? '#ff8a8a'
-      : status === 'thinking' || status === 'speaking'
+      : status === 'thinking'
         ? ACCENT
         : TEXT
   ctx.lineWidth = 5
@@ -289,7 +289,6 @@ function voiceLabel(status: ChatVoiceStatus): string {
   if (status === 'listening') return 'Listening...'
   if (status === 'transcribing') return 'Transcribing...'
   if (status === 'thinking') return 'Thinking...'
-  if (status === 'speaking') return 'Speaking...'
   return ''
 }
 

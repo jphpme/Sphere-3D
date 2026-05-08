@@ -16,10 +16,6 @@ import {
   resetForTests as resetDegradedForTests,
 } from '../services/docentDegradedState'
 
-const originalSpeechRecognitionDescriptor = Object.getOwnPropertyDescriptor(window, 'SpeechRecognition')
-const originalWebkitSpeechRecognitionDescriptor = Object.getOwnPropertyDescriptor(window, 'webkitSpeechRecognition')
-const originalSpeechSynthesisDescriptor = Object.getOwnPropertyDescriptor(window, 'speechSynthesis')
-const originalSpeechSynthesisUtteranceDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'SpeechSynthesisUtterance')
 const originalMediaDevicesDescriptor = Object.getOwnPropertyDescriptor(navigator, 'mediaDevices')
 const originalMediaRecorderDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'MediaRecorder')
 
@@ -85,10 +81,6 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks()
-  restoreProperty(window, 'SpeechRecognition', originalSpeechRecognitionDescriptor)
-  restoreProperty(window, 'webkitSpeechRecognition', originalWebkitSpeechRecognitionDescriptor)
-  restoreProperty(window, 'speechSynthesis', originalSpeechSynthesisDescriptor)
-  restoreProperty(globalThis, 'SpeechSynthesisUtterance', originalSpeechSynthesisUtteranceDescriptor)
   restoreProperty(navigator, 'mediaDevices', originalMediaDevicesDescriptor)
   restoreProperty(globalThis, 'MediaRecorder', originalMediaRecorderDescriptor)
   resetDegradedForTests()
@@ -108,7 +100,7 @@ describe('initChatUI', () => {
     expect(() => initChatUI(cb)).not.toThrow()
   })
 
-  it('disables voice input when speech APIs are unavailable', () => {
+  it('disables voice input when media capture APIs are unavailable', () => {
     initChatUI(makeCallbacks())
     const voiceBtn = document.getElementById('chat-voice-toggle') as HTMLButtonElement
     expect(voiceBtn.disabled).toBe(true)
@@ -355,7 +347,7 @@ describe('handleSend streaming', () => {
     })
   })
 
-  it('sends a final voice transcript and speaks the answer', async () => {
+  it('sends a final voice transcript as a chat message', async () => {
     const { processMessage } = await import('../services/docentService')
     const mockedProcessMessage = vi.mocked(processMessage)
 
@@ -382,7 +374,6 @@ describe('handleSend streaming', () => {
         this.onstop?.(new Event('stop'))
       })
     }
-    const speak = vi.fn()
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
       if (String(input).includes('/api/voice/transcribe')) {
         return new Response(JSON.stringify({ text: 'What are ocean currents?' }), {
@@ -401,16 +392,6 @@ describe('handleSend streaming', () => {
       configurable: true,
     })
     Object.defineProperty(globalThis, 'MediaRecorder', { value: MockMediaRecorder, configurable: true })
-    Object.defineProperty(window, 'speechSynthesis', {
-      value: { cancel: vi.fn(), speak },
-      configurable: true,
-    })
-    Object.defineProperty(globalThis, 'SpeechSynthesisUtterance', {
-      value: function SpeechSynthesisUtteranceMock(this: { text: string }, text: string) {
-        this.text = text
-      },
-      configurable: true,
-    })
 
     initChatUI(makeCallbacks())
     document.getElementById('chat-voice-toggle')?.click()
@@ -432,8 +413,6 @@ describe('handleSend streaming', () => {
         undefined,
         undefined,
       )
-      expect(speak).toHaveBeenCalled()
-      expect(speak.mock.calls[0][0].text).toBe('Ocean currents move heat.')
     })
   })
 
