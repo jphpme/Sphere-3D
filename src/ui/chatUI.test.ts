@@ -16,6 +16,11 @@ import {
   resetForTests as resetDegradedForTests,
 } from '../services/docentDegradedState'
 
+const originalSpeechRecognitionDescriptor = Object.getOwnPropertyDescriptor(window, 'SpeechRecognition')
+const originalWebkitSpeechRecognitionDescriptor = Object.getOwnPropertyDescriptor(window, 'webkitSpeechRecognition')
+const originalSpeechSynthesisDescriptor = Object.getOwnPropertyDescriptor(window, 'speechSynthesis')
+const originalSpeechSynthesisUtteranceDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'SpeechSynthesisUtterance')
+
 vi.mock('../services/docentService', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../services/docentService')>()
   return {
@@ -48,6 +53,7 @@ function setupDOM(): void {
       <div id="chat-typing" class="hidden"></div>
       <div id="chat-vision-hint" class="chat-vision-hint"></div>
       <button id="chat-vision-toggle" class="chat-vision-btn" aria-pressed="false"></button>
+      <button id="chat-voice-toggle" class="chat-voice-btn" aria-pressed="false"></button>
       <textarea id="chat-input" rows="1"></textarea>
       <button id="chat-send"></button>
     </div>
@@ -77,13 +83,32 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks()
+  restoreProperty(window, 'SpeechRecognition', originalSpeechRecognitionDescriptor)
+  restoreProperty(window, 'webkitSpeechRecognition', originalWebkitSpeechRecognitionDescriptor)
+  restoreProperty(window, 'speechSynthesis', originalSpeechSynthesisDescriptor)
+  restoreProperty(globalThis, 'SpeechSynthesisUtterance', originalSpeechSynthesisUtteranceDescriptor)
   resetDegradedForTests()
 })
+
+function restoreProperty<T extends object>(target: T, property: PropertyKey, descriptor: PropertyDescriptor | undefined): void {
+  if (descriptor) {
+    Object.defineProperty(target, property, descriptor)
+  } else {
+    Reflect.deleteProperty(target, property)
+  }
+}
 
 describe('initChatUI', () => {
   it('initializes without error', () => {
     const cb = makeCallbacks()
     expect(() => initChatUI(cb)).not.toThrow()
+  })
+
+  it('disables voice input when speech APIs are unavailable', () => {
+    initChatUI(makeCallbacks())
+    const voiceBtn = document.getElementById('chat-voice-toggle') as HTMLButtonElement
+    expect(voiceBtn.disabled).toBe(true)
+    expect(voiceBtn.title).toContain('not supported')
   })
 
   it('renders welcome state when no messages', () => {
@@ -323,6 +348,70 @@ describe('handleSend streaming', () => {
       const msgs = getMessages()
       expect(msgs).toHaveLength(2) // user + docent
       expect(msgs[1].text).toBe('Hello world!')
+    })
+  })
+
+  it('sends a final voice transcript and speaks the answer', async () => {
+    const { processMessage } = await import('../services/docentService')
+    const mockedProcessMessage = vi.mocked(processMessage)
+
+    mockedProcessMessage.mockImplementation(async function* () {
+      yield { type: 'delta' as const, text: 'Ocean currents move heat.' }
+      yield { type: 'done' as const, fallback: false }
+    })
+
+    let recognitionInstance: any = null
+    class MockRecognition extends EventTarget {
+      continuous = false
+      interimResults = false
+      lang = ''
+      onresult: ((event: unknown) => void) | null = null
+      onend: ((event: Event) => void) | null = null
+      onerror = null
+      start = vi.fn()
+      stop = vi.fn(() => this.onend?.(new Event('end')))
+      abort = vi.fn()
+      constructor() {
+        super()
+        recognitionInstance = this
+      }
+    }
+
+    const speak = vi.fn()
+    Object.defineProperty(window, 'webkitSpeechRecognition', { value: MockRecognition, configurable: true })
+    Object.defineProperty(window, 'speechSynthesis', {
+      value: { cancel: vi.fn(), speak },
+      configurable: true,
+    })
+    Object.defineProperty(globalThis, 'SpeechSynthesisUtterance', {
+      value: function SpeechSynthesisUtteranceMock(this: { text: string }, text: string) {
+        this.text = text
+      },
+      configurable: true,
+    })
+
+    initChatUI(makeCallbacks())
+    document.getElementById('chat-voice-toggle')?.click()
+
+    const alternative = { transcript: 'What are ocean currents?' }
+    const result = { isFinal: true, length: 1, 0: alternative, item: () => alternative }
+    const results = { length: 1, 0: result, item: () => result }
+    recognitionInstance?.onresult?.({ resultIndex: 0, results })
+    recognitionInstance?.onend?.(new Event('end'))
+
+    await vi.waitFor(() => {
+      expect(mockedProcessMessage).toHaveBeenCalledWith(
+        'What are ocean currents?',
+        expect.any(Array),
+        expect.any(Array),
+        null,
+        expect.any(Object),
+        null,
+        undefined,
+        undefined,
+      )
+      expect(speak).toHaveBeenCalled()
+      expect(speak.mock.calls[0][0].text).toBe('Ocean currents move heat.')
     })
   })
 

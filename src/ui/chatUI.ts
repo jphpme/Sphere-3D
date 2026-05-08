@@ -29,6 +29,48 @@ const CHAT_OPENED_KEY = 'sos-docent-seen'
 const MAX_MESSAGES = 200
 const MAX_PERSISTED_MESSAGES = 100
 
+interface SpeechRecognitionAlternativeLike {
+  transcript: string
+}
+
+interface SpeechRecognitionResultLike {
+  readonly isFinal: boolean
+  readonly length: number
+  item(index: number): SpeechRecognitionAlternativeLike
+  [index: number]: SpeechRecognitionAlternativeLike
+}
+
+interface SpeechRecognitionEventLike extends Event {
+  readonly resultIndex: number
+  readonly results: {
+    readonly length: number
+    item(index: number): SpeechRecognitionResultLike
+    [index: number]: SpeechRecognitionResultLike
+  }
+}
+
+interface SpeechRecognitionErrorEventLike extends Event {
+  readonly error: string
+}
+
+interface SpeechRecognitionLike extends EventTarget {
+  continuous: boolean
+  interimResults: boolean
+  lang: string
+  onend: ((event: Event) => void) | null
+  onerror: ((event: SpeechRecognitionErrorEventLike) => void) | null
+  onresult: ((event: SpeechRecognitionEventLike) => void) | null
+  start(): void
+  stop(): void
+  abort(): void
+}
+
+type SpeechRecognitionConstructor = new () => SpeechRecognitionLike
+type SpeechWindow = Window & {
+  SpeechRecognition?: SpeechRecognitionConstructor
+  webkitSpeechRecognition?: SpeechRecognitionConstructor
+}
+
 export interface ChatCallbacks {
   onLoadDataset: (id: string) => void
   onFlyTo: (lat: number, lon: number, altitude?: number) => void
@@ -49,6 +91,10 @@ let messages: ChatMessage[] = []
 let isOpen = false
 let isStreaming = false
 let settingsOpen = false
+let recognition: SpeechRecognitionLike | null = null
+let isListening = false
+let voiceTranscriptBase = ''
+let voiceHadFinalResult = false
 let datasetPromptTimer: ReturnType<typeof setTimeout> | null = null
 /** Tier B dwell handle for the chat panel — non-null while the
  * panel is open. Started in openChat(), stopped in closeChat().
@@ -340,6 +386,146 @@ export function hideChatTrigger(): void {
   document.getElementById('chat-trigger')?.classList.remove('visible')
 }
 
+function getSpeechRecognitionConstructor(): SpeechRecognitionConstructor | null {
+  if (typeof window === 'undefined') return null
+  const speechWindow = window as SpeechWindow
+  return speechWindow.SpeechRecognition ?? speechWindow.webkitSpeechRecognition ?? null
+}
+
+function isSpeechSynthesisSupported(): boolean {
+  return typeof window !== 'undefined' && 'speechSynthesis' in window && typeof SpeechSynthesisUtterance !== 'undefined'
+}
+
+function setupVoiceControl(): void {
+  const btn = document.getElementById('chat-voice-toggle') as HTMLButtonElement | null
+  if (!btn) return
+
+  const supported = !!getSpeechRecognitionConstructor() && isSpeechSynthesisSupported()
+  btn.disabled = !supported
+  btn.title = supported ? 'Ask with voice' : 'Voice is not supported in this browser'
+  btn.setAttribute('aria-label', btn.title)
+  btn.addEventListener('click', toggleVoiceInput)
+  setVoiceUI(isListening)
+}
+
+function setVoiceUI(listening: boolean): void {
+  const btn = document.getElementById('chat-voice-toggle') as HTMLButtonElement | null
+  if (!btn) return
+  const supported = !!getSpeechRecognitionConstructor() && isSpeechSynthesisSupported()
+  if (!supported) {
+    btn.title = 'Voice is not supported in this browser'
+    btn.setAttribute('aria-label', btn.title)
+    return
+  }
+  btn.classList.toggle('listening', listening)
+  btn.setAttribute('aria-pressed', String(listening))
+  btn.title = listening ? 'Stop listening' : 'Ask with voice'
+  btn.setAttribute('aria-label', btn.title)
+}
+
+function toggleVoiceInput(): void {
+  if (isListening) {
+    recognition?.stop()
+    return
+  }
+  startVoiceInput()
+}
+
+function startVoiceInput(): void {
+  const Recognition = getSpeechRecognitionConstructor()
+  const input = document.getElementById('chat-input') as HTMLTextAreaElement | null
+  if (!Recognition || !input || isStreaming) {
+    callbacks?.announce('Voice input is unavailable')
+    return
+  }
+
+  if (!recognition) {
+    recognition = new Recognition()
+    recognition.continuous = false
+    recognition.interimResults = true
+    recognition.onresult = handleVoiceResult
+    recognition.onerror = (event) => {
+      logger.warn('[Chat] Voice recognition error:', event.error)
+      callbacks?.announce('Voice input stopped')
+    }
+    recognition.onend = () => {
+      isListening = false
+      setVoiceUI(false)
+      if (voiceHadFinalResult && input.value.trim() && !isStreaming) {
+        void handleSend({ voice: true })
+      }
+    }
+  }
+
+  recognition.lang = navigator.language || 'en-US'
+  voiceTranscriptBase = input.value.trim()
+  voiceHadFinalResult = false
+
+  try {
+    recognition.start()
+    isListening = true
+    setVoiceUI(true)
+    callbacks?.announce('Listening')
+  } catch (err) {
+    logger.warn('[Chat] Failed to start voice input:', err)
+    callbacks?.announce('Voice input could not start')
+  }
+}
+
+function handleVoiceResult(event: SpeechRecognitionEventLike): void {
+  const input = document.getElementById('chat-input') as HTMLTextAreaElement | null
+  if (!input) return
+
+  let finalText = ''
+  let interimText = ''
+  for (let i = event.resultIndex; i < event.results.length; i++) {
+    const result = event.results[i] ?? event.results.item(i)
+    const transcript = result[0]?.transcript ?? result.item(0)?.transcript ?? ''
+    if (result.isFinal) {
+      finalText += transcript
+    } else {
+      interimText += transcript
+    }
+  }
+
+  if (finalText.trim()) {
+    voiceHadFinalResult = true
+    voiceTranscriptBase = joinSpeechText(voiceTranscriptBase, finalText)
+  }
+
+  input.value = joinSpeechText(voiceTranscriptBase, interimText)
+  input.style.height = 'auto'
+  input.style.height = Math.min(input.scrollHeight, 96) + 'px'
+}
+
+function joinSpeechText(base: string, addition: string): string {
+  return [base.trim(), addition.trim()].filter(Boolean).join(' ').trim()
+}
+
+function speakResponse(text: string): void {
+  if (!isSpeechSynthesisSupported()) return
+  const spokenText = toSpeechText(text)
+  if (!spokenText) return
+
+  window.speechSynthesis.cancel()
+  const utterance = new SpeechSynthesisUtterance(spokenText)
+  utterance.lang = navigator.language || 'en-US'
+  utterance.rate = 1
+  utterance.pitch = 1
+  window.speechSynthesis.speak(utterance)
+}
+
+function toSpeechText(text: string): string {
+  return text
+    .replace(/<?<(LOAD|FLY|TIME|BOUNDS|MARKER|LABELS|REGION):[^>]+>>?\n?/g, '')
+    .replace(/\[\[LOAD:[^\]]+\]\]/g, '')
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '$1')
+    .replace(/\*\*(.+?)\*\*/g, '$1')
+    .replace(/[*_`>#]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
 /** Wire DOM event listeners for the chat panel: trigger, input, send, settings, vision toggle. */
 function wireEvents(): void {
   document.getElementById('chat-trigger')?.addEventListener('click', toggleChat)
@@ -350,7 +536,8 @@ function wireEvents(): void {
     new ResizeObserver(() => updateTriggerForInfoPanel()).observe(infoPanel)
   }
   document.getElementById('chat-close')?.addEventListener('click', closeChat)
-  document.getElementById('chat-send')?.addEventListener('click', handleSend)
+  document.getElementById('chat-send')?.addEventListener('click', () => { void handleSend() })
+  setupVoiceControl()
   document.getElementById('chat-settings-btn')?.addEventListener('click', toggleSettings)
 
   // Prevent wheel events from bubbling to the globe's zoom handler
@@ -610,12 +797,14 @@ async function handleSettingsTest(): Promise<void> {
 
 // --- Send / receive ---
 
-async function handleSend(): Promise<void> {
+async function handleSend(options: { voice?: boolean } = {}): Promise<void> {
   const input = document.getElementById('chat-input') as HTMLTextAreaElement | null
   if (!input || !callbacks || isStreaming) return
 
   const text = input.value.trim()
   if (!text) return
+  if (isListening) recognition?.stop()
+  const shouldSpeakResponse = options.voice === true
 
   // Add user message
   const userMsg: ChatMessage = {
@@ -836,6 +1025,9 @@ async function handleSend(): Promise<void> {
   renderMessages()
   scrollToBottom()
   saveSession()
+  if (shouldSpeakResponse) {
+    speakResponse(docentMsg.text)
+  }
   callbacks.announce('Docent responded')
 }
 
@@ -844,6 +1036,8 @@ function setSendEnabled(enabled: boolean): void {
   if (btn) btn.disabled = !enabled
   const input = document.getElementById('chat-input') as HTMLTextAreaElement | null
   if (input) input.disabled = !enabled
+  const voiceBtn = document.getElementById('chat-voice-toggle') as HTMLButtonElement | null
+  if (voiceBtn) voiceBtn.disabled = !enabled || !getSpeechRecognitionConstructor() || !isSpeechSynthesisSupported()
 }
 
 // --- Rendering ---
