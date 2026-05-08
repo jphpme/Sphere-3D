@@ -71,7 +71,7 @@ type SpeechWindow = Window & {
   webkitSpeechRecognition?: SpeechRecognitionConstructor
 }
 
-export type ChatVoiceStatus = 'unsupported' | 'idle' | 'listening' | 'thinking' | 'speaking'
+export type ChatVoiceStatus = 'unsupported' | 'idle' | 'listening' | 'transcribing' | 'thinking' | 'speaking'
 
 export interface ChatVoiceState {
   status: ChatVoiceStatus
@@ -99,6 +99,10 @@ let isOpen = false
 let isStreaming = false
 let settingsOpen = false
 let recognition: SpeechRecognitionLike | null = null
+let mediaRecorder: MediaRecorder | null = null
+let voiceStream: MediaStream | null = null
+let voiceStopTimer: ReturnType<typeof setTimeout> | null = null
+let voiceChunks: Blob[] = []
 let isListening = false
 let voiceTranscriptBase = ''
 let voiceHadFinalResult = false
@@ -120,6 +124,7 @@ let pendingGlobeActions: ChatAction[] = []
 
 /** Tracks dataset load actions clicked per message (implicit positive feedback). */
 const actionClickMap = new Map<string, string[]>()
+const VOICE_MAX_RECORDING_MS = 12_000
 
 /** Phase 1f/I — held across initChatUI calls so a re-init (test
  * teardown / hot reload) releases the prior listener instead of
@@ -396,7 +401,7 @@ export function hideChatTrigger(): void {
 }
 
 export function getChatVoiceState(): ChatVoiceState {
-  const supported = !!getSpeechRecognitionConstructor() && isSpeechSynthesisSupported()
+  const supported = isVoiceCaptureSupported() && isSpeechSynthesisSupported()
   if (!supported) return { status: 'unsupported', transcript: voiceState.transcript }
   return { ...voiceState }
 }
@@ -408,7 +413,7 @@ export function subscribeChatVoiceState(listener: (state: ChatVoiceState) => voi
 }
 
 export function startChatVoiceQuestion(): void {
-  startVoiceInput()
+  toggleVoiceInput()
 }
 
 function setVoiceState(status: ChatVoiceStatus, transcript = voiceState.transcript): void {
@@ -425,6 +430,12 @@ function getSpeechRecognitionConstructor(): SpeechRecognitionConstructor | null 
   return speechWindow.SpeechRecognition ?? speechWindow.webkitSpeechRecognition ?? null
 }
 
+function isVoiceCaptureSupported(): boolean {
+  return typeof navigator !== 'undefined' &&
+    !!navigator.mediaDevices?.getUserMedia &&
+    typeof MediaRecorder !== 'undefined'
+}
+
 function isSpeechSynthesisSupported(): boolean {
   return typeof window !== 'undefined' && 'speechSynthesis' in window && typeof SpeechSynthesisUtterance !== 'undefined'
 }
@@ -433,7 +444,7 @@ function setupVoiceControl(): void {
   const btn = document.getElementById('chat-voice-toggle') as HTMLButtonElement | null
   if (!btn) return
 
-  const supported = !!getSpeechRecognitionConstructor() && isSpeechSynthesisSupported()
+  const supported = isVoiceCaptureSupported() && isSpeechSynthesisSupported()
   setVoiceState(supported ? 'idle' : 'unsupported', '')
   btn.disabled = !supported
   btn.title = supported ? 'Ask with voice' : 'Voice is not supported in this browser'
@@ -445,7 +456,7 @@ function setupVoiceControl(): void {
 function setVoiceUI(listening: boolean): void {
   const btn = document.getElementById('chat-voice-toggle') as HTMLButtonElement | null
   if (!btn) return
-  const supported = !!getSpeechRecognitionConstructor() && isSpeechSynthesisSupported()
+  const supported = isVoiceCaptureSupported() && isSpeechSynthesisSupported()
   if (!supported) {
     setVoiceState('unsupported')
     btn.title = 'Voice is not supported in this browser'
@@ -460,84 +471,123 @@ function setVoiceUI(listening: boolean): void {
 
 function toggleVoiceInput(): void {
   if (isListening) {
-    recognition?.stop()
+    stopVoiceRecording()
     return
   }
   startVoiceInput()
 }
 
 function startVoiceInput(): void {
-  const Recognition = getSpeechRecognitionConstructor()
   const input = document.getElementById('chat-input') as HTMLTextAreaElement | null
-  if (!Recognition || !input || isStreaming) {
+  if (!isVoiceCaptureSupported() || !input || isStreaming) {
     callbacks?.announce('Voice input is unavailable')
-    setVoiceState(getSpeechRecognitionConstructor() && isSpeechSynthesisSupported() ? 'idle' : 'unsupported')
+    setVoiceState(isVoiceCaptureSupported() && isSpeechSynthesisSupported() ? 'idle' : 'unsupported')
     return
   }
 
-  if (!recognition) {
-    recognition = new Recognition()
-    recognition.continuous = false
-    recognition.interimResults = true
-    recognition.onresult = handleVoiceResult
-    recognition.onerror = (event) => {
-      logger.warn('[Chat] Voice recognition error:', event.error)
-      setVoiceState('idle')
-      callbacks?.announce('Voice input stopped')
-    }
-    recognition.onend = () => {
-      isListening = false
-      setVoiceUI(false)
-      if (voiceHadFinalResult && input.value.trim() && !isStreaming) {
-        void handleSend({ voice: true })
-      } else {
-        setVoiceState('idle')
-      }
-    }
-  }
-
-  recognition.lang = navigator.language || 'en-US'
   voiceTranscriptBase = input.value.trim()
   voiceHadFinalResult = false
 
-  try {
-    recognition.start()
+  navigator.mediaDevices.getUserMedia({
+    audio: {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+    },
+  }).then(stream => {
+    voiceStream = stream
+    voiceChunks = []
+    const mimeType = selectVoiceMimeType()
+    mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined)
+    mediaRecorder.ondataavailable = (event) => {
+      if (event.data.size > 0) voiceChunks.push(event.data)
+    }
+    mediaRecorder.onerror = (event) => {
+      logger.warn('[Chat] Voice recording error:', event)
+      cleanupVoiceRecording()
+      setVoiceState('idle')
+      callbacks?.announce('Voice recording stopped')
+    }
+    mediaRecorder.onstop = () => {
+      const chunks = voiceChunks
+      const type = mediaRecorder?.mimeType || mimeType || 'audio/webm'
+      cleanupVoiceRecording()
+      void transcribeAndSendVoice(chunks, type)
+    }
+    mediaRecorder.start()
     isListening = true
     setVoiceUI(true)
-    setVoiceState('listening', '')
+    setVoiceState('listening', voiceTranscriptBase)
+    voiceStopTimer = setTimeout(stopVoiceRecording, VOICE_MAX_RECORDING_MS)
     callbacks?.announce('Listening')
-  } catch (err) {
-    logger.warn('[Chat] Failed to start voice input:', err)
+  }).catch(err => {
+    logger.warn('[Chat] Microphone capture failed:', err)
+    cleanupVoiceRecording()
     setVoiceState('idle')
-    callbacks?.announce('Voice input could not start')
-  }
+    callbacks?.announce('Microphone access was blocked')
+  })
 }
 
-function handleVoiceResult(event: SpeechRecognitionEventLike): void {
+function selectVoiceMimeType(): string {
+  for (const type of ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4']) {
+    if (MediaRecorder.isTypeSupported(type)) return type
+  }
+  return ''
+}
+
+function stopVoiceRecording(): void {
+  if (!mediaRecorder || mediaRecorder.state === 'inactive') {
+    cleanupVoiceRecording()
+    return
+  }
+  mediaRecorder.stop()
+  setVoiceState('transcribing', voiceState.transcript)
+}
+
+function cleanupVoiceRecording(): void {
+  if (voiceStopTimer) {
+    clearTimeout(voiceStopTimer)
+    voiceStopTimer = null
+  }
+  isListening = false
+  setVoiceUI(false)
+  for (const track of voiceStream?.getTracks() ?? []) {
+    track.stop()
+  }
+  voiceStream = null
+  mediaRecorder = null
+}
+
+async function transcribeAndSendVoice(chunks: Blob[], type: string): Promise<void> {
   const input = document.getElementById('chat-input') as HTMLTextAreaElement | null
-  if (!input) return
+  if (!input || chunks.length === 0) {
+    setVoiceState('idle')
+    return
+  }
 
-  let finalText = ''
-  let interimText = ''
-  for (let i = event.resultIndex; i < event.results.length; i++) {
-    const result = event.results[i] ?? event.results.item(i)
-    const transcript = result[0]?.transcript ?? result.item(0)?.transcript ?? ''
-    if (result.isFinal) {
-      finalText += transcript
-    } else {
-      interimText += transcript
+  const audio = new Blob(chunks, { type })
+  setVoiceState('transcribing', voiceState.transcript)
+  try {
+    const res = await fetch('/api/voice/transcribe', {
+      method: 'POST',
+      headers: { 'Content-Type': audio.type || 'application/octet-stream' },
+      body: audio,
+    })
+    const data = await res.json().catch(() => ({})) as { text?: string; error?: string }
+    if (!res.ok || !data.text?.trim()) {
+      throw new Error(data.error || 'Voice transcription failed')
     }
-  }
-
-  if (finalText.trim()) {
+    input.value = joinSpeechText(voiceTranscriptBase, data.text)
+    input.style.height = 'auto'
+    input.style.height = Math.min(input.scrollHeight, 96) + 'px'
     voiceHadFinalResult = true
-    voiceTranscriptBase = joinSpeechText(voiceTranscriptBase, finalText)
+    setVoiceState('thinking', input.value)
+    await handleSend({ voice: true })
+  } catch (err) {
+    logger.warn('[Chat] Voice transcription failed:', err)
+    setVoiceState('idle')
+    callbacks?.announce('Voice transcription failed')
   }
-
-  input.value = joinSpeechText(voiceTranscriptBase, interimText)
-  setVoiceState('listening', input.value)
-  input.style.height = 'auto'
-  input.style.height = Math.min(input.scrollHeight, 96) + 'px'
 }
 
 function joinSpeechText(base: string, addition: string): string {
@@ -848,7 +898,7 @@ async function handleSend(options: { voice?: boolean } = {}): Promise<void> {
 
   const text = input.value.trim()
   if (!text) return
-  if (isListening) recognition?.stop()
+  if (isListening) stopVoiceRecording()
   const shouldSpeakResponse = options.voice === true
   if (shouldSpeakResponse) setVoiceState('thinking', text)
 
@@ -1084,7 +1134,7 @@ function setSendEnabled(enabled: boolean): void {
   const input = document.getElementById('chat-input') as HTMLTextAreaElement | null
   if (input) input.disabled = !enabled
   const voiceBtn = document.getElementById('chat-voice-toggle') as HTMLButtonElement | null
-  if (voiceBtn) voiceBtn.disabled = !enabled || !getSpeechRecognitionConstructor() || !isSpeechSynthesisSupported()
+  if (voiceBtn) voiceBtn.disabled = !enabled || !isVoiceCaptureSupported() || !isSpeechSynthesisSupported()
 }
 
 // --- Rendering ---

@@ -287,6 +287,7 @@ function drawProgress(ctx: CanvasRenderingContext2D, state: VrHudState): void {
 function voiceLabel(status: ChatVoiceStatus): string {
   if (status === 'unsupported') return 'Voice unavailable'
   if (status === 'listening') return 'Listening...'
+  if (status === 'transcribing') return 'Transcribing...'
   if (status === 'thinking') return 'Thinking...'
   if (status === 'speaking') return 'Speaking...'
   return ''

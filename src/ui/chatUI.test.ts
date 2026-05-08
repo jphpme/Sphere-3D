@@ -20,6 +20,8 @@ const originalSpeechRecognitionDescriptor = Object.getOwnPropertyDescriptor(wind
 const originalWebkitSpeechRecognitionDescriptor = Object.getOwnPropertyDescriptor(window, 'webkitSpeechRecognition')
 const originalSpeechSynthesisDescriptor = Object.getOwnPropertyDescriptor(window, 'speechSynthesis')
 const originalSpeechSynthesisUtteranceDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'SpeechSynthesisUtterance')
+const originalMediaDevicesDescriptor = Object.getOwnPropertyDescriptor(navigator, 'mediaDevices')
+const originalMediaRecorderDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'MediaRecorder')
 
 vi.mock('../services/docentService', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../services/docentService')>()
@@ -87,6 +89,8 @@ afterEach(() => {
   restoreProperty(window, 'webkitSpeechRecognition', originalWebkitSpeechRecognitionDescriptor)
   restoreProperty(window, 'speechSynthesis', originalSpeechSynthesisDescriptor)
   restoreProperty(globalThis, 'SpeechSynthesisUtterance', originalSpeechSynthesisUtteranceDescriptor)
+  restoreProperty(navigator, 'mediaDevices', originalMediaDevicesDescriptor)
+  restoreProperty(globalThis, 'MediaRecorder', originalMediaRecorderDescriptor)
   resetDegradedForTests()
 })
 
@@ -360,25 +364,43 @@ describe('handleSend streaming', () => {
       yield { type: 'done' as const, fallback: false }
     })
 
-    let recognitionInstance: any = null
-    class MockRecognition extends EventTarget {
-      continuous = false
-      interimResults = false
-      lang = ''
-      onresult: ((event: unknown) => void) | null = null
-      onend: ((event: Event) => void) | null = null
+    let recorderInstance: any = null
+    class MockMediaRecorder {
+      static isTypeSupported = vi.fn(() => true)
+      state = 'inactive'
+      mimeType = 'audio/webm'
+      ondataavailable: ((event: { data: Blob }) => void) | null = null
+      onstop: ((event: Event) => void) | null = null
       onerror = null
-      start = vi.fn()
-      stop = vi.fn(() => this.onend?.(new Event('end')))
-      abort = vi.fn()
       constructor() {
-        super()
-        recognitionInstance = this
+        recorderInstance = this
       }
+      start = vi.fn(() => { this.state = 'recording' })
+      stop = vi.fn(() => {
+        this.state = 'inactive'
+        this.ondataavailable?.({ data: new Blob(['voice'], { type: 'audio/webm' }) })
+        this.onstop?.(new Event('stop'))
+      })
     }
-
     const speak = vi.fn()
-    Object.defineProperty(window, 'webkitSpeechRecognition', { value: MockRecognition, configurable: true })
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
+      if (String(input).includes('/api/voice/transcribe')) {
+        return new Response(JSON.stringify({ text: 'What are ocean currents?' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      return new Response('{}', { status: 404 })
+    })
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: {
+        getUserMedia: vi.fn(async () => ({
+          getTracks: () => [{ stop: vi.fn() }],
+        })),
+      },
+      configurable: true,
+    })
+    Object.defineProperty(globalThis, 'MediaRecorder', { value: MockMediaRecorder, configurable: true })
     Object.defineProperty(window, 'speechSynthesis', {
       value: { cancel: vi.fn(), speak },
       configurable: true,
@@ -392,14 +414,14 @@ describe('handleSend streaming', () => {
 
     initChatUI(makeCallbacks())
     document.getElementById('chat-voice-toggle')?.click()
-
-    const alternative = { transcript: 'What are ocean currents?' }
-    const result = { isFinal: true, length: 1, 0: alternative, item: () => alternative }
-    const results = { length: 1, 0: result, item: () => result }
-    recognitionInstance?.onresult?.({ resultIndex: 0, results })
-    recognitionInstance?.onend?.(new Event('end'))
+    await vi.waitFor(() => expect(recorderInstance).toBeTruthy())
+    recorderInstance.stop()
 
     await vi.waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalledWith(
+        '/api/voice/transcribe',
+        expect.objectContaining({ method: 'POST' }),
+      )
       expect(mockedProcessMessage).toHaveBeenCalledWith(
         'What are ocean currents?',
         expect.any(Array),
