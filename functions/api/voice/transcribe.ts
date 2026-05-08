@@ -7,11 +7,11 @@
 
 interface Env {
   AI?: {
-    run(model: string, inputs: Record<string, unknown>): Promise<unknown>
+    run(model: string, inputs: Record<string, unknown>, options?: Record<string, unknown>): Promise<unknown>
   }
 }
 
-const TRANSCRIBE_MODEL = '@cf/openai/whisper-large-v3-turbo'
+const TRANSCRIBE_MODEL = '@cf/deepgram/nova-3'
 const MAX_AUDIO_BYTES = 5 * 1024 * 1024
 const ALLOWED_ORIGINS = new Set([
   'http://localhost:5173',
@@ -46,25 +46,34 @@ function json(data: unknown, status: number, headers: Record<string, string>): R
   })
 }
 
-function arrayBufferToBase64(buffer: ArrayBuffer): string {
-  const bytes = new Uint8Array(buffer)
-  let binary = ''
-  const chunkSize = 0x8000
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    const chunk = bytes.subarray(i, i + chunkSize)
-    binary += String.fromCharCode(...chunk)
-  }
-  return btoa(binary)
-}
-
 function extractTranscript(result: unknown): string {
   if (!result || typeof result !== 'object') return ''
   const obj = result as Record<string, unknown>
+  const results = obj.results && typeof obj.results === 'object'
+    ? obj.results as Record<string, unknown>
+    : {}
+  const channels = Array.isArray(results.channels) ? results.channels : []
+  const firstChannel = channels[0] && typeof channels[0] === 'object'
+    ? channels[0] as Record<string, unknown>
+    : {}
+  const alternatives = Array.isArray(firstChannel.alternatives) ? firstChannel.alternatives : []
+  const firstAlternative = alternatives[0] && typeof alternatives[0] === 'object'
+    ? alternatives[0] as Record<string, unknown>
+    : {}
   const transcriptionInfo = obj.transcription_info && typeof obj.transcription_info === 'object'
     ? obj.transcription_info as Record<string, unknown>
     : {}
-  const text = obj.text ?? transcriptionInfo.text
+  const text = obj.text ?? transcriptionInfo.text ?? firstAlternative.transcript
   return typeof text === 'string' ? text.trim() : ''
+}
+
+async function parseRawResponse(result: unknown): Promise<unknown> {
+  if (!(result instanceof Response)) return result
+  const contentType = result.headers.get('Content-Type') || ''
+  if (contentType.includes('application/json')) {
+    return await result.json().catch(() => ({}))
+  }
+  return { text: await result.text().catch(() => '') }
 }
 
 export const onRequestOptions: PagesFunction<Env> = async (context) => {
@@ -100,13 +109,22 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
   }
 
   try {
-    const result = await context.env.AI.run(TRANSCRIBE_MODEL, {
-      audio: arrayBufferToBase64(audio),
-      task: 'transcribe',
-      vad_filter: true,
-      condition_on_previous_text: false,
-    })
-    const text = extractTranscript(result)
+    const contentType = context.request.headers.get('Content-Type')?.split(';')[0] || 'audio/webm'
+    const result = await context.env.AI.run(
+      TRANSCRIBE_MODEL,
+      {
+        audio: {
+          body: new Response(audio).body,
+          contentType,
+        },
+        detect_language: true,
+        punctuate: true,
+        smart_format: true,
+      },
+      { returnRawResponse: true },
+    )
+    const parsed = await parseRawResponse(result)
+    const text = extractTranscript(parsed)
     if (!text) {
       return json({ error: 'No speech detected' }, 422, cors)
     }
