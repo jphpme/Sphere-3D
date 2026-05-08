@@ -45,6 +45,28 @@ Pages Functions bindings are configured in the Cloudflare dashboard, not only in
 
 ## Deploy Commands
 
+## Automatic Deploys
+
+Pushes to `main` deploy automatically through `.github/workflows/ci.yml`.
+The workflow builds the app and uploads `dist/` to the Cloudflare Pages
+project `ayni-vr`.
+
+Required GitHub repository secrets:
+
+```text
+CLOUDFLARE_API_TOKEN
+CLOUDFLARE_ACCOUNT_ID
+```
+
+Optional GitHub repository variable:
+
+```text
+VITE_REALTIME_DASH_BASE_URL=https://pachamama-studios.stream/
+```
+
+If the variable is not set, the workflow uses
+`https://pachamama-studios.stream/`.
+
 For a manual deploy from a local build:
 
 ```bash

@@ -43,6 +43,7 @@ const DESCRIPTION_MAX_LENGTH = 600
 const DESCRIPTION_MIN_CUT = 200
 const VIDEO_LOAD_TIMEOUT_MS = 20000
 const FIRST_FRAME_FALLBACK_MS = 150
+const HAVE_CURRENT_DATA = 2
 const SCRUBBER_MAX = '1000'
 const DASH_PREFLIGHT_BYTES = 512
 
@@ -206,6 +207,105 @@ async function assertDashManifestReachable(dashUrl: string): Promise<void> {
   }
 }
 
+/**
+ * Wait until the media element has at least one decodable frame.
+ *
+ * DASH streams on Quest/Chromium can parse the MPD and initialize MSE without
+ * firing `canplay` until playback is started. Because our video elements are
+ * muted for autoplay compliance, a temporary play nudge is safe and gives
+ * dash.js a reason to pull the first segment. HLS/direct streams benefit from
+ * the broader event set too: `loadeddata` is sufficient for a VideoTexture even
+ * if `canplay` is delayed by buffering heuristics.
+ */
+async function waitForVideoFrameReady(video: HTMLVideoElement): Promise<void> {
+  if (video.readyState >= HAVE_CURRENT_DATA) return
+
+  let shouldPauseAfterNudge = false
+  const wasPaused = video.paused
+
+  const playPromise = video.play()
+  if (playPromise) {
+    shouldPauseAfterNudge = wasPaused
+    playPromise.catch(() => {
+      // Autoplay can still be blocked by the UA. The event listeners below
+      // remain active, and the timeout reports the actionable failure.
+    })
+  }
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      let timeoutId: ReturnType<typeof setTimeout> | null = null
+
+      const cleanup = () => {
+        if (timeoutId) clearTimeout(timeoutId)
+        video.removeEventListener('loadeddata', onReady)
+        video.removeEventListener('canplay', onReady)
+        video.removeEventListener('canplaythrough', onReady)
+        video.removeEventListener('playing', onReady)
+        video.removeEventListener('timeupdate', onReady)
+        video.removeEventListener('error', onError)
+      }
+
+      const finish = () => {
+        cleanup()
+        resolve()
+      }
+
+      const onReady = () => {
+        if (video.readyState >= HAVE_CURRENT_DATA) finish()
+      }
+
+      const onError = () => {
+        cleanup()
+        reject(new Error('Video failed while loading the first frame'))
+      }
+
+      if (video.readyState >= HAVE_CURRENT_DATA) {
+        finish()
+        return
+      }
+
+      video.addEventListener('loadeddata', onReady)
+      video.addEventListener('canplay', onReady)
+      video.addEventListener('canplaythrough', onReady)
+      video.addEventListener('playing', onReady)
+      video.addEventListener('timeupdate', onReady)
+      video.addEventListener('error', onError, { once: true })
+      timeoutId = setTimeout(() => {
+        cleanup()
+        reject(new Error('Video took too long to load — check your connection and try again'))
+      }, VIDEO_LOAD_TIMEOUT_MS)
+    })
+  } finally {
+    if (shouldPauseAfterNudge) video.pause()
+  }
+}
+
+async function primeFirstVideoFrame(video: HTMLVideoElement): Promise<void> {
+  const wasPaused = video.paused
+  try {
+    await video.play()
+    await new Promise<void>((resolve) => {
+      let done = false
+      const finish = () => {
+        if (done) return
+        done = true
+        resolve()
+      }
+      if ('requestVideoFrameCallback' in video) {
+        ;(video as HTMLVideoElement & {
+          requestVideoFrameCallback: (callback: () => void) => number
+        }).requestVideoFrameCallback(() => finish())
+      }
+      setTimeout(finish, FIRST_FRAME_FALLBACK_MS)
+    })
+  } catch {
+    // Autoplay blocked — texture will update when user presses play.
+  } finally {
+    if (wasPaused) video.pause()
+  }
+}
+
 /** Load a video dataset via HLS streaming, set up the video texture, and configure playback controls. */
 export async function loadVideoDataset(
   dataset: Dataset,
@@ -299,21 +399,7 @@ export async function loadVideoDataset(
     }
   }
 
-  await new Promise<void>((resolve, reject) => {
-    const onCanPlay = () => {
-      video.removeEventListener('canplay', onCanPlay)
-      resolve()
-    }
-    if (video.readyState >= 3) {
-      resolve()
-    } else {
-      video.addEventListener('canplay', onCanPlay)
-      setTimeout(() => {
-        video.removeEventListener('canplay', onCanPlay)
-        reject(new Error('Video took too long to load — check your connection and try again'))
-      }, VIDEO_LOAD_TIMEOUT_MS)
-    }
-  })
+  await waitForVideoFrameReady(video)
 
   // Infer display interval from time range + video duration.
   // Only the primary panel's load drives the shared playback state.
@@ -328,21 +414,9 @@ export async function loadVideoDataset(
     }
   }
 
-  // Force first frame decode before attaching to the sphere
-  try {
-    await video.play()
-    await new Promise<void>((resolve) => {
-      if ('requestVideoFrameCallback' in video) {
-        (video as any).requestVideoFrameCallback(() => resolve())
-      } else {
-        setTimeout(resolve, FIRST_FRAME_FALLBACK_MS)
-      }
-    })
-    video.pause()
-    video.currentTime = 0
-  } catch {
-    // Autoplay blocked — texture will update when user presses play
-  }
+  // Force first frame decode before attaching to the sphere.
+  await primeFirstVideoFrame(video)
+  video.currentTime = 0
 
   // Show mute button only when the stream has audio. Only the primary
   // drives the singular mute button visibility — non-primary videos
