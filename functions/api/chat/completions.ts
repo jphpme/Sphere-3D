@@ -38,13 +38,14 @@ interface RequestBody {
 
 // Model mapping: friendly names → Cloudflare AI model IDs
 const MODEL_MAP: Record<string, string> = {
+  'gemma-4-26b-a4b-it': '@cf/google/gemma-4-26b-a4b-it',
   'llama-4-scout':        '@cf/meta/llama-4-scout-17b-16e-instruct',
   'llama-3.3-70b':        '@cf/meta/llama-3.3-70b-instruct-fp8-fast',
   'llama-3.1-70b':        '@cf/meta/llama-3.1-70b-instruct',
   'llama-3.1-8b':         '@cf/meta/llama-3.1-8b-instruct',
   'llama-3.2-3b':         '@cf/meta/llama-3.2-3b-instruct',
   'llama-3.2-11b-vision': '@cf/meta/llama-3.2-11b-vision-instruct',
-  default:                '@cf/meta/llama-4-scout-17b-16e-instruct',
+  default:                '@cf/google/gemma-4-26b-a4b-it',
 }
 
 // Models on Workers AI that support OpenAI-style function calling. When
@@ -52,6 +53,7 @@ const MODEL_MAP: Record<string, string> = {
 // model instead of stripping them, and routes through `toolStreamShim` so
 // the response tool_calls are wrapped in OpenAI-format SSE chunks.
 const TOOL_CALLING_MODELS = new Set([
+  '@cf/google/gemma-4-26b-a4b-it',
   '@cf/meta/llama-4-scout-17b-16e-instruct',
   '@cf/meta/llama-3.3-70b-instruct-fp8-fast',
   '@hf/nousresearch/hermes-2-pro-mistral-7b',
@@ -61,12 +63,13 @@ const TOOL_CALLING_MODELS = new Set([
 // `content` arrays (text + image_url parts) as-is, without the image
 // extraction / license dance the older llama-3.2-11b-vision model needs.
 const NATIVE_MULTIMODAL_MODELS = new Set([
+  '@cf/google/gemma-4-26b-a4b-it',
   '@cf/meta/llama-4-scout-17b-16e-instruct',
 ])
 
 // Legacy vision models that need the separate-image-field API + Meta
 // community license acceptance. Kept for users who explicitly select
-// llama-3.2-11b-vision in their config; llama-4-scout supersedes it for
+// llama-3.2-11b-vision in their config; Gemma 4 and llama-4-scout supersede it for
 // the default vision path.
 const LEGACY_VISION_MODELS = new Set([
   '@cf/meta/llama-3.2-11b-vision-instruct',
@@ -252,7 +255,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       return await nonStreamResponse(context.env.AI, cfModel, textMessages, cors, image)
     }
 
-    // Modern path: llama-4-scout and other native multimodal / tool-calling
+    // Modern path: native multimodal / tool-calling
     // models. If the request includes tools OR images (or both), route
     // through `toolStreamShim` which calls Workers AI non-streaming and
     // wraps the complete response — text deltas, tool_calls, or both —
@@ -582,7 +585,7 @@ async function nonStreamResponse(
  * works," it just arrives in one burst instead of token-by-token.
  *
  * Handles both response shapes observed on Workers AI:
- *   - llama-4-scout:  tool_calls entries have {id, type, function: {name, arguments}}
+ *   - Gemma 4 / llama-4-scout: tool_calls entries have {id, type, function: {name, arguments}}
  *   - llama-3.3-70b:  tool_calls entries have {name, arguments} (no id/type/function wrapper)
  *
  * Messages are passed through as-is — including multipart content arrays

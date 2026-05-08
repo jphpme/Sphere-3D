@@ -20,13 +20,13 @@ import { logger } from '../utils/logger'
 const CONFIG_STORAGE_KEY = 'sos-docent-config'
 
 /**
- * Default vision-capable model for Cloudflare Workers AI. `llama-4-scout`
+ * Default vision-capable model for Cloudflare Workers AI. Gemma 4 26B A4B
  * is natively multimodal AND supports function calling, so the eye-icon
  * screenshot path can now call `search_catalog` alongside the image —
  * which was impossible with the previous `llama-3.2-11b-vision` fallback
  * (that model doesn't support tools and has a separate non-OpenAI API).
  */
-const CF_VISION_MODEL = 'llama-4-scout'
+const CF_VISION_MODEL = 'gemma-4-26b-a4b-it'
 const VISION_TIMEOUT_MS = 60000
 
 /** Detect localhost dev where the Cloudflare /api proxy may be unavailable. */
@@ -223,12 +223,12 @@ const tauriInvoke: ((cmd: string, args?: Record<string, unknown>) => Promise<unk
 const DEFAULT_CONFIG: DocentConfig = {
   apiUrl: IS_TAURI ? '' : '/api',
   apiKey: '',
-  // Default to llama-4-scout on the CF proxy. It's natively multimodal
+  // Default to Gemma 4 26B A4B on the CF proxy. It's natively multimodal
   // (text + images in one model, no vision auto-switch needed) and
   // supports function calling (tools forwarded via toolStreamShim),
   // which enables highlight_region, add_marker, fly_to, and other
   // globe control tools to work on the CF path.
-  model: IS_TAURI ? '' : 'llama-4-scout',
+  model: IS_TAURI ? '' : 'gemma-4-26b-a4b-it',
   enabled: true,
   readingLevel: 'general',
   visionEnabled: false,

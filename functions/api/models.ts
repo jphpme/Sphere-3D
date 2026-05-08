@@ -43,6 +43,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     JSON.stringify({
       object: 'list',
       data: [
+        { id: 'gemma-4-26b-a4b-it', object: 'model', owned_by: 'cloudflare' },
         { id: 'llama-4-scout', object: 'model', owned_by: 'cloudflare' },
         { id: 'llama-3.3-70b', object: 'model', owned_by: 'cloudflare' },
         { id: 'llama-3.1-70b', object: 'model', owned_by: 'cloudflare' },

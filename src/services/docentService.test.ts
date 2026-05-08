@@ -1050,7 +1050,7 @@ describe('config management', () => {
   it('returns default config when nothing saved', () => {
     const config = loadConfig()
     expect(config.apiUrl).toBe('/api')
-    expect(config.model).toBe('llama-4-scout')
+    expect(config.model).toBe('gemma-4-26b-a4b-it')
     expect(config.enabled).toBe(true)
   })
 
@@ -1303,7 +1303,7 @@ describe('processMessage — vision mode', () => {
     const config: DocentConfig = {
       apiUrl: '/api',
       apiKey: '',
-      model: 'llama-4-scout',
+      model: 'gemma-4-26b-a4b-it',
       enabled: true,
       readingLevel: 'general',
       visionEnabled: true,
@@ -1314,7 +1314,7 @@ describe('processMessage — vision mode', () => {
       'data:image/jpeg;base64,abc123',
     )) { /* consume */ }
 
-    expect(capturedConfig.model).toBe('llama-4-scout')
+    expect(capturedConfig.model).toBe('gemma-4-26b-a4b-it')
   })
 
   it('auto-switches to vision model when apiUrl has trailing slash', async () => {
@@ -1331,7 +1331,7 @@ describe('processMessage — vision mode', () => {
     const config: DocentConfig = {
       apiUrl: '/api/',
       apiKey: '',
-      model: 'llama-4-scout',
+      model: 'gemma-4-26b-a4b-it',
       enabled: true,
       readingLevel: 'general',
       visionEnabled: true,
@@ -1342,7 +1342,7 @@ describe('processMessage — vision mode', () => {
       'data:image/jpeg;base64,abc123',
     )) { /* consume */ }
 
-    expect(capturedConfig.model).toBe('llama-4-scout')
+    expect(capturedConfig.model).toBe('gemma-4-26b-a4b-it')
   })
 
   it('does not switch model when using external API URL', async () => {
