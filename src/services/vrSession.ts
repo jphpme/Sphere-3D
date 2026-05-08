@@ -24,6 +24,7 @@ import { createVrTourOverlay, type VrTourOverlayHandle } from './vrTourOverlay'
 import { createVrTimeLabel, type VrTimeLabelHandle } from './vrTimeLabel'
 import { createVrLegendPanel, type VrLegendPanelHandle } from './vrLegendPanel'
 import { setVrTourOverlaySink } from '../ui/tourUI'
+import { getChatVoiceState, startChatVoiceQuestion } from '../ui/chatUI'
 import { createVrInteraction, type VrInteractionHandle } from './vrInteraction'
 import { createVrLoading, type VrLoadingHandle } from './vrLoading'
 import { createVrPlacement, liftedPlacementPosition, type VrPlacementHandle } from './vrPlacement'
@@ -793,6 +794,7 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
       })
     }, 250)
   })
+  const initialVoiceState = getChatVoiceState()
   hud.setState({
     datasetTitle: ctx.getDatasetTitle(),
     isPlaying: ctx.isPlaying(),
@@ -803,6 +805,8 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     panelCount: ctx.getPanelCount(),
     primaryIndex: ctx.getPrimaryIndex(),
     browseOpen: browse.isVisible(),
+    voiceStatus: initialVoiceState.status,
+    voiceTranscript: initialVoiceState.transcript,
   })
 
   // XRControllerModelFactory was imported earlier (before scene
@@ -931,6 +935,8 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
         ctx.stopPlayback()
       } else if (action.kind === 'seek') {
         ctx.seekPlayback(action.fraction)
+      } else if (action.kind === 'voice') {
+        startChatVoiceQuestion()
       } else if (action.kind === 'mute') {
         // Flip the primary video's muted flag. The per-frame
         // hud.setState pipes ctx.isMuted() back through so the
@@ -1177,6 +1183,7 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
 
     // HUD reflects the latest app state every frame. setState is
     // internally debounced — it only redraws when a field changes.
+    const voiceState = getChatVoiceState()
     active.hud.setState({
       datasetTitle: ctx.getDatasetTitle(),
       isPlaying: ctx.isPlaying(),
@@ -1187,6 +1194,8 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
       panelCount,
       primaryIndex: ctx.getPrimaryIndex(),
       browseOpen: active.browse.isVisible(),
+      voiceStatus: voiceState.status,
+      voiceTranscript: voiceState.transcript,
     })
 
     // Tour strip mirrors the engine state. Always poll; the strip's

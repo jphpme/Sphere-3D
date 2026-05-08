@@ -71,6 +71,13 @@ type SpeechWindow = Window & {
   webkitSpeechRecognition?: SpeechRecognitionConstructor
 }
 
+export type ChatVoiceStatus = 'unsupported' | 'idle' | 'listening' | 'thinking' | 'speaking'
+
+export interface ChatVoiceState {
+  status: ChatVoiceStatus
+  transcript: string
+}
+
 export interface ChatCallbacks {
   onLoadDataset: (id: string) => void
   onFlyTo: (lat: number, lon: number, altitude?: number) => void
@@ -95,6 +102,8 @@ let recognition: SpeechRecognitionLike | null = null
 let isListening = false
 let voiceTranscriptBase = ''
 let voiceHadFinalResult = false
+let voiceState: ChatVoiceState = { status: 'idle', transcript: '' }
+const voiceStateListeners = new Set<(state: ChatVoiceState) => void>()
 let datasetPromptTimer: ReturnType<typeof setTimeout> | null = null
 /** Tier B dwell handle for the chat panel — non-null while the
  * panel is open. Started in openChat(), stopped in closeChat().
@@ -386,6 +395,30 @@ export function hideChatTrigger(): void {
   document.getElementById('chat-trigger')?.classList.remove('visible')
 }
 
+export function getChatVoiceState(): ChatVoiceState {
+  const supported = !!getSpeechRecognitionConstructor() && isSpeechSynthesisSupported()
+  if (!supported) return { status: 'unsupported', transcript: voiceState.transcript }
+  return { ...voiceState }
+}
+
+export function subscribeChatVoiceState(listener: (state: ChatVoiceState) => void): () => void {
+  voiceStateListeners.add(listener)
+  listener(getChatVoiceState())
+  return () => voiceStateListeners.delete(listener)
+}
+
+export function startChatVoiceQuestion(): void {
+  startVoiceInput()
+}
+
+function setVoiceState(status: ChatVoiceStatus, transcript = voiceState.transcript): void {
+  voiceState = { status, transcript }
+  const snapshot = getChatVoiceState()
+  for (const listener of voiceStateListeners) {
+    listener(snapshot)
+  }
+}
+
 function getSpeechRecognitionConstructor(): SpeechRecognitionConstructor | null {
   if (typeof window === 'undefined') return null
   const speechWindow = window as SpeechWindow
@@ -401,6 +434,7 @@ function setupVoiceControl(): void {
   if (!btn) return
 
   const supported = !!getSpeechRecognitionConstructor() && isSpeechSynthesisSupported()
+  setVoiceState(supported ? 'idle' : 'unsupported', '')
   btn.disabled = !supported
   btn.title = supported ? 'Ask with voice' : 'Voice is not supported in this browser'
   btn.setAttribute('aria-label', btn.title)
@@ -413,6 +447,7 @@ function setVoiceUI(listening: boolean): void {
   if (!btn) return
   const supported = !!getSpeechRecognitionConstructor() && isSpeechSynthesisSupported()
   if (!supported) {
+    setVoiceState('unsupported')
     btn.title = 'Voice is not supported in this browser'
     btn.setAttribute('aria-label', btn.title)
     return
@@ -436,6 +471,7 @@ function startVoiceInput(): void {
   const input = document.getElementById('chat-input') as HTMLTextAreaElement | null
   if (!Recognition || !input || isStreaming) {
     callbacks?.announce('Voice input is unavailable')
+    setVoiceState(getSpeechRecognitionConstructor() && isSpeechSynthesisSupported() ? 'idle' : 'unsupported')
     return
   }
 
@@ -446,6 +482,7 @@ function startVoiceInput(): void {
     recognition.onresult = handleVoiceResult
     recognition.onerror = (event) => {
       logger.warn('[Chat] Voice recognition error:', event.error)
+      setVoiceState('idle')
       callbacks?.announce('Voice input stopped')
     }
     recognition.onend = () => {
@@ -453,6 +490,8 @@ function startVoiceInput(): void {
       setVoiceUI(false)
       if (voiceHadFinalResult && input.value.trim() && !isStreaming) {
         void handleSend({ voice: true })
+      } else {
+        setVoiceState('idle')
       }
     }
   }
@@ -465,9 +504,11 @@ function startVoiceInput(): void {
     recognition.start()
     isListening = true
     setVoiceUI(true)
+    setVoiceState('listening', '')
     callbacks?.announce('Listening')
   } catch (err) {
     logger.warn('[Chat] Failed to start voice input:', err)
+    setVoiceState('idle')
     callbacks?.announce('Voice input could not start')
   }
 }
@@ -494,6 +535,7 @@ function handleVoiceResult(event: SpeechRecognitionEventLike): void {
   }
 
   input.value = joinSpeechText(voiceTranscriptBase, interimText)
+  setVoiceState('listening', input.value)
   input.style.height = 'auto'
   input.style.height = Math.min(input.scrollHeight, 96) + 'px'
 }
@@ -512,6 +554,9 @@ function speakResponse(text: string): void {
   utterance.lang = navigator.language || 'en-US'
   utterance.rate = 1
   utterance.pitch = 1
+  utterance.onend = () => setVoiceState('idle', '')
+  utterance.onerror = () => setVoiceState('idle', '')
+  setVoiceState('speaking', '')
   window.speechSynthesis.speak(utterance)
 }
 
@@ -805,6 +850,7 @@ async function handleSend(options: { voice?: boolean } = {}): Promise<void> {
   if (!text) return
   if (isListening) recognition?.stop()
   const shouldSpeakResponse = options.voice === true
+  if (shouldSpeakResponse) setVoiceState('thinking', text)
 
   // Add user message
   const userMsg: ChatMessage = {
@@ -1027,6 +1073,7 @@ async function handleSend(options: { voice?: boolean } = {}): Promise<void> {
   saveSession()
   if (shouldSpeakResponse) {
     speakResponse(docentMsg.text)
+    if (!toSpeechText(docentMsg.text)) setVoiceState('idle', '')
   }
   callbacks.announce('Docent responded')
 }

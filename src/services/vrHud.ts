@@ -7,6 +7,7 @@
  */
 
 import type * as THREE from 'three'
+import type { ChatVoiceStatus } from '../ui/chatUI'
 
 const HUD_WIDTH = 0.9
 const HUD_HEIGHT = 0.22
@@ -36,7 +37,8 @@ interface Rect {
 const RECTS = {
   playPause: { x: 38, y: 166, w: 58, h: 58 },
   stop: { x: 112, y: 166, w: 58, h: 58 },
-  progress: { x: 192, y: 187, w: 560, h: 16 },
+  progress: { x: 192, y: 187, w: 500, h: 16 },
+  voice: { x: 880, y: 166, w: 58, h: 58 },
   mute: { x: 970, y: 166, w: 58, h: 58 },
   browse: { x: 1060, y: 166, w: 58, h: 58 },
   exit: { x: 1150, y: 166, w: 58, h: 58 },
@@ -46,6 +48,7 @@ export type VrHudAction =
   | { kind: 'play-pause' }
   | { kind: 'stop' }
   | { kind: 'seek'; fraction: number }
+  | { kind: 'voice' }
   | { kind: 'mute' }
   | { kind: 'browse' }
   | { kind: 'exit-vr' }
@@ -60,6 +63,8 @@ export interface VrHudState {
   panelCount: number
   primaryIndex: number
   browseOpen: boolean
+  voiceStatus: ChatVoiceStatus
+  voiceTranscript: string
 }
 
 export interface VrHudHandle {
@@ -167,6 +172,41 @@ function drawSpeaker(ctx: CanvasRenderingContext2D, rect: Rect, muted: boolean, 
   }
 }
 
+function drawVoice(ctx: CanvasRenderingContext2D, rect: Rect, status: ChatVoiceStatus): void {
+  const enabled = status !== 'unsupported'
+  drawButtonBackplate(ctx, rect, status === 'listening' || status === 'speaking')
+  const cx = rect.x + rect.w / 2
+  const cy = rect.y + rect.h / 2
+  ctx.strokeStyle = !enabled
+    ? MUTED
+    : status === 'listening'
+      ? '#ff8a8a'
+      : status === 'thinking' || status === 'speaking'
+        ? ACCENT
+        : TEXT
+  ctx.lineWidth = 5
+  ctx.lineCap = 'round'
+  ctx.lineJoin = 'round'
+  ctx.beginPath()
+  ctx.roundRect(cx - 9, cy - 24, 18, 34, 9)
+  ctx.stroke()
+  ctx.beginPath()
+  ctx.moveTo(cx - 22, cy - 4)
+  ctx.quadraticCurveTo(cx - 22, cy + 22, cx, cy + 22)
+  ctx.quadraticCurveTo(cx + 22, cy + 22, cx + 22, cy - 4)
+  ctx.stroke()
+  ctx.beginPath()
+  ctx.moveTo(cx, cy + 22)
+  ctx.lineTo(cx, cy + 30)
+  ctx.stroke()
+  if (!enabled) {
+    ctx.beginPath()
+    ctx.moveTo(cx - 24, cy - 24)
+    ctx.lineTo(cx + 24, cy + 24)
+    ctx.stroke()
+  }
+}
+
 function drawBrowse(ctx: CanvasRenderingContext2D, rect: Rect, active: boolean): void {
   drawButtonBackplate(ctx, rect, active)
   ctx.fillStyle = active ? ACCENT : TEXT
@@ -234,14 +274,38 @@ function drawProgress(ctx: CanvasRenderingContext2D, state: VrHudState): void {
   }
 
   ctx.fillStyle = enabled ? TEXT : MUTED
-  ctx.font = '500 28px system-ui, -apple-system, sans-serif'
+  ctx.font = '500 24px system-ui, -apple-system, sans-serif'
   ctx.textAlign = 'left'
   ctx.textBaseline = 'middle'
   ctx.fillText(
     `${formatClock(state.currentTime)} / ${formatClock(state.duration)}`,
-    rect.x + rect.w + 32,
+    rect.x + rect.w + 28,
     y,
   )
+}
+
+function voiceLabel(status: ChatVoiceStatus): string {
+  if (status === 'unsupported') return 'Voice unavailable'
+  if (status === 'listening') return 'Listening...'
+  if (status === 'thinking') return 'Thinking...'
+  if (status === 'speaking') return 'Speaking...'
+  return ''
+}
+
+function drawVoiceStatus(ctx: CanvasRenderingContext2D, state: VrHudState): void {
+  const label = voiceLabel(state.voiceStatus)
+  if (!label && !state.voiceTranscript) return
+  const text = state.voiceTranscript || label
+  ctx.font = '500 24px system-ui, -apple-system, sans-serif'
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  ctx.fillStyle = state.voiceStatus === 'listening' ? '#ffb0b0' : 'rgba(232, 234, 240, 0.72)'
+  let line = text
+  const maxWidth = 480
+  while (ctx.measureText(line).width > maxWidth && line.length > 5) {
+    line = `${line.slice(0, -2)}...`
+  }
+  ctx.fillText(line, CANVAS_WIDTH / 2, TOP_ROW_HEIGHT - 24)
 }
 
 function drawPanelDots(ctx: CanvasRenderingContext2D, state: VrHudState): void {
@@ -277,6 +341,7 @@ function drawCanvas(ctx: CanvasRenderingContext2D, state: VrHudState): void {
   ctx.stroke()
 
   drawPanelDots(ctx, state)
+  drawVoiceStatus(ctx, state)
 
   const titleText = state.datasetTitle || 'Load a dataset in 2D view first'
   ctx.fillStyle = TEXT
@@ -296,6 +361,7 @@ function drawCanvas(ctx: CanvasRenderingContext2D, state: VrHudState): void {
   drawPlayPause(ctx, RECTS.playPause, state.isPlaying, state.hasVideo)
   drawStop(ctx, RECTS.stop, state.hasVideo)
   drawProgress(ctx, state)
+  drawVoice(ctx, RECTS.voice, state.voiceStatus)
   drawSpeaker(ctx, RECTS.mute, state.isMuted, state.hasVideo)
   drawBrowse(ctx, RECTS.browse, state.browseOpen)
   drawExit(ctx, RECTS.exit)
@@ -338,6 +404,8 @@ export function createVrHud(THREE_: typeof THREE): VrHudHandle {
     panelCount: 1,
     primaryIndex: 0,
     browseOpen: false,
+    voiceStatus: 'idle',
+    voiceTranscript: '',
   }
 
   function redraw(): void {
@@ -360,7 +428,9 @@ export function createVrHud(THREE_: typeof THREE): VrHudHandle {
         state.duration !== currentState.duration ||
         state.panelCount !== currentState.panelCount ||
         state.primaryIndex !== currentState.primaryIndex ||
-        state.browseOpen !== currentState.browseOpen
+        state.browseOpen !== currentState.browseOpen ||
+        state.voiceStatus !== currentState.voiceStatus ||
+        state.voiceTranscript !== currentState.voiceTranscript
       if (!changed) return
       currentState = state
       redraw()
@@ -376,6 +446,7 @@ export function createVrHud(THREE_: typeof THREE): VrHudHandle {
       if (currentState.hasVideo && hitRect(px, py, RECTS.progress)) {
         return { kind: 'seek', fraction: clamp01((px - RECTS.progress.x) / RECTS.progress.w) }
       }
+      if (currentState.voiceStatus !== 'unsupported' && hitRect(px, py, RECTS.voice)) return { kind: 'voice' }
       if (currentState.hasVideo && hitRect(px, py, RECTS.mute)) return { kind: 'mute' }
       if (hitRect(px, py, RECTS.browse)) return { kind: 'browse' }
       if (hitRect(px, py, RECTS.exit)) return { kind: 'exit-vr' }
