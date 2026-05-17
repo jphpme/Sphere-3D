@@ -422,8 +422,14 @@ export async function stampTranscodingForVideoSource(
   now: string,
 ): Promise<number> {
   // SQL guard mirrors the route's JS-level overlap check:
-  //   • non-transcoding row → stamp (active_transcode_upload_id
-  //     is NULL alongside transcoding=NULL in the steady state)
+  //   • non-transcoding row → stamp (transcoding IS NULL or 0;
+  //     both are idle states per the migration / type comments,
+  //     so the guard treats them equivalently via
+  //     `COALESCE(transcoding, 0) = 0`. The earlier
+  //     `transcoding IS NULL` clause missed rows whose column
+  //     happens to be 0 — those would falsely look like a
+  //     concurrent transcode and the UPDATE would refuse a
+  //     legitimate fresh stamp. PR #112 followup.)
   //   • same-upload retry → stamp (active = upload.id matches)
   //   • transcoding=1 + active=otherUpload → 0 rows changed
   //   • transcoding=1 + active=NULL → 0 rows changed (the
@@ -444,7 +450,7 @@ export async function stampTranscodingForVideoSource(
              content_digest = CASE WHEN published_at IS NULL THEN NULL ELSE content_digest END,
              updated_at = ?
        WHERE id = ?
-         AND (transcoding IS NULL OR active_transcode_upload_id = ?)`,
+         AND (COALESCE(transcoding, 0) = 0 OR active_transcode_upload_id = ?)`,
     )
     .bind(upload.id, upload.claimed_digest, now, datasetId, upload.id)
     .run()

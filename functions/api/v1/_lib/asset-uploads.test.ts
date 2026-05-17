@@ -729,6 +729,38 @@ describe('transcoding lifecycle UPDATEs are scoped to active_transcode_upload_id
     expect(row.active_transcode_upload_id).toBe(UPLOAD_B)
   })
 
+  it('stampTranscodingForVideoSource treats transcoding=0 as idle (changes=1)', async () => {
+    // PR #112 followup — the migration/type comments treat both
+    // NULL and 0 as "not transcoding", but the earlier SQL
+    // guard's `transcoding IS NULL` clause refused 0-valued
+    // rows. The route's JS check (`if (dataset.transcoding &&
+    // ...)`) correctly skips them, so the SQL guard would
+    // refuse a legitimate fresh stamp on a row whose column
+    // happened to be 0 instead of NULL (e.g., a hand-edited
+    // reset, or any external code writing 0 rather than NULL).
+    // The fix is `COALESCE(transcoding, 0) = 0`.
+    const { d1, sqlite } = makeDb()
+    sqlite
+      .prepare(`UPDATE datasets SET transcoding = 0 WHERE id = ?`)
+      .run(DATASET_ID)
+    const { stampTranscodingForVideoSource } = await import('./asset-uploads')
+    const changes = await stampTranscodingForVideoSource(
+      d1,
+      DATASET_ID,
+      uploadStub(UPLOAD_A),
+      '2026-04-29T12:00:00.000Z',
+    )
+    expect(changes).toBe(1)
+    const row = sqlite
+      .prepare(`SELECT transcoding, active_transcode_upload_id FROM datasets WHERE id = ?`)
+      .get(DATASET_ID) as {
+      transcoding: number | null
+      active_transcode_upload_id: string | null
+    }
+    expect(row.transcoding).toBe(1)
+    expect(row.active_transcode_upload_id).toBe(UPLOAD_A)
+  })
+
   it('stampTranscodingForVideoSource refuses (changes=0) on a corrupted transcoding=1 + active=NULL row', async () => {
     // PR #112 followup — the earlier `active_transcode_upload_id
     // IS NULL OR = ?` SQL guard was too permissive: a row with
