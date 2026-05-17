@@ -387,6 +387,69 @@ describe('POST .../transcode-complete — refusals', () => {
     expect((await readJson<{ error: string }>(res)).error).toBe('not_transcoding')
   })
 
+  it('is idempotent on a workflow retry against an already-applied row', async () => {
+    // PR #112 followup — the workflow's POST to this endpoint
+    // can have its response dropped on the wire (R2 → GHA
+    // runner network blip). Its retry loop then re-POSTs after
+    // the database has already applied the clearTranscoding
+    // change. Without the idempotency check the second call
+    // sees `transcoding IS NULL` and 409s — reporting a
+    // successful transcode as a failure to the workflow, which
+    // would then exit non-zero and confuse operators.
+    //
+    // The check is keyed on (data_ref matches the expected
+    // master.m3u8 path AND source_digest matches the row's
+    // stored value). Only a previously-successful
+    // clearTranscoding for THIS exact upload can produce that
+    // state, and the endpoint is service-token-gated so a
+    // publisher PUT can't plant the data_ref to forge it.
+    const { sqlite, datasetId, uploadId, env } = setupEnv({ transcoding: false })
+    // Seed the row as if the FIRST /transcode-complete call
+    // succeeded (data_ref swapped, transcoding cleared,
+    // source_digest still set from the original stamp).
+    sqlite
+      .prepare(
+        `UPDATE datasets
+           SET transcoding = NULL,
+               active_transcode_upload_id = NULL,
+               data_ref = ?,
+               source_digest = ?,
+               updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(
+        `r2:videos/${datasetId}/${uploadId}/master.m3u8`,
+        DEFAULT_SOURCE_DIGEST,
+        '2026-04-29T12:30:00.000Z',
+        datasetId,
+      )
+    const res = await transcodeComplete(
+      ctx({ env, datasetId, body: { upload_id: uploadId, source_digest: DEFAULT_SOURCE_DIGEST } }),
+    )
+    expect(res.status).toBe(200)
+    const body = await readJson<{ idempotent: boolean; dataset: { data_ref: string } }>(res)
+    expect(body.idempotent).toBe(true)
+    expect(body.dataset.data_ref).toBe(`r2:videos/${datasetId}/${uploadId}/master.m3u8`)
+  })
+
+  it('still 409s on a non-transcoding row when the data_ref does NOT match (real "fired twice" case)', async () => {
+    // Negative companion to the idempotent test: if a workflow
+    // fires against the wrong dataset (or against a stale row
+    // that was reset out-of-band), the row's data_ref won't
+    // match the expected path. The fall-through path must still
+    // 409 — the idempotency check is narrow on purpose.
+    const { datasetId, uploadId, env, sqlite } = setupEnv({ transcoding: false })
+    // data_ref points at something completely unrelated.
+    sqlite
+      .prepare(`UPDATE datasets SET data_ref = 'vimeo:9999' WHERE id = ?`)
+      .run(datasetId)
+    const res = await transcodeComplete(
+      ctx({ env, datasetId, body: { upload_id: uploadId, source_digest: DEFAULT_SOURCE_DIGEST } }),
+    )
+    expect(res.status).toBe(409)
+    expect((await readJson<{ error: string }>(res)).error).toBe('not_transcoding')
+  })
+
   it('returns 409 transcode_upload_mismatch when the callback’s upload_id is stale', async () => {
     // Migration 0012 — two uploads with identical bytes (same
     // source_digest) need a per-upload binding to disambiguate

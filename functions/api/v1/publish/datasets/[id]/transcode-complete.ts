@@ -128,6 +128,43 @@ export const onRequestPost: PagesFunction<CatalogEnv, 'id'> = async context => {
   if (!existing) return jsonError(404, 'not_found', `Dataset ${id} not found.`)
 
   if (!existing.transcoding) {
+    // Idempotency check before returning the 409: if the row is
+    // already in the post-transcode steady state for THIS upload
+    // (data_ref points at the expected master.m3u8 and the
+    // workflow's claimed source_digest still matches what we
+    // recorded), treat the retry as success. The workflow's
+    // HTTP call to this endpoint can drop its response on the
+    // wire (R2 → GHA runner network blip), and the workflow's
+    // retry loop would re-POST after the database has already
+    // applied the change. Without this branch the retry sees
+    // `transcoding IS NULL` and 409s — reporting a successful
+    // transcode as a failure. PR #112 followup.
+    //
+    // The role guard at the top of the handler already restricts
+    // callers to `role='service'` tokens (and admin staff), so
+    // an attacker can't trigger this branch by planting a
+    // data_ref via the publisher PUT path — only the workflow
+    // can reach here, and `existing.source_digest` is set by the
+    // /asset/.../complete stamp from the publisher's claim
+    // (which the workflow re-verifies via streaming SHA before
+    // calling here). The combination of "service-role caller" +
+    // "source_digest matches the row's stored value" + "data_ref
+    // already equals the path we'd compute here" is a state
+    // only a previously-successful clearTranscoding for this
+    // exact upload can produce.
+    const expectedDataRef = `r2:${buildVideoBundleMasterKey(id, validated.upload_id)}`
+    if (
+      existing.data_ref === expectedDataRef &&
+      existing.source_digest === validated.source_digest
+    ) {
+      return new Response(
+        JSON.stringify({ dataset: existing, idempotent: true }),
+        {
+          status: 200,
+          headers: { 'Content-Type': CONTENT_TYPE, 'Cache-Control': 'private, no-store' },
+        },
+      )
+    }
     return jsonError(
       409,
       'not_transcoding',

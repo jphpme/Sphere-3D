@@ -452,58 +452,32 @@ export const onRequestPost: PagesFunction<CatalogEnv, keyof RouteParams> = async
       )
     }
 
-    // Post-dispatch recovery: if a prior /complete for THIS
-    // upload already stamped + dispatched but its final
-    // markVideoUploadCompleted step failed (transient D1 error,
-    // request abort), the asset_uploads row stays `pending` and
-    // the top-of-handler idempotent branch doesn't fire on
-    // retry. Without this branch the retry would re-stamp (a
-    // no-op for the same upload) and **re-dispatch the
-    // workflow** — duplicate runs. PR #112 followup —
-    // complete.ts:486.
-    //
-    // The trigger is narrow on purpose: `transcoding=1 AND
-    // active_transcode_upload_id = uploadId`. That state can
-    // only have been produced by *this* upload's prior stamp
-    // (the SQL clears both in lockstep), so a caller cannot
-    // forge it the way they could a `data_ref` match. An
-    // earlier broader check that also recovered on
-    // `data_ref === r2:videos/{datasetId}/{uploadId}/master.m3u8`
-    // was removed: that ref is editable via the generic PUT
-    // path *before* `transcoding=1` is stamped (the data_ref
-    // mutation guard in /AE only fires on a transcoding row),
-    // so a caller could mint an upload, plant the predicted
-    // ref, hit /complete, and get the upload marked completed
-    // without ever dispatching the workflow. The post-
-    // /transcode-complete mark-failure case that branch was
-    // meant to handle is now covered by markVideoUploadCompleted
-    // being called from /transcode-complete itself (3pd-followup/
-    // AI on transcode-complete.ts), so by the time the workflow
-    // callback lands the upload row is already `completed` and
-    // any /complete retry hits the top-of-handler idempotent
-    // branch cleanly.
-    const alreadyStamped =
-      dataset.transcoding === 1 && dataset.active_transcode_upload_id === uploadId
-    if (alreadyStamped) {
-      await markVideoUploadCompleted(context.env.CATALOG_DB!, uploadId, now)
-      const refreshed = await context.env.CATALOG_DB!
-        .prepare(`SELECT * FROM datasets WHERE id = ?`)
-        .bind(datasetId)
-        .first<DatasetRow>()
-      return new Response(
-        JSON.stringify({
-          dataset: refreshed ?? dataset,
-          upload: { ...upload, status: 'completed', completed_at: now },
-          verified_digest: verifiedDigest,
-          transcoding: true,
-          recovered: true,
-        }),
-        {
-          status: 202,
-          headers: { 'Content-Type': CONTENT_TYPE, 'Cache-Control': 'private, no-store' },
-        },
-      )
-    }
+    // Note on retry behaviour for stuck-pending uploads:
+    // earlier followups carried an `alreadyStamped` recovery
+    // branch that short-circuited a retry of /complete when the
+    // row was already in the `transcoding=1 +
+    // active_transcode_upload_id = uploadId` state. That branch
+    // was meant to absorb the case "stamp succeeded, dispatch
+    // succeeded, markVideoUploadCompleted failed transiently"
+    // without firing a duplicate dispatch. PR #112 followup
+    // pointed out that the same row state can ALSO be produced
+    // by "stamp succeeded, dispatch failed, revertTranscodingStamp
+    // ALSO failed" — and in that case there's no workflow
+    // running and short-circuiting would permanently strand
+    // the row (transcoding=1 with no callback ever coming).
+    // Without a durable "dispatch succeeded" marker the row
+    // state cannot distinguish the two cases, so the recovery
+    // branch is gone. The retry path falls through to a fresh
+    // stamp (a no-op for the same upload — the SQL's
+    // `active_transcode_upload_id = uploadId` clause allows it)
+    // followed by a fresh dispatch. The workflow itself is
+    // idempotent (deterministic ffmpeg output keyed on source
+    // bytes + upload_id), and /transcode-complete is idempotent
+    // on a same-upload retry of an already-applied row
+    // (3pd-followup/AQ on transcode-complete.ts), so a duplicate
+    // workflow caused by the rare "mark step failed after
+    // dispatch succeeded" case is bounded cost (≈ a few extra
+    // minutes of compute) rather than a stranded row.
 
     // 1. Persist the dataset-row half (transcoding=1, +
     //    conditional data_ref clear, + source_digest, +

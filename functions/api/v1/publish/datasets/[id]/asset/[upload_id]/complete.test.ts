@@ -770,29 +770,34 @@ describe('POST .../asset/{upload_id}/complete — refusals', () => {
     expect(body.transcoding).toBe(false)
   })
 
-  it('recovers a stuck-pending upload mid-transcode without re-dispatching', async () => {
-    // PR #112 Copilot followup (complete.ts:486): the original
-    // ordering "stamp → dispatch → mark" leaves the asset_uploads
-    // row `pending` if the final mark step fails after the
-    // dispatch fired. A naive retry would skip the top-of-handler
-    // idempotent branch (which keys on status='completed') and
-    // re-enter the stamp+dispatch flow — launching a duplicate
-    // workflow. The recovery branch detects "this upload already
-    // owns the active binding" and just marks + returns
-    // `transcoding: true, recovered: true` without firing
-    // another dispatch.
+  it('retries on a stamped-but-pending row by re-dispatching (no false recovery)', async () => {
+    // PR #112 followup: an earlier `alreadyStamped` recovery
+    // branch short-circuited a retry of /complete when the row
+    // was already `transcoding=1 + active=this upload`,
+    // marking the upload completed without re-dispatching.
+    // Copilot pointed out the failure mode that branch couldn't
+    // distinguish: the exact same row state can be produced by
+    // "stamp succeeded, dispatch failed, revert ALSO failed" —
+    // in which case there's no workflow running and the
+    // shortcut would permanently strand the row. Without a
+    // durable "dispatch succeeded" marker the row state is
+    // ambiguous, so the recovery branch is gone and the retry
+    // path falls through to a fresh stamp + dispatch. The
+    // workflow is idempotent (deterministic ffmpeg keyed on
+    // source bytes + upload_id), so a duplicate run is bounded
+    // cost; a stranded row is not.
     //
-    // The test omits GITHUB_TOKEN/REPO so a fall-through to the
-    // dispatch path WOULD fail with 503 github_dispatch_unconfigured.
-    // A 202 with `recovered: true` proves we short-circuited
-    // before reaching dispatch — duplicate-workflow guard.
+    // The fixture has no GITHUB_TOKEN, so a fall-through to
+    // dispatch 503s. The 503 is the proof point that the route
+    // attempted to re-dispatch (the desired behavior) rather
+    // than recovering with a false "marked completed" via the
+    // removed shortcut.
     const { sqlite, datasetId, kv } = setupEnv({ datasetPublished: false })
     const env = {
       CATALOG_DB: asD1(sqlite),
       CATALOG_KV: kv,
       CATALOG_R2: makeBucket(HELLO_BYTES.buffer as ArrayBuffer),
-      // No GITHUB_TOKEN / GITHUB_DISPATCH_REPO — dispatch would
-      // throw `github_dispatch_unconfigured` if we ever reached it.
+      // No GITHUB_TOKEN — re-dispatch will 503.
     }
     const uploadId = 'Z'.repeat(26)
     insertPending(sqlite, {
@@ -804,8 +809,6 @@ describe('POST .../asset/{upload_id}/complete — refusals', () => {
       mime: 'video/mp4',
       claimed_digest: HELLO_DIGEST,
     })
-    // Simulate the "stamp + dispatch succeeded; mark failed" state:
-    // upload row stays pending, dataset row is stamped for THIS upload.
     sqlite
       .prepare(
         `UPDATE datasets
@@ -815,31 +818,17 @@ describe('POST .../asset/{upload_id}/complete — refusals', () => {
       .run(uploadId, HELLO_DIGEST, '2026-04-29T12:00:00.000Z', datasetId)
 
     const res = await completeHandler(ctx({ env, datasetId, uploadId }))
-    expect(res.status).toBe(202)
-    const body = await readJson<{
-      recovered: boolean
-      transcoding: boolean
-      upload: { status: string }
-    }>(res)
-    expect(body.recovered).toBe(true)
-    expect(body.transcoding).toBe(true)
-    expect(body.upload.status).toBe('completed')
-    // Asset_uploads row is now correctly marked completed.
+    // The route did NOT short-circuit with `recovered: true`.
+    // It re-stamped (a no-op on the same upload), attempted
+    // dispatch, and 503d on missing GitHub config.
+    expect(res.status).toBe(503)
+    const body = await readJson<{ error: string }>(res)
+    expect(body.error).toBe('github_dispatch_unconfigured')
+    // Upload row stays pending — no false-completed marking.
     const row = sqlite
       .prepare(`SELECT status FROM asset_uploads WHERE id = ?`)
       .get(uploadId) as { status: string }
-    expect(row.status).toBe('completed')
-    // Dataset row is unchanged — still transcoding under THIS upload.
-    const dsRow = sqlite
-      .prepare(
-        `SELECT transcoding, active_transcode_upload_id FROM datasets WHERE id = ?`,
-      )
-      .get(datasetId) as {
-      transcoding: number | null
-      active_transcode_upload_id: string | null
-    }
-    expect(dsRow.transcoding).toBe(1)
-    expect(dsRow.active_transcode_upload_id).toBe(uploadId)
+    expect(row.status).toBe('pending')
   })
 
   it('does NOT recover via a planted data_ref alone (attack vector closed)', async () => {
