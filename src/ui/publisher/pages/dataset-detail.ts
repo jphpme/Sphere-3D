@@ -784,57 +784,78 @@ async function dispatchPreview(
   id: string,
   options: DatasetDetailPageOptions,
 ): Promise<void> {
-  const result = await publisherSend<{ token: string; url: string; expires_in: number }>(
-    `${endpoint(id)}/preview`,
-    {},
-    { fetchFn: options.fetchFn, sleep: options.sleep },
-  )
-  if (!result.ok) {
-    if (result.kind === 'session') {
-      if (handleSessionError({ navigate: options.navigate }) === 'show-error') {
-        renderError(content, 'session')
-      }
-      return
-    }
-    // Surface as an inline banner — same path as the dispatch
-    // action handler so the publisher sees a consistent error
-    // pattern across every detail-page button.
-    const errorMessage = actionErrorMessage(result.kind)
-    const fresh = await publisherGet<DatasetDetailResponse>(endpoint(id), {
-      fetchFn: options.fetchFn,
-      sleep: options.sleep,
-    })
-    if (fresh.ok) {
-      paint(content, id, fresh.data, options, errorMessage)
-      return
-    }
-    // If the refetch itself fails too, fall back to the static
-    // error card so the publisher sees *something* rather than
-    // the button silently doing nothing. Fix for PR #112
-    // Copilot #7. (Parallels the `dispatchAction` fallback for
-    // the same case.)
-    if (fresh.kind === 'session') {
-      if (handleSessionError({ navigate: options.navigate }) === 'show-error') {
-        renderError(content, 'session')
-      }
-      return
-    }
-    renderError(content, fresh.kind)
-    return
+  // Same lifecycle protection the transcode poll loop uses
+  // (3pd-followup/T): the preview-token POST is async, and if
+  // the publisher clicks Preview then navigates away before it
+  // resolves, the eventual `openPreviewModal` / `paint` /
+  // `renderError` would mutate the next page's DOM. The router
+  // fires ROUTE_CHANGE_START_EVENT before the destination
+  // handler renders into `content`; from that moment any DOM
+  // mutation here is unsafe. PR #112 followup — dispatchPreview
+  // route-change race.
+  let disposed = false
+  const onRouteStart = (): void => {
+    disposed = true
+    window.removeEventListener(ROUTE_CHANGE_START_EVENT, onRouteStart)
   }
-  // Use the API URL the backend hands us — that's an
-  // anonymous-read endpoint that returns the dataset metadata
-  // as JSON. Not a visual preview (no globe context, no
-  // playback controls), but a usable primitive a reviewer can
-  // fetch today. The earlier `/?preview=<token>&dataset=<id>`
-  // shape assumed an SPA-side consumer that hasn't shipped yet
-  // (slated for Phase 3pe), so publishers were copying a link
-  // that silently dropped its query string on the floor.
-  // PR #112 followup — dataset-detail.ts:807. When the SPA
-  // consumer lands, swap back to the SPA-style URL in the same
-  // commit that wires up the receiver so the link is never
-  // simultaneously visible-and-broken.
-  openPreviewModal(content, result.data.url, result.data.expires_in)
+  window.addEventListener(ROUTE_CHANGE_START_EVENT, onRouteStart)
+  try {
+    const result = await publisherSend<{ token: string; url: string; expires_in: number }>(
+      `${endpoint(id)}/preview`,
+      {},
+      { fetchFn: options.fetchFn, sleep: options.sleep },
+    )
+    if (disposed) return
+    if (!result.ok) {
+      if (result.kind === 'session') {
+        if (handleSessionError({ navigate: options.navigate }) === 'show-error') {
+          if (!disposed) renderError(content, 'session')
+        }
+        return
+      }
+      // Surface as an inline banner — same path as the dispatch
+      // action handler so the publisher sees a consistent error
+      // pattern across every detail-page button.
+      const errorMessage = actionErrorMessage(result.kind)
+      const fresh = await publisherGet<DatasetDetailResponse>(endpoint(id), {
+        fetchFn: options.fetchFn,
+        sleep: options.sleep,
+      })
+      if (disposed) return
+      if (fresh.ok) {
+        paint(content, id, fresh.data, options, errorMessage)
+        return
+      }
+      // If the refetch itself fails too, fall back to the static
+      // error card so the publisher sees *something* rather than
+      // the button silently doing nothing. Fix for PR #112
+      // Copilot #7. (Parallels the `dispatchAction` fallback for
+      // the same case.)
+      if (fresh.kind === 'session') {
+        if (handleSessionError({ navigate: options.navigate }) === 'show-error') {
+          if (!disposed) renderError(content, 'session')
+        }
+        return
+      }
+      renderError(content, fresh.kind)
+      return
+    }
+    // Use the API URL the backend hands us — that's an
+    // anonymous-read endpoint that returns the dataset metadata
+    // as JSON. Not a visual preview (no globe context, no
+    // playback controls), but a usable primitive a reviewer can
+    // fetch today. The earlier `/?preview=<token>&dataset=<id>`
+    // shape assumed an SPA-side consumer that hasn't shipped yet
+    // (slated for Phase 3pe), so publishers were copying a link
+    // that silently dropped its query string on the floor.
+    // PR #112 followup — dataset-detail.ts:807. When the SPA
+    // consumer lands, swap back to the SPA-style URL in the same
+    // commit that wires up the receiver so the link is never
+    // simultaneously visible-and-broken.
+    openPreviewModal(content, result.data.url, result.data.expires_in)
+  } finally {
+    window.removeEventListener(ROUTE_CHANGE_START_EVENT, onRouteStart)
+  }
 }
 
 /**

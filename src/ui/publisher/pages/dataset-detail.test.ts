@@ -509,6 +509,59 @@ describe('renderDatasetDetailPage', () => {
     expect(urlField?.value).not.toContain('?preview=')
   })
 
+  it('does NOT open the preview modal if the user navigates away while the token POST is in flight', async () => {
+    // PR #112 followup — dispatchPreview's async POST can
+    // resolve after the user has navigated to a different
+    // page. Without the ROUTE_CHANGE_START_EVENT guard, the
+    // modal would mount on top of the next page's DOM (same
+    // shape as the transcode poll-loop race /T fixed).
+    let resolvePreview: (r: Response) => void = () => {}
+    const previewPromise = new Promise<Response>(resolve => {
+      resolvePreview = resolve
+    })
+    const fetchFn = vi
+      .fn()
+      .mockResolvedValueOnce(detailResponse(dataset()))
+      .mockReturnValueOnce(previewPromise)
+    await renderDatasetDetailPage(mount, '01AAAAAAAAAAAAAAAAAAAAAAAA', {
+      fetchFn: fetchFn as unknown as typeof fetch,
+    })
+    mount.querySelector<HTMLButtonElement>('.publisher-detail-preview')!.click()
+    // Promise dispatched, awaiting the preview response. User
+    // navigates away — the router fires the start event before
+    // the destination handler renders into `content`.
+    window.dispatchEvent(
+      new CustomEvent('publisher:routechange:start', {
+        detail: { path: '/publish/datasets' },
+      }),
+    )
+    // Plant a sentinel marker simulating the next page rendering
+    // into the same mount, then resolve the in-flight preview
+    // POST. The deferred dispatchPreview should bail without
+    // clobbering the sentinel.
+    mount.replaceChildren(
+      Object.assign(document.createElement('div'), {
+        className: 'sentinel-next-page',
+        textContent: 'next page content',
+      }),
+    )
+    resolvePreview(
+      new Response(
+        JSON.stringify({
+          token: 'PREVIEW-TOKEN-LATE',
+          url: '/api/v1/datasets/01ABC/preview/PREVIEW-TOKEN-LATE',
+          expires_in: 900,
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    )
+    for (let i = 0; i < 8; i++) await Promise.resolve()
+    // Sentinel survives — the late preview response didn't
+    // open a modal over it.
+    expect(mount.querySelector('.sentinel-next-page')).not.toBeNull()
+    expect(mount.querySelector('.publisher-modal')).toBeNull()
+  })
+
   it('closes the preview modal on Close click', async () => {
     const fetchFn = vi
       .fn()
