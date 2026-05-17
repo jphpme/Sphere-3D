@@ -157,6 +157,20 @@ export const onRequestPost: PagesFunction<CatalogEnv, 'id'> = async context => {
       existing.data_ref === expectedDataRef &&
       existing.source_digest === validated.source_digest
     ) {
+      // Re-run the asset_uploads bookkeeping before returning.
+      // The first /transcode-complete call may have cleared the
+      // dataset row (clearTranscoding) but failed to mark the
+      // upload (transient D1 error after the first UPDATE). The
+      // workflow's retry then lands here — without the catch-up
+      // markVideoUploadCompleted, the upload row stays `pending`
+      // and a later /asset/.../complete retry on the same upload
+      // would re-stamp transcoding=1 and dispatch another
+      // workflow. The mark step is itself idempotent
+      // (`WHERE status='pending'`), so calling it on an already-
+      // completed row is a no-op. PR #112 followup —
+      // transcode-complete.ts:idempotent-skips-mark.
+      const now = new Date().toISOString()
+      await markVideoUploadCompleted(db, validated.upload_id, now)
       return new Response(
         JSON.stringify({ dataset: existing, idempotent: true }),
         {

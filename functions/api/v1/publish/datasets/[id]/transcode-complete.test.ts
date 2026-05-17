@@ -423,6 +423,17 @@ describe('POST .../transcode-complete — refusals', () => {
         '2026-04-29T12:30:00.000Z',
         datasetId,
       )
+    // Also seed the asset_uploads row as `pending` — simulating
+    // the gap where clearTranscoding committed but the original
+    // markVideoUploadCompleted step failed. The idempotent
+    // branch should catch this up before returning so a
+    // subsequent /asset/.../complete retry doesn't re-stamp the
+    // row and re-dispatch the workflow. PR #112 followup —
+    // transcode-complete.ts:idempotent-skips-mark.
+    sqlite
+      .prepare(`UPDATE asset_uploads SET status = 'pending', completed_at = NULL WHERE id = ?`)
+      .run(uploadId)
+
     const res = await transcodeComplete(
       ctx({ env, datasetId, body: { upload_id: uploadId, source_digest: DEFAULT_SOURCE_DIGEST } }),
     )
@@ -430,6 +441,13 @@ describe('POST .../transcode-complete — refusals', () => {
     const body = await readJson<{ idempotent: boolean; dataset: { data_ref: string } }>(res)
     expect(body.idempotent).toBe(true)
     expect(body.dataset.data_ref).toBe(`r2:videos/${datasetId}/${uploadId}/master.m3u8`)
+    // The upload row is now marked completed even though we hit
+    // the idempotent path — the stuck-pending vector is closed.
+    const row = sqlite
+      .prepare(`SELECT status, completed_at FROM asset_uploads WHERE id = ?`)
+      .get(uploadId) as { status: string; completed_at: string | null }
+    expect(row.status).toBe('completed')
+    expect(row.completed_at).not.toBeNull()
   })
 
   it('still 409s on a non-transcoding row when the data_ref does NOT match (real "fired twice" case)', async () => {
