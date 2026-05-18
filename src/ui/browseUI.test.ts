@@ -320,6 +320,42 @@ describe('showBrowseUI', () => {
     const fullDesc = document.querySelector('.browse-card-full-desc')
     expect(fullDesc?.querySelector('strong')?.textContent).toBe('bold')
   })
+
+  it('does not toggle card expand/collapse when a click lands inside a markdown link (incl. nested elements)', () => {
+    // PR #115 Copilot review: now that abstracts render as
+    // markdown, descriptions can include links with nested
+    // inline elements (e.g. `[**docs**](url)` → `<a><strong>
+    // docs</strong></a>`). The literal `tagName === 'A'`
+    // guard missed clicks on the inner `<strong>` and let
+    // the card toggle, which then ran the link's default
+    // navigation AND collapsed the card. `closest('a')`
+    // catches every shape of nested-element click.
+    setupBrowseDOM()
+    const datasets = [
+      makeDataset({
+        id: 'md-link',
+        title: 'Markdown link',
+        enriched: {
+          description: 'See the [**docs**](https://example.com/docs).',
+        },
+      }),
+    ]
+    showBrowseUI(datasets, makeCallbacks())
+
+    // The full description should contain a link with a nested
+    // <strong> — proving the test setup matches the bug shape.
+    const link = document.querySelector('.browse-card-full-desc a') as HTMLAnchorElement
+    expect(link).not.toBeNull()
+    const strongInsideLink = link.querySelector('strong')
+    expect(strongInsideLink).not.toBeNull()
+
+    // Capture the card's expanded state, click the <strong>
+    // inside the link, confirm the card state didn't change.
+    const card = document.querySelector('.browse-card') as HTMLElement
+    const wasExpanded = card.classList.contains('expanded')
+    strongInsideLink!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    expect(card.classList.contains('expanded')).toBe(wasExpanded)
+  })
 })
 
 // ---------------------------------------------------------------------------

@@ -44,23 +44,24 @@ const MAX_CARD_CATEGORIES = 3
 const MAX_CARD_KEYWORDS = 12
 
 /**
- * Convert a markdown source string to plain text for the card-
- * preview teaser. Renders through the same sanitized markdown
- * pipeline the full-description path uses (so the input → output
- * shape is consistent: any markdown construct the renderer
- * recognizes contributes its rendered text content; anything it
- * doesn't is left as-is in the source). Then strips HTML tags
- * via a detached element's `textContent` so the result is safe
- * to truncate at an arbitrary character offset without leaving
- * a half-open tag or a literal `**`.
+ * Strip HTML tags from a rendered-markdown string via a detached
+ * element's `textContent`. The result is safe to truncate at an
+ * arbitrary character offset without leaving a half-open tag.
+ * Used for the card-preview teaser. Empty input returns ''. The
+ * DOM operation is offline — the element is never attached, so
+ * no layout / style work runs.
  *
- * Empty / null input returns ''. The DOM operation is offline —
- * the element is never attached, so no layout / style work runs.
+ * Takes already-rendered HTML rather than markdown source so the
+ * caller can render the markdown once and pass the result to
+ * both the full-description rendering and this helper. `renderCards()`
+ * re-runs on every keystroke during search; rendering the
+ * markdown twice per card was wasted parse + sanitize work on
+ * every keystroke.
  */
-function markdownToPlainText(source: string | null | undefined): string {
-  if (!source) return ''
+function htmlToPlainText(html: string | null | undefined): string {
+  if (!html) return ''
   const tmp = document.createElement('div')
-  tmp.innerHTML = renderMarkdown(source)
+  tmp.innerHTML = html
   return (tmp.textContent ?? '').replace(/\s+/g, ' ').trim()
 }
 const SEARCH_FOCUS_DELAY_MS = 200
@@ -477,7 +478,16 @@ export function showBrowseUI(
       // Found during a production smoke test where a published
       // dataset's "**test**" abstract appeared as literal asterisks
       // on the browse card.
-      const plainDesc = markdownToPlainText(rawDesc)
+      //
+      // Render the markdown ONCE and derive both surfaces from
+      // the result. `renderCards()` re-runs on every keystroke
+      // during search, and the previous shape ran the parser +
+      // sanitizer twice per card per render (once for the full
+      // HTML, once inside `markdownToPlainText` for the teaser) \u2014
+      // wasted parse + sanitize work on every keystroke. PR #115
+      // Copilot review.
+      const fullDescRendered = renderMarkdown(rawDesc)
+      const plainDesc = htmlToPlainText(fullDescRendered)
       const shortDesc = plainDesc.length > CARD_DESCRIPTION_MAX_LENGTH
         ? plainDesc.substring(0, CARD_DESCRIPTION_MAX_LENGTH).trim() + '\u2026'
         : plainDesc
@@ -489,8 +499,8 @@ export function showBrowseUI(
         ? `<p class="browse-card-desc">${escapeHtml(shortDesc)}</p>`
         : ''
 
-      const fullDescHtml = rawDesc
-        ? `<div class="browse-card-full-desc">${renderMarkdown(rawDesc)}</div>`
+      const fullDescHtml = fullDescRendered
+        ? `<div class="browse-card-full-desc">${fullDescRendered}</div>`
         : ''
       const org = d.organization
       const dev = d.enriched?.datasetDeveloper?.name
@@ -567,7 +577,16 @@ export function showBrowseUI(
           handleDownloadClick(dlBtn, visible)
           return
         }
-        if ((e.target as HTMLElement).tagName === 'A') return
+        // Markdown-rendered descriptions can contain links with
+        // nested inline elements (`<a><strong>label</strong></a>`
+        // from `[**label**](url)`). The literal `tagName === 'A'`
+        // check missed clicks on the inner `<strong>`/`<em>`, so
+        // a click on bold text inside a link still toggled the
+        // card. `closest('a')` walks up from the click target to
+        // the nearest anchor ancestor — catches every shape of
+        // nested-element click within a link. PR #115 Copilot
+        // review.
+        if ((e.target as HTMLElement).closest('a')) return
         // Clickable keywords — filter by the clicked keyword
         const kwEl = (e.target as HTMLElement).closest('.browse-card-keyword') as HTMLElement | null
         if (kwEl?.dataset.keyword && searchInput) {

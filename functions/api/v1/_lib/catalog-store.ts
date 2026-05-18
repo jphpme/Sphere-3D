@@ -205,11 +205,15 @@ export async function listPublicDatasets(
   // `visibility` column defaults to 'public', so a draft created
   // with no explicit visibility setting still has visibility='public'
   // and would leak into the public catalog until publish/retract.
-  // The publisher portal's drafts tab, the snapshot endpoint, and
-  // the federation feed all key off this function, so the fix is
-  // applied here once rather than at every call site. Found during
-  // a production smoke test where a draft "Test 1" appeared
-  // alongside published datasets in the SPA's browse panel.
+  // Both the public snapshot endpoint (`/api/v1/catalog`) and
+  // the federation feed (Phase 4) key off this function, so the
+  // fix is applied here once. The publisher portal's drafts tab
+  // is a separate path: it queries the publisher-scoped
+  // `listDatasetsForPublisher` in `dataset-mutations.ts`, which
+  // has its own visibility model (drafts + published owned by
+  // the caller). Found during a production smoke test where a
+  // draft "Test 1" appeared alongside published datasets in the
+  // SPA's browse panel.
   const where = [
     'visibility = ?',
     'is_hidden = 0',
