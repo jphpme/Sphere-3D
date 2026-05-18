@@ -485,6 +485,11 @@ export interface AssetUploadRow {
   failure_reason: string | null
   created_at: string
   completed_at: string | null
+  /** Source frame count for image-sequence uploads. NULL on every
+   *  MP4-source / single-image / auxiliary-asset row. The /complete
+   *  handler reads this to branch between the single-key and
+   *  multi-key HEAD verification paths. */
+  frame_count: number | null
 }
 
 export interface InsertAssetUploadInput {
@@ -498,6 +503,12 @@ export interface InsertAssetUploadInput {
   declared_size: number
   claimed_digest: string
   created_at: string
+  /** Number of source frames for image-sequence uploads. NULL /
+   *  unset for every other upload kind (MP4 video sources,
+   *  single-image data, auxiliary assets). The /complete handler
+   *  reads this to branch its HEAD-check loop between the
+   *  single-key MP4 path and the multi-key frames path. */
+  frame_count?: number
 }
 
 /** Insert a new pending row. */
@@ -510,8 +521,8 @@ export async function insertAssetUpload(
       `INSERT INTO asset_uploads (
          id, dataset_id, publisher_id, kind, target, target_ref, mime,
          declared_size, claimed_digest, status, failure_reason,
-         created_at, completed_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?, NULL)`,
+         created_at, completed_at, frame_count
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?, NULL, ?)`,
     )
     .bind(
       input.id,
@@ -524,6 +535,7 @@ export async function insertAssetUpload(
       input.declared_size,
       input.claimed_digest,
       input.created_at,
+      input.frame_count ?? null,
     )
     .run()
 }
@@ -720,6 +732,69 @@ export async function stampTranscodingForVideoSource(
 }
 
 /**
+ * Image-sequence parallel to `stampTranscodingForVideoSource`.
+ * Sets the same transcoding lifecycle columns (transcoding=1,
+ * active_transcode_upload_id, data_ref clear for drafts,
+ * source_digest, content_digest clear for drafts) AND populates
+ * the three Phase 3pf dataset-row columns (frame_count,
+ * frame_extension, frame_source_filenames_ref) so the manifest
+ * serializer surfaces the frame metadata as soon as the transcode
+ * completes — no second UPDATE inside /transcode-complete needed.
+ *
+ * The same SQL guard the video version uses applies: a
+ * non-transcoding row (transcoding NULL or 0) or a same-upload
+ * retry stamps; any other transcoding=1 state refuses with
+ * `changes=0`. Atomic with the route's JS-level overlap check so
+ * a concurrent /complete that swapped the binding in the gap
+ * between SELECT and UPDATE returns 409 rather than launching a
+ * second workflow.
+ *
+ * `frame_source_filenames_ref` carries the R2 key of the
+ * auxiliary JSON blob (built by `buildFrameSourceFilenamesKey`
+ * in `r2-store.ts`). The caller is responsible for HEAD-checking
+ * the blob before this stamp lands so a dangling ref never reaches
+ * the row. `frame_extension` is what `extForMime` returned for
+ * the upload's mime (`png` / `jpg` / `webp`).
+ */
+export async function stampTranscodingForFrameSource(
+  db: D1Database,
+  datasetId: string,
+  upload: AssetUploadRow,
+  frameCount: number,
+  frameExtension: string,
+  frameSourceFilenamesRef: string,
+  now: string,
+): Promise<number> {
+  const result = await db
+    .prepare(
+      `UPDATE datasets
+         SET transcoding = 1,
+             active_transcode_upload_id = ?,
+             data_ref = CASE WHEN published_at IS NULL THEN '' ELSE data_ref END,
+             source_digest = ?,
+             content_digest = CASE WHEN published_at IS NULL THEN NULL ELSE content_digest END,
+             frame_count = ?,
+             frame_extension = ?,
+             frame_source_filenames_ref = ?,
+             updated_at = ?
+       WHERE id = ?
+         AND (COALESCE(transcoding, 0) = 0 OR active_transcode_upload_id = ?)`,
+    )
+    .bind(
+      upload.id,
+      upload.claimed_digest,
+      frameCount,
+      frameExtension,
+      frameSourceFilenamesRef,
+      now,
+      datasetId,
+      upload.id,
+    )
+    .run()
+  return result.meta?.changes ?? 0
+}
+
+/**
  * Mark just the asset_uploads row as completed. The companion
  * dataset-row stamp lives in `stampTranscodingForVideoSource`
  * above; the two are split so the /complete handler can persist
@@ -746,16 +821,29 @@ export async function markVideoUploadCompleted(
     .run()
 }
 
-/** Snapshot of the digest columns we capture before stamping
- *  a transcode, so a dispatch failure can restore the row's
- *  prior integrity metadata losslessly. Per-column null is
- *  the same value SQLite would write — a row that genuinely
- *  had no `content_digest` before the stamp gets that NULL
- *  preserved through the revert. */
+/** Snapshot of the columns we capture before stamping a
+ *  transcode, so a dispatch failure can restore the row's
+ *  prior state losslessly. Per-column null is the same value
+ *  SQLite would write — a row that genuinely had no
+ *  `content_digest` before the stamp gets that NULL preserved
+ *  through the revert.
+ *
+ *  The three `frame_*` fields are NULL on the MP4-source path
+ *  (the stamp doesn't touch them so the revert doesn't either —
+ *  the revert's UPDATE writes the snapshot value back regardless,
+ *  which is a no-op when both before and after are NULL). The
+ *  image-sequence stamp populates them; the revert clears them
+ *  back to their prior values (NULL on a fresh row, or the prior
+ *  upload's values on a re-upload of an already-published row).
+ *  Symmetric with how the existing `data_ref` / `content_digest`
+ *  / `source_digest` fields work. */
 export interface TranscodingStampSnapshot {
   data_ref: string
   content_digest: string | null
   source_digest: string | null
+  frame_count: number | null
+  frame_extension: string | null
+  frame_source_filenames_ref: string | null
 }
 
 /**
@@ -801,6 +889,9 @@ export async function revertTranscodingStamp(
              data_ref = ?,
              content_digest = ?,
              source_digest = ?,
+             frame_count = ?,
+             frame_extension = ?,
+             frame_source_filenames_ref = ?,
              updated_at = ?
        WHERE id = ? AND active_transcode_upload_id = ?`,
     )
@@ -808,6 +899,9 @@ export async function revertTranscodingStamp(
       prior.data_ref,
       prior.content_digest,
       prior.source_digest,
+      prior.frame_count,
+      prior.frame_extension,
+      prior.frame_source_filenames_ref,
       now,
       datasetId,
       upload.id,

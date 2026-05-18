@@ -408,6 +408,7 @@ describe('asset_uploads row helpers', () => {
       status: 'pending',
       failure_reason: null,
       completed_at: null,
+        frame_count: null,
     })
   })
 
@@ -485,6 +486,7 @@ describe('applyAssetToDataset — atomic json_set merge', () => {
         failure_reason: null,
         created_at: '2026-04-29T12:00:00.000Z',
         completed_at: null,
+        frame_count: null,
       },
       HAPPY_DIGEST,
       '2026-04-29T12:01:00.000Z',
@@ -523,6 +525,7 @@ describe('applyAssetToDataset — atomic json_set merge', () => {
         failure_reason: null,
         created_at: '2026-04-29T12:00:00.000Z',
         completed_at: null,
+        frame_count: null,
       },
       HAPPY_DIGEST,
       '2026-04-29T12:01:00.000Z',
@@ -558,6 +561,7 @@ describe('applyAssetToDataset — atomic json_set merge', () => {
         failure_reason: null,
         created_at: '2026-04-29T12:00:00.000Z',
         completed_at: null,
+        frame_count: null,
       },
       HAPPY_DIGEST,
       '2026-04-29T12:01:00.000Z',
@@ -591,6 +595,7 @@ describe('applyAssetToDataset — atomic json_set merge', () => {
         failure_reason: null,
         created_at: '2026-04-29T12:00:00.000Z',
         completed_at: null,
+        frame_count: null,
       },
       HAPPY_DIGEST,
       '2026-04-29T12:01:00.000Z',
@@ -650,6 +655,9 @@ describe('transcoding lifecycle UPDATEs are scoped to active_transcode_upload_id
       failure_reason: null,
       created_at: '2026-04-29T12:00:00.000Z',
       completed_at: null,
+      // NULL on every MP4-source row — the field discriminates
+      // sequence uploads from single-file uploads.
+      frame_count: null,
     }
   }
 
@@ -730,6 +738,9 @@ describe('transcoding lifecycle UPDATEs are scoped to active_transcode_upload_id
         data_ref: 'r2:datasets/old/asset.png',
         content_digest: priorContentDigest,
         source_digest: priorSourceDigest,
+        frame_count: null,
+        frame_extension: null,
+        frame_source_filenames_ref: null,
       },
       '2026-04-29T12:05:00.000Z',
     )
@@ -767,7 +778,14 @@ describe('transcoding lifecycle UPDATEs are scoped to active_transcode_upload_id
       d1,
       DATASET_ID,
       uploadStub(UPLOAD_A),
-      { data_ref: '', content_digest: null, source_digest: null },
+      {
+        data_ref: '',
+        content_digest: null,
+        source_digest: null,
+        frame_count: null,
+        frame_extension: null,
+        frame_source_filenames_ref: null,
+      },
       '2026-04-29T12:05:00.000Z',
     )
     expect(changes).toBe(1)
@@ -797,7 +815,14 @@ describe('transcoding lifecycle UPDATEs are scoped to active_transcode_upload_id
       d1,
       DATASET_ID,
       uploadStub(UPLOAD_A),
-      { data_ref: 'r2:videos/old/master.m3u8', content_digest: null, source_digest: null },
+      {
+        data_ref: 'r2:videos/old/master.m3u8',
+        content_digest: null,
+        source_digest: null,
+        frame_count: null,
+        frame_extension: null,
+        frame_source_filenames_ref: null,
+      },
       '2026-04-29T12:05:00.000Z',
     )
     expect(changes).toBe(0)
