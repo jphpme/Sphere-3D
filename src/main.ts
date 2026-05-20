@@ -1832,7 +1832,19 @@ class InteractiveSphere {
       showTimeLabel: (_show: boolean) => { /* no-op for frame loads */ },
     }
     try {
-      await loadImageDataset(frameDataset, primary, this.appState, this.isMobile, loaderCallbacks)
+      // `directImageUrl: true` skips the loader's legacy `_4096` /
+      // `_2048` / `_1024` resolution-suffix probing — those would
+      // 404 against a per-frame R2 URL, adding three failed round-
+      // trips before the actual URL resolves. Phase 3pg/C — Copilot
+      // discussion_r3277041026.
+      await loadImageDataset(
+        frameDataset,
+        primary,
+        this.appState,
+        this.isMobile,
+        loaderCallbacks,
+        { directImageUrl: true },
+      )
       this.appState.currentDataset = frameDataset
       notifyDatasetChanged(frameDataset)
       this.announce(`Loaded frame: ${resolved.displayName}`)

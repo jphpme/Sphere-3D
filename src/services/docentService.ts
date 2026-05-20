@@ -1005,7 +1005,19 @@ export function validateAndCleanText(
   for (const match of text.matchAll(/<?<LOAD_FRAME:\s*([^:>]+):\s*([^>]+?)\s*>>?/g)) {
     const datasetId = match[1].trim()
     const frameQuery = match[2].trim()
-    const dataset = datasets.find(d => d.id === datasetId)
+    // Exact id first, then case-insensitive — matches the same
+    // permissive policy `<<LOAD:...>>` markers use, since small
+    // LLMs sometimes lowercase ULIDs or emit a legacyId variant.
+    // Title-based fallback isn't safe here because the marker uses
+    // `:` as the id↔query separator — a title with a colon would
+    // confuse the parser.
+    let dataset = datasets.find(d => d.id === datasetId)
+    if (!dataset) {
+      const lower = datasetId.toLowerCase()
+      dataset = datasets.find(
+        d => d.id.toLowerCase() === lower || (d.legacyId && d.legacyId.toLowerCase() === lower),
+      )
+    }
     if (!dataset || !dataset.frames) {
       // Unknown / non-sequence — fall through to the strip step
       // below, which will remove the literal marker from the

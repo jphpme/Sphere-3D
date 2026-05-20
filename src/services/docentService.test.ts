@@ -1716,6 +1716,26 @@ describe('validateAndCleanText — Phase 5 markers', () => {
       expect(frames).toHaveLength(3)
     })
 
+    it('matches the dataset id case-insensitively and via legacyId', () => {
+      // Small LLMs occasionally lowercase ULIDs or echo the
+      // legacy SOS id instead of the canonical one. Phase 3pg/C
+      // review — Copilot discussion_r3277040995.
+      const legacyDataset = makeDataset({
+        ...sequenceDataset,
+        id: 'SEQ_002',
+        legacyId: 'INTERNAL_SOS_42',
+      })
+      const text =
+        '<<LOAD_FRAME:seq_002:first>>\n<<LOAD_FRAME:internal_sos_42:latest>>'
+      const { globeActions } = validateAndCleanText(text, [legacyDataset])
+      const frames = globeActions.filter(g => g.type === 'load-frame')
+      expect(frames).toHaveLength(2)
+      // Both should resolve to the same dataset.
+      for (const f of frames) {
+        if (f.type === 'load-frame') expect(f.datasetId).toBe('SEQ_002')
+      }
+    })
+
     it('silently drops markers for unknown / non-sequence datasets', () => {
       const text =
         '<<LOAD_FRAME:UNKNOWN:latest>>\n<<LOAD_FRAME:TEST_001:latest>>'

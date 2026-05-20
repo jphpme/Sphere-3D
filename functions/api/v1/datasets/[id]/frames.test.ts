@@ -170,9 +170,10 @@ describe('GET /api/v1/datasets/{id}/frames (3pg/B)', () => {
     expect(res.status).toBe(200)
     const body = await readJson<FramesBody>(res)
     expect(body.frames).toHaveLength(1)
-    // 03:30 is equidistant between frames 3 and 4 — Math.round
-    // rounds-half-to-even at 0.5 boundaries; this test uses a
-    // value not at the boundary to keep the assertion deterministic.
+    // 03:30 is equidistant between frames 3 and 4 — JavaScript
+    // `Math.round` rounds half toward positive infinity (3.5 → 4),
+    // so the equidistant case is deterministic, not browser-
+    // dependent. (It is NOT round-half-to-even.)
     expect(body.frames[0].index).toBe(4)
   })
 
@@ -196,6 +197,37 @@ describe('GET /api/v1/datasets/{id}/frames (3pg/B)', () => {
     expect(res.status).toBe(200)
     const body = await readJson<FramesBody>(res)
     expect(body.frames.map(f => f.index)).toEqual([3, 4, 5])
+  })
+
+  it('returns an empty frames array (200) when ?from / ?to fall entirely outside the series', async () => {
+    // Distinguish from "not a time series" (which 400s). Phase
+    // 3pg/A review — Copilot discussion_r3277040920. The
+    // pre-fix path called `findFrameWindow` and surfaced the
+    // null return as `not_a_time_series` for both cases; this
+    // test pins the post-fix behaviour for out-of-range windows
+    // on a parseable time-series row.
+    const sqlite = seedFramesRow({ frameCount: 24 })
+    const env = {
+      CATALOG_DB: asD1(sqlite),
+      CATALOG_KV: makeKV(),
+      CATALOG_R2: makeBucket(buildManifest(24)),
+      R2_PUBLIC_BASE: PUBLIC_BASE,
+    }
+    const res = await onRequestGet(
+      makeCtx<'id'>({
+        env,
+        params: { id: DATASET_ID },
+        // Series starts 2026-05-16; this window is in 2025.
+        url:
+          `https://test.local/api/v1/datasets/${DATASET_ID}/frames` +
+          `?from=2025-01-01T00:00:00Z&to=2025-01-02T00:00:00Z`,
+      }),
+    )
+    expect(res.status).toBe(200)
+    const body = await readJson<FramesBody>(res)
+    expect(body.frames).toEqual([])
+    expect(body.count).toBe(24)
+    expect(body.cursor).toBeNull()
   })
 
   it('returns 400 invalid_range when only ?from or only ?to is supplied', async () => {

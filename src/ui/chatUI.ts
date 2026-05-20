@@ -1135,10 +1135,21 @@ function wireActionButtons(container: Element): void {
       // load-dataset path; frame loads don't unload the parent
       // sequence so the "remove action card after load" behaviour
       // would also be wrong for them.
+      //
+      // The frame-query branch is exclusive: if `data-frame-query`
+      // is set, we never fall through to `onLoadDataset` even when
+      // `callbacks.onLoadFrame` is unbound. The fallback would load
+      // the whole sequence — surprising behaviour the user didn't
+      // ask for. Unbound `onLoadFrame` is a host-side opt-out
+      // (e.g. a chat consumer that doesn't ship the frame loader);
+      // the right answer is a quiet no-op, matching the doc comment
+      // on `ChatCallbacks.onLoadFrame`.
       const frameQuery = btn.dataset.frameQuery
-      if (id && frameQuery !== undefined && callbacks?.onLoadFrame) {
-        callbacks.onLoadFrame(id, frameQuery)
-        callbacks.announce(t('chat.announce.loadingFrame'))
+      if (id && frameQuery !== undefined) {
+        if (callbacks?.onLoadFrame) {
+          callbacks.onLoadFrame(id, frameQuery)
+          callbacks.announce(t('chat.announce.loadingFrame'))
+        }
         return
       }
       if (id && callbacks) {

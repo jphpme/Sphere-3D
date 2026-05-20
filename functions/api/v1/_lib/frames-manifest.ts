@@ -205,3 +205,22 @@ export function frameTimestamp(
   if (Number.isNaN(startMs)) return null
   return new Date(startMs + periodMs * index).toISOString()
 }
+
+/**
+ * Quick predicate: does this row carry the metadata `?at` and
+ * `?from` / `?to` filters need to do their index arithmetic?
+ * Used by the list endpoint to distinguish "row isn't a time
+ * series" (400 not_a_time_series) from "window is outside the
+ * series" (200 with an empty frames array) — both of which look
+ * like a `null` return from `findFrameWindow` / `findClosestFrameIndex`
+ * but mean very different things to a consumer.
+ */
+export function isFrameTimeSeries(
+  row: Pick<DatasetRow, 'start_time' | 'period' | 'frame_count'>,
+): boolean {
+  if (!row.start_time || !row.period || row.frame_count == null) return false
+  const periodMs = parseIsoDuration(row.period)
+  if (periodMs == null || periodMs <= 0) return false
+  const startMs = Date.parse(row.start_time)
+  return !Number.isNaN(startMs)
+}

@@ -48,6 +48,7 @@ import {
   findClosestFrameIndex,
   findFrameWindow,
   frameTimestamp,
+  isFrameTimeSeries,
   loadFrameManifest,
   renderFrameDisplayName,
   type FrameManifestEntry,
@@ -156,17 +157,30 @@ export const onRequestGet: PagesFunction<CatalogEnv, 'id'> = async context => {
     if (toMs < fromMs) {
       return jsonError(400, 'invalid_range', '?to must not be earlier than ?from.')
     }
-    const win = findFrameWindow(row, fromMs, toMs)
-    if (win == null) {
+    // Pre-check time-series-ness explicitly so we can distinguish
+    // it from "window is outside the series" — both look like a
+    // `null` return from `findFrameWindow` but they mean very
+    // different things. The former is a 400 (caller misconfigured
+    // the query against a non-time-series row); the latter is a
+    // 200 with an empty frames array (legitimate query that simply
+    // didn't overlap the available data).
+    if (!isFrameTimeSeries(row)) {
       return jsonError(
         400,
         'not_a_time_series',
         '?from / ?to require a dataset with start_time + period set.',
       )
     }
-    // Empty windows (`fromMs` / `toMs` both fall outside the
-    // series) collapse to a null return from `findFrameWindow`,
-    // not an empty range — surface that as a 0-row response.
+    const win = findFrameWindow(row, fromMs, toMs)
+    if (win == null) {
+      // Window is entirely outside `[start_time, start_time + period × frame_count)`.
+      // Return an empty page so paginated callers can keep walking
+      // without special-casing an error envelope.
+      return new Response(
+        JSON.stringify({ datasetId: id, count: row.frame_count, frames: [], cursor: null }),
+        { status: 200, headers: { 'Content-Type': CONTENT_TYPE, 'Cache-Control': CACHE_CONTROL } },
+      )
+    }
     windowFrom = win.fromIndex
     windowTo = win.toIndex
   }

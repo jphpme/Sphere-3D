@@ -51,7 +51,8 @@ describe('resolveFrameQuery (3pg/C)', () => {
 
   it('resolves an ISO 8601 timestamp to the closest frame', () => {
     const r = resolveFrameQuery(BASE_DATASET, '2026-05-16T03:30:00Z')!
-    // 03:30 rounds to frame 4 (3.5 → ties to even).
+    // 3.5 hours past start — `Math.round(3.5)` is 4 in JavaScript
+    // (rounds half toward positive infinity, not "ties to even").
     expect(r.index).toBe(4)
     expect(r.timestamp).toBe('2026-05-16T04:00:00.000Z')
   })
