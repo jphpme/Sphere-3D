@@ -1,0 +1,269 @@
+/**
+ * Cloudflare Pages Function — GET /api/v1/datasets/{id}/frames
+ *
+ * Phase 3pg/B — image-sequence frame enumeration. Returns the
+ * publisher's per-frame metadata for a sequence dataset:
+ *
+ *   {
+ *     "datasetId": "01HX...",
+ *     "count": 240,
+ *     "frames": [
+ *       {
+ *         "index": 0,
+ *         "displayName": "ssta_20260516T120000Z.png",
+ *         "originalFilename": "sst_2026-05-16T12:00:00Z.png",
+ *         "timestamp": "2026-05-16T12:00:00.000Z",
+ *         "contentDigest": "sha256:...",
+ *         "url": "https://assets.example/uploads/.../frames/00000.png"
+ *       },
+ *       ...
+ *     ],
+ *     "cursor": "100"
+ *   }
+ *
+ * Query parameters:
+ *
+ *   - `limit` (default 100, max 1000) — page size.
+ *   - `cursor` (optional) — opaque page token; today it's the
+ *     start-index of the next page as a base-10 string. Callers
+ *     pass back the cursor from the prior response.
+ *   - `from=ISO&to=ISO` — restrict to frames whose computed
+ *     timestamp (`start_time + period × index`) falls inside the
+ *     inclusive window. Requires the row to be a parseable time
+ *     series.
+ *   - `at=ISO` — return only the single closest frame to the
+ *     given timestamp. Wins over `from` / `to` if both supplied.
+ *
+ * Visibility honors the same public filter as `/api/v1/datasets/{id}`:
+ * restricted / federated / private rows return 404. Restricted-
+ * row presigning is a follow-up — until then the only way to
+ * surface frames for a non-public row is the publisher API the
+ * portal already uses.
+ */
+
+import type { CatalogEnv } from '../../_lib/env'
+import { getPublicDataset } from '../../_lib/catalog-store'
+import { buildFramesUrlTemplate } from '../../_lib/r2-public-url'
+import {
+  findClosestFrameIndex,
+  findFrameWindow,
+  frameTimestamp,
+  loadFrameManifest,
+  renderFrameDisplayName,
+  type FrameManifestEntry,
+} from '../../_lib/frames-manifest'
+
+const CONTENT_TYPE = 'application/json; charset=utf-8'
+const CACHE_CONTROL = 'public, max-age=60, stale-while-revalidate=300'
+const DEFAULT_LIMIT = 100
+const MAX_LIMIT = 1000
+
+function jsonError(status: number, error: string, message: string): Response {
+  return new Response(JSON.stringify({ error, message }), {
+    status,
+    headers: { 'Content-Type': CONTENT_TYPE },
+  })
+}
+
+function parseLimit(raw: string | null): number | { error: string } {
+  if (raw == null) return DEFAULT_LIMIT
+  const n = Number(raw)
+  if (!Number.isInteger(n) || n < 1 || n > MAX_LIMIT) {
+    return { error: `limit must be an integer in [1, ${MAX_LIMIT}].` }
+  }
+  return n
+}
+
+function parseCursor(raw: string | null): number | { error: string } {
+  if (raw == null) return 0
+  const n = Number(raw)
+  if (!Number.isInteger(n) || n < 0) {
+    return { error: 'cursor must be a non-negative integer.' }
+  }
+  return n
+}
+
+function parseIsoTimestamp(raw: string, label: string): number | { error: string } {
+  const ms = Date.parse(raw)
+  if (Number.isNaN(ms)) return { error: `${label} is not a valid ISO 8601 timestamp.` }
+  return ms
+}
+
+export const onRequestGet: PagesFunction<CatalogEnv, 'id'> = async context => {
+  const idParam = context.params.id
+  const id = Array.isArray(idParam) ? idParam[0] : idParam
+  if (!id) return jsonError(400, 'invalid_request', 'Missing dataset id.')
+  if (!context.env.CATALOG_DB) {
+    return jsonError(503, 'binding_missing', 'CATALOG_DB binding is not configured.')
+  }
+  if (!context.env.CATALOG_R2) {
+    return jsonError(503, 'binding_missing', 'CATALOG_R2 binding is not configured.')
+  }
+
+  const row = await getPublicDataset(context.env.CATALOG_DB, id)
+  if (!row) return jsonError(404, 'not_found', `Dataset ${id} not found.`)
+  if (
+    row.frame_count == null ||
+    row.frame_extension == null ||
+    row.frame_source_filenames_ref == null
+  ) {
+    return jsonError(
+      404,
+      'not_a_frame_sequence',
+      `Dataset ${id} has no image-sequence frames.`,
+    )
+  }
+
+  const url = new URL(context.request.url)
+  const limitOrErr = parseLimit(url.searchParams.get('limit'))
+  if (typeof limitOrErr === 'object') return jsonError(400, 'invalid_limit', limitOrErr.error)
+  const cursorOrErr = parseCursor(url.searchParams.get('cursor'))
+  if (typeof cursorOrErr === 'object') return jsonError(400, 'invalid_cursor', cursorOrErr.error)
+
+  // Time-window filters resolve to a `[fromIndex, toIndex]` pair.
+  // `at` wins over `from`/`to`. Time filters require a parseable
+  // `start_time` + `period`; the helpers return null otherwise.
+  let windowFrom = 0
+  let windowTo = row.frame_count - 1
+  const at = url.searchParams.get('at')
+  if (at) {
+    const atMs = parseIsoTimestamp(at, 'at')
+    if (typeof atMs === 'object') return jsonError(400, 'invalid_at', atMs.error)
+    const closest = findClosestFrameIndex(row, atMs)
+    if (closest == null) {
+      return jsonError(
+        400,
+        'not_a_time_series',
+        '?at requires a dataset with start_time + period set.',
+      )
+    }
+    windowFrom = closest
+    windowTo = closest
+  } else if (url.searchParams.has('from') || url.searchParams.has('to')) {
+    const fromRaw = url.searchParams.get('from')
+    const toRaw = url.searchParams.get('to')
+    if (!fromRaw || !toRaw) {
+      return jsonError(
+        400,
+        'invalid_range',
+        '?from and ?to must both be supplied when filtering by time.',
+      )
+    }
+    const fromMs = parseIsoTimestamp(fromRaw, 'from')
+    if (typeof fromMs === 'object') return jsonError(400, 'invalid_from', fromMs.error)
+    const toMs = parseIsoTimestamp(toRaw, 'to')
+    if (typeof toMs === 'object') return jsonError(400, 'invalid_to', toMs.error)
+    if (toMs < fromMs) {
+      return jsonError(400, 'invalid_range', '?to must not be earlier than ?from.')
+    }
+    const win = findFrameWindow(row, fromMs, toMs)
+    if (win == null) {
+      return jsonError(
+        400,
+        'not_a_time_series',
+        '?from / ?to require a dataset with start_time + period set.',
+      )
+    }
+    // Empty windows (`fromMs` / `toMs` both fall outside the
+    // series) collapse to a null return from `findFrameWindow`,
+    // not an empty range — surface that as a 0-row response.
+    windowFrom = win.fromIndex
+    windowTo = win.toIndex
+  }
+
+  // Apply the cursor on top of the time window.
+  const startIndex = Math.max(windowFrom, cursorOrErr)
+  if (startIndex > windowTo) {
+    return new Response(
+      JSON.stringify({ datasetId: id, count: row.frame_count, frames: [], cursor: null }),
+      { status: 200, headers: { 'Content-Type': CONTENT_TYPE, 'Cache-Control': CACHE_CONTROL } },
+    )
+  }
+  const endIndex = Math.min(windowTo, startIndex + limitOrErr - 1)
+
+  const urlTemplate = buildFramesUrlTemplate(
+    context.env,
+    row.frame_source_filenames_ref,
+    row.frame_extension,
+  )
+  if (!urlTemplate) {
+    return jsonError(
+      503,
+      'r2_unconfigured',
+      'R2_PUBLIC_BASE / MOCK_R2 must be configured for the frame surface.',
+    )
+  }
+
+  const manifestKey = row.frame_source_filenames_ref.startsWith('r2:')
+    ? row.frame_source_filenames_ref.slice('r2:'.length)
+    : row.frame_source_filenames_ref
+  const manifest = await loadFrameManifest(context.env.CATALOG_R2, manifestKey)
+  if (!manifest) {
+    return jsonError(
+      503,
+      'frame_manifest_missing',
+      `Frame manifest blob at ${manifestKey} could not be read.`,
+    )
+  }
+  if (manifest.length !== row.frame_count) {
+    return jsonError(
+      503,
+      'frame_manifest_inconsistent',
+      `Frame manifest length ${manifest.length} does not match dataset frame_count ${row.frame_count}.`,
+    )
+  }
+
+  const frames = renderFrameRange(
+    row,
+    manifest,
+    urlTemplate,
+    startIndex,
+    endIndex,
+  )
+  const nextCursor = endIndex < windowTo ? String(endIndex + 1) : null
+
+  return new Response(
+    JSON.stringify({
+      datasetId: id,
+      count: row.frame_count,
+      frames,
+      cursor: nextCursor,
+    }),
+    { status: 200, headers: { 'Content-Type': CONTENT_TYPE, 'Cache-Control': CACHE_CONTROL } },
+  )
+}
+
+function renderFrameRange(
+  row: {
+    slug: string
+    start_time: string | null
+    period: string | null
+    frame_extension: string | null
+  },
+  manifest: FrameManifestEntry[],
+  urlTemplate: string,
+  startIndex: number,
+  endIndex: number,
+): Array<{
+  index: number
+  displayName: string
+  originalFilename: string
+  timestamp: string | null
+  contentDigest: string
+  url: string
+}> {
+  const ext = row.frame_extension!
+  const out: ReturnType<typeof renderFrameRange> = []
+  for (let i = startIndex; i <= endIndex; i++) {
+    const padded = String(i).padStart(5, '0')
+    out.push({
+      index: i,
+      displayName: renderFrameDisplayName(row, ext, i),
+      originalFilename: manifest[i].filename,
+      timestamp: frameTimestamp(row, i),
+      contentDigest: manifest[i].digest,
+      url: urlTemplate.replace('{index}', padded),
+    })
+  }
+  return out
+}
