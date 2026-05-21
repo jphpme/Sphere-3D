@@ -1,0 +1,772 @@
+# Web Catalog Features Implementation Plan
+
+> **Status: draft for review.** Synthesised from the Google Doc
+> ["TerraViz (Zyra Sphere) > Web Catalog"](https://docs.google.com/document/d/1ohA6KRsiawDNYF2q8NJWwVLfLEJ5utsHUqxpBewqDgk/edit?usp=drivesdk)
+> (last modified 2026-05-21), which collects feature requests
+> from Adrian, Beth, and Hilary scoping TerraViz as a catalog
+> replacement for the SOS website.
+>
+> Branch: `claude/access-google-docs-p9R8e`.
+
+The Google Doc gathers 17 requests across three reviewers. This
+plan triages each request against the current codebase, groups
+the work into shippable phases, and flags the items that depend
+on the in-flight `CATALOG_BACKEND_PLAN.md` work before they can
+land.
+
+The plan is intentionally **scoped to catalog features only** —
+the source doc is explicit that this phase ignores non-catalog
+work — and it deliberately favours small, independently
+landable phases over a single multi-month branch.
+
+---
+
+## 1. Framing
+
+### 1.1 What the requesters actually want
+
+Reading the doc as a whole — not request-by-request — three
+themes dominate:
+
+1. **Catalog-first UX.** Adrian's "grid view", Hilary's
+   "catalog and sphere tab", and Adrian's `?catalogue=true`
+   URL hint all describe the same thing: a mode where the
+   *catalog* is the primary surface and the globe only
+   appears once a dataset is selected. Today the browse UI
+   is a glass overlay on top of an always-on globe; the ask
+   is to invert that relationship for catalog visitors.
+2. **Info panel completeness.** Beth and Hilary together
+   list six fields the current SOS catalog exposes that
+   TerraViz hides today (full description, credits,
+   developer, contact, data-added date, downloadable
+   thumbnail). The data model already has every one of
+   these — the gap is purely presentational.
+3. **Playback fidelity.** Both Beth and Hilary independently
+   flagged the same time/frame bug — labels advance by one
+   cadence while the imagery advances by another, so a
+   yearly-frame climate dataset shows the same image for 12
+   button-presses while the month label crawls forward.
+   This is a real correctness bug, not a polish item.
+
+The remaining items — full-screen, UI scaling, shader work,
+playlists, zip downloads — are individually meritorious but
+share less narrative weight in the doc. They should be
+sequenced after the three core themes.
+
+### 1.2 What's already in the codebase
+
+A few requests are already partly built; the gap is exposure or
+correctness, not net-new feature work:
+
+| Request | What exists today | Gap |
+|---|---|---|
+| Grid view | [`src/ui/browseUI.ts`](../src/ui/browseUI.ts) is **already a card grid**, not a list. | The mental model of a list-first browse comes from the overlay+globe framing. The real ask is catalog-first routing (§3). |
+| Related datasets | [`EnrichedMetadata.relatedDatasets`](../src/types/index.ts) rendered in info panel at [`datasetLoader.ts:387`](../src/services/datasetLoader.ts). | Exact-title matches only — no algorithmic recommendation. |
+| Closed captions | SRT loader + parser at [`playbackController.ts:215`](../src/ui/playbackController.ts), proxied via `video-proxy.zyra-project.org/captions`. | CC button visibility and SRT presence aren't surfaced in the catalog or info panel. |
+| Credits / source / data-added | All present in `EnrichedMetadata` (`datasetDeveloper`, `visDeveloper`, `dateAdded`, `catalogUrl`). | Not rendered in the info panel. |
+| Thumbnails | `Dataset.thumbnailLink` shown in browse cards. | Not shown or downloadable in the info panel. |
+| Download as zip | Desktop has [`downloadService.ts`](../src/services/downloadService.ts) (Tauri-only). | Web has no equivalent. |
+| All SOS datasets | Catalog points to `metadata.sosexplorer.gov/dataset.json` (one snapshot). | Federation work is gated on `CATALOG_BACKEND_PLAN.md`. |
+
+This matters for sequencing: items in the "already exists,
+expose it better" column belong in an early, low-risk phase;
+items requiring a new subsystem (catalog routing, web downloads,
+shader rewrite) belong later.
+
+### 1.3 Non-goals
+
+To keep the branch scoped, the following are explicitly **out**:
+
+- Replacing or augmenting the existing tour engine — playlists
+  are a sibling concept, not a tour extension.
+- Backend work on the catalog node — this plan assumes the
+  current `dataService.ts` data source is fixed for now.
+  "All SOS datasets" is deferred to the federation track.
+- VR / AR changes — the doc is explicit that catalog work is
+  the scope.
+- Localisation of net-new strings is **not** a non-goal — every
+  new user-facing string follows the i18n flow in `CLAUDE.md`
+  (`t(...)` keys + `npm run check:i18n-strings`).
+
+---
+
+## 2. Triage table
+
+Every request from the source doc, in source order, with a
+feasibility verdict and the phase it lands in.
+
+| # | Request (requester) | Verdict | Phase | Notes |
+|---|---|---|---|---|
+| 1 | Full-screen button — bottom right (Adrian) | **Yes** | 1 | Standard Fullscreen API; one button, ~50 lines + CSS. |
+| 2 | Grid view as default in catalog mode; globe hidden until selection (Adrian) | **Yes — reframed** | 1 | Browse is already a grid. The real ask is a `?catalog=true` route where the globe is hidden until selection. |
+| 3 | Playlists, local-storage scoped (Adrian) | **Yes** | 6 | Net-new feature; deferred until catalog UX has settled. |
+| 4 | Download source data as zip (Adrian) | **Partial** | 6 | Image datasets feasible (JSZip); HLS videos require backend re-encoding to a single MP4 — covered partially by existing desktop downloads. |
+| 5 | Increase UI size, ~150% default (Adrian) | **Yes** | 5 | Introduce `--ui-scale` token; settings option. Whole-app pass needed because spacing is currently hardcoded per-component. |
+| 6 | Improve globe shader — contrast, saturation, less specular, normal maps (Adrian) | **Yes — partial** | 5 | In-shader saturation/contrast is straightforward; normal maps require sourcing a global normal map and either re-baking the GIBS tile shader or wiring it through `photorealEarth.ts`. |
+| 7 | Frame-by-frame scrolling with labels matching (Beth) | **Yes — bug fix** | 3 | Real bug. `inferDisplayInterval` snaps to year boundaries; labels advance by month. Needs a frame-aware cadence. |
+| 8 | Closed captions visible (Beth) | **Yes** | 3 | Loader exists; CC button visibility and SRT-presence indicator missing. |
+| 9 | Related datasets at bottom of description (Beth) | **Yes** | 2 | Exact-title matches today; upgrade to category/keyword-based recommendation. |
+| 10 | All SOS datasets, not just SOSx (Beth) | **Deferred** | — | Blocked on `CATALOG_BACKEND_PLAN.md`. Tracked there; mention in this plan only for visibility. |
+| 11 | Display full description + notable features (Beth) | **Yes** | 2 | Truncated at 600 chars on a sentence boundary. Add expand/collapse + scrollable variant. |
+| 12 | Display credits and source (Beth) | **Yes** | 2 | Fields exist in `EnrichedMetadata`; just render them. |
+| 13 | Data Added (Beth) | **Yes** | 2 | `enriched.dateAdded`, already in metadata; render. |
+| 14 | Downloadable thumbnails (Beth) | **Yes** | 2 | `thumbnailLink` already in data; add download link to info panel. |
+| 15 | All filters currently in the catalog (Beth) | **Yes** | 4 | Need an inventory of SOS catalog filters first — open question for the requesters. |
+| 16 | Catalog ↔ sphere tab toggle (Hilary) | **Yes** | 1 | Same surface as #2. |
+| 17 | Fix time and frame issue (Hilary) | **Yes — same as #7** | 3 | Duplicate of #7; tracked together. |
+
+**Counts.** 14 feasible and in-plan; 1 partial (zip downloads);
+1 deferred to the catalog backend (all SOS); 1 duplicate of
+another. That's 16 unique tracked items across 6 phases.
+
+---
+
+## 3. Phase 1 — Catalog-first UX
+
+**Theme.** Make TerraViz feel like a catalog by default. Adds a
+new top-level mode where the globe is hidden until the user
+selects a dataset, plus the full-screen affordance Adrian asked
+for.
+
+**Estimated size.** ~1–1.5 weeks of focused work. One PR per
+sub-phase.
+
+### 3.1 `?catalog=true` route + globe hide
+
+The current entry path is "globe up immediately, dataset
+optionally loaded via `?dataset=<id>`." The new entry path is:
+
+1. `?catalog=true` (no dataset) → render the browse panel
+   as a full-viewport surface, globe canvas hidden.
+2. `?catalog=true&dataset=<id>` → render the browse panel
+   collapsed, globe canvas visible, dataset loaded. Equivalent
+   to today's default but with a persistent "back to catalog"
+   affordance.
+3. `?dataset=<id>` (no `catalog`) → today's behaviour
+   unchanged. Direct globe entry for embeds and shared links.
+4. `/` (no params) → **open question** for requesters:
+   should the default landing experience be globe-first
+   (today) or catalog-first (new)? See §10.
+
+`deepLinkService.ts` already parses `?dataset=`. The same
+pattern adds a `getCatalogMode()` reader; `main.ts` orchestrates
+the visibility toggle.
+
+### 3.2 Globe ↔ Catalog tab control
+
+Hilary's "catalog and sphere tab so they can easily be flipped
+back and forth" is the same UX as a two-state segmented
+control pinned to the top of the viewport when `catalog=true`
+is active:
+
+```
+┌─────────────────────────────────────────────┐
+│  [ Catalog ] [ Sphere ]            ⛶ fullscreen │
+└─────────────────────────────────────────────┘
+```
+
+`pushState` swaps the URL between `?catalog=true&dataset=X`
+and `?dataset=X` without reloading. The two states share a
+single mounted `MapRenderer` — we hide its container, not
+unmount it, to avoid a full GIBS re-fetch on every tab flip.
+
+### 3.3 Fullscreen button
+
+Adrian's request: bottom-right. The Fullscreen API is
+well-supported in evergreen browsers and in Tauri's webview.
+Add a button to the existing `mapControlsUI.ts` cluster (already
+right-aligned), wire to `document.documentElement.requestFullscreen()`,
+listen for `fullscreenchange` to swap the icon. Accessible name
+via `t('mapControls.fullscreen.enter')` / `.exit`.
+
+### 3.4 Files touched
+
+| File | Change |
+|---|---|
+| `src/services/deepLinkService.ts` | New `getCatalogMode()`, `setCatalogMode(on)` with `pushState`. |
+| `src/main.ts` | On boot, branch on `getCatalogMode()`. Hide `#maplibre-container` (visibility: hidden, not display:none — keeps the canvas alive). |
+| `src/ui/browseUI.ts` | Add a "full surface" rendering mode; today's overlay is the default. |
+| `src/ui/catalogTabsUI.ts` | **New.** Segmented control at top of viewport, only visible in `catalog=true`. |
+| `src/ui/mapControlsUI.ts` | Add fullscreen button to existing cluster. |
+| `src/styles/browse.css` | Full-surface variant — opaque background, larger card grid, no max-width clamp. |
+| `locales/en.json` | New keys: `catalogTabs.catalog`, `catalogTabs.sphere`, `mapControls.fullscreen.*`. |
+
+### 3.5 Risks
+
+- **Analytics impact.** New surface should emit a session-shape
+  event (`catalog_mode_entered` or similar). Coordinate with
+  `docs/ANALYTICS_CONTRIBUTING.md` before adding event types.
+- **Deep-link compatibility.** Existing share links use
+  `?dataset=X`; those must continue to land on globe-first.
+  Tested explicitly.
+- **Tour playback.** Tours assume globe is mounted. If a tour
+  starts in catalog mode, it must implicitly flip to sphere
+  mode. `tourEngine.ts` already calls `loadDataset`; we add a
+  pre-call to clear catalog mode.
+
+---
+
+## 4. Phase 2 — Info panel completeness
+
+**Theme.** Surface the metadata that already exists in the
+data model but isn't rendered.
+
+**Estimated size.** ~3–5 days. Single PR.
+
+### 4.1 Field-by-field exposure
+
+Audit of [`datasetLoader.ts:326–494`](../src/services/datasetLoader.ts)
+against `EnrichedMetadata`:
+
+| Field | In data? | Shown? | After this phase |
+|---|---|---|---|
+| Title | yes | yes | unchanged |
+| Description (full) | yes | **truncated at 600 chars** | Expandable "show more" / scroll variant |
+| Source organisation | yes | partial | Promote to a labelled "Source" row |
+| Dataset developer | yes | partial (used as source fallback) | Dedicated "Developed by" row |
+| Visualization developer | yes | **hidden** | Dedicated "Visualization by" row |
+| Contact | yes | **hidden** | Optional contact link if present |
+| Date added | yes | **hidden** | "Added on YYYY-MM-DD" line |
+| Categories | yes | yes | unchanged |
+| Keywords | yes | yes | unchanged |
+| Thumbnail | yes | **hidden in info panel** | Render + download link |
+| Legend | yes | yes (with modal) | unchanged |
+| Related datasets | yes | yes (title match only) | See §4.2 |
+| Catalog URL | yes | yes | unchanged |
+
+### 4.2 Related-dataset recommendation
+
+Today: `EnrichedMetadata.relatedDatasets` is a manual array
+of `{ title, url }`. Off-catalog entries render as grayed-out
+text.
+
+Upgrade: when the manual array is short (< 3 entries) or
+empty, augment with **algorithmic recommendations** based on
+shared categories and overlapping keywords. Algorithm:
+
+1. Score every other catalog dataset by:
+   `category_overlap_count × 2 + keyword_overlap_count`.
+2. Filter to score ≥ 2.
+3. Sort descending; take top 5.
+4. De-duplicate against manual entries.
+
+This is a pure-client computation — no backend changes — and
+runs in O(catalog_size) per info-panel open, which is fine for
+the current catalog size (~300 datasets).
+
+### 4.3 Thumbnail download
+
+`thumbnailLink` is a URL on a public S3 or Vimeo CDN. A
+right-click "Save image" works today but isn't discoverable;
+add an explicit "Download thumbnail" link below the
+thumbnail. On web, use an `<a download>` with the file URL;
+on Tauri, route through the existing download service.
+
+### 4.4 Files touched
+
+| File | Change |
+|---|---|
+| `src/services/datasetLoader.ts` | Rewrite info-panel render to include new fields, expand/collapse description, related-dataset algorithm. |
+| `src/services/relatedDatasets.ts` | **New.** Pure function: `recommendRelated(target, catalog) → Dataset[]`. |
+| `src/services/datasetLoader.test.ts` (extend) | Add test for the related-dataset scorer. |
+| `src/styles/info-panel.css` (or wherever info panel CSS lives) | New rows + expand/collapse styling. |
+| `locales/en.json` | Keys for new labels: `infoPanel.developedBy`, `.visualizationBy`, `.dateAdded`, `.thumbnail.download`, `.description.showMore`, `.description.showLess`. |
+
+### 4.5 Risks
+
+- **Field availability.** Not every dataset has every field.
+  Each row must be conditional — empty fields silently
+  omitted.
+- **Layout overflow.** Adding 4–6 rows to a panel that's
+  already information-dense. May need a sectioned layout
+  (Overview / Credits / Related) with collapsible sections.
+- **Thumbnail download CORS.** Vimeo-hosted thumbnails may
+  not honour `<a download>`. May need to route through
+  `video-proxy.zyra-project.org` if `Content-Disposition`
+  isn't set upstream.
+
+---
+
+## 5. Phase 3 — Playback fidelity
+
+**Theme.** Fix the time/frame correctness bug Beth and Hilary
+both reported, and surface the closed-caption infrastructure
+that already exists.
+
+**Estimated size.** ~1 week. The bug fix is small; the
+captions work is mostly UI.
+
+### 5.1 Frame ↔ label sync bug
+
+**Diagnosis.** `inferDisplayInterval()` in `playbackController.ts`
+picks a single cadence (hour / day / week / month / year) by
+snapping the `(endTime − startTime) / frameCount` ratio to the
+nearest preset. A 30-frame climate model spanning 30 years
+snaps to **yearly**; one button-press = one year. But the
+label is rendered against the timestamp, which still ticks
+month-by-month for the **video-position-based** label. Result:
+the label advances 12× faster than the imagery.
+
+**Fix.** Make label cadence follow imagery cadence, not the
+underlying video timecode. Concretely:
+
+1. Compute `framesPerImageryStep` from the dataset metadata
+   (the GIBS layer's update period, or the video's keyframe
+   interval, or — once `CATALOG_IMAGE_SEQUENCE_PLAN.md`
+   Phase 3pg lands — the catalog-provided frame count).
+2. Quantise the label timestamp to the imagery step before
+   rendering: `labelTime = startTime + floor(frame / framesPerImageryStep) × stepDuration`.
+3. Disable label updates between imagery steps to avoid the
+   "label crawls while image stays static" illusion.
+
+**Catalog dependency.** A clean fix needs per-dataset
+frame counts, which `CATALOG_IMAGE_SEQUENCE_PLAN.md`
+Phase 3pg will provide. **Interim:** infer the imagery
+cadence from the dataset's `period` field (already in the
+data model — values like "monthly", "yearly", "daily") and
+fall back to the snapped cadence today. Document the
+interim approach clearly in `playbackController.ts` so the
+deeper fix is obvious when 3pg lands.
+
+### 5.2 Closed captions exposure
+
+The infrastructure exists. The user-visible gap is:
+
+1. **CC button not always visible.** Today the CC button
+   renders only when a caption track loads successfully —
+   silent failures look like "this dataset has no captions",
+   making it ambiguous whether the dataset *lacks* captions
+   or whether they *failed to load*. Add an explicit
+   "Captions available" indicator in the info panel for
+   datasets whose `closedCaptionLink` is non-empty.
+2. **No caption styling control.** Default browser rendering
+   varies wildly. Add a minimal style override — black
+   background, white text, configurable size — matching the
+   SOS native player.
+3. **Caption-load failure surfacing.** Currently silent.
+   Log to analytics (`error` event, Tier A) so we know how
+   often Vimeo's caption proxy fails.
+
+### 5.3 Files touched
+
+| File | Change |
+|---|---|
+| `src/ui/playbackController.ts` | Quantise label time to imagery step. New `inferImageryCadence(dataset)` helper. CC button visible whenever `closedCaptionLink` is non-empty. |
+| `src/services/datasetLoader.ts` | Surface "captions available" badge in info panel. |
+| `src/styles/playback.css` | Caption styling (min-size, contrast, position). |
+| `src/analytics/errorCapture.ts` (extend) | New `caption_load_failed` error subtype. |
+| `src/ui/playbackController.test.ts` | Add tests for the new quantisation and the cadence inference helper. |
+
+### 5.4 Risks
+
+- **Period field reliability.** `Dataset.period` is a free-text
+  field in places. Inference must be defensive and fall back
+  to the existing snap behaviour on unknown values.
+- **Bisecting the bug.** Beth and Hilary may have been
+  describing different bugs that share symptoms. Worth
+  asking for specific dataset IDs that exhibit the problem
+  before designing the fix.
+
+---
+
+## 6. Phase 4 — Filters & search
+
+**Theme.** Reach parity with the SOS catalog's filter surface.
+
+**Estimated size.** ~1–2 weeks, gated on requirements
+clarification.
+
+### 6.1 Open question first
+
+Beth's request — "All the filters currently in the catalog" —
+is unbounded until we have the SOS catalog filter inventory.
+**Action item for §10:** ask Beth to enumerate which filters
+matter, ideally in priority order.
+
+Based on a reading of the current SOS catalog UI (not a primary
+source — verify with Beth), the candidate filter list is:
+
+| Filter | Driving field | Effort |
+|---|---|---|
+| Category | `tags`, `enriched.categories` | Already exists — multi-select upgrade only |
+| Theme / subject | `enriched.categories` (subset) | Medium — needs a vocabulary |
+| Date added | `enriched.dateAdded` | Easy — date range slider |
+| Time range | `startTime`, `endTime` | Medium — temporal coverage filter |
+| Region / bounding box | `boundingBox` | Hard — needs map-based picker; defer |
+| Format | `format` (video / image / hls) | Easy — chip filter |
+| Has closed captions | `closedCaptionLink` non-empty | Easy — boolean toggle |
+| Has tour | `runTourOnLoad` non-empty | Easy — boolean toggle |
+
+A region/bounding-box filter is the most user-visible win but
+needs the most UI work (a map picker that doesn't conflict
+with the catalog-mode hidden globe). Recommend deferring
+it to Phase 6 or later.
+
+### 6.2 Search semantics
+
+Today: text-only substring match against title + description
++ keywords + category names, debounced 400 ms.
+
+Upgrade: stay simple. Add **field-prefixed search syntax** —
+`category:atmosphere`, `period:yearly`, `format:video` — to
+let power users filter via the search box. This is cheap
+because the same predicate can drive both chip filters and
+prefixed search.
+
+### 6.3 URL persistence
+
+Filter and search state should round-trip through the URL so
+links are shareable. Encode as compact query params:
+
+```
+?catalog=true&q=ocean&cat=atmosphere,land&fmt=video
+```
+
+`history.replaceState` (not `pushState`) on filter changes —
+we don't want every keystroke clogging the back button.
+
+### 6.4 Files touched
+
+| File | Change |
+|---|---|
+| `src/ui/browseUI.ts` | Multi-select chips; new filter rail. |
+| `src/services/datasetFilter.ts` | **New.** Pure predicate composition module. Drives both UI and prefixed-search. |
+| `src/services/deepLinkService.ts` | Encode/decode filter state to URL. |
+| `src/styles/browse.css` | Filter rail layout. |
+| `locales/en.json` | Filter labels. |
+
+### 6.5 Risks
+
+- **Filter inventory bloat.** Without a clear priority list,
+  this phase could expand indefinitely. Cap at the top 5
+  filters Beth confirms.
+- **Catalog size.** ~300 datasets means filtering is
+  effectively instant. If federation lands and the catalog
+  grows to 10k+, indexing matters; out of scope here.
+
+---
+
+## 7. Phase 5 — UI polish & shader
+
+**Theme.** Adrian's UI-scale and shader requests. Both are
+medium-effort cross-cutting changes; bundled into one phase to
+avoid two separate visual-quality PRs.
+
+**Estimated size.** ~2 weeks, split into two independent PRs.
+
+### 7.1 UI scale (`--ui-scale`)
+
+Adrian's "150% default" is best implemented as a CSS variable
+the user can tune in settings, not a hardcoded multiplier.
+
+1. Introduce `--ui-scale: 1` at `:root` (defined in
+   `tokens/global.json` so it flows through to the generated
+   `src/styles/tokens.css`).
+2. Audit every hardcoded `rem` / `px` size in the existing
+   CSS files and wrap with `calc(... * var(--ui-scale))`.
+   This is a mechanical-but-tedious pass — best done with a
+   coordinated sweep across `src/styles/*.css`.
+3. Add a "UI size" setting in the existing Tools menu →
+   Settings, with three presets (Comfortable / Default /
+   Compact → 1.5 / 1.0 / 0.85). Persist to localStorage.
+4. The default ships as `1.0`. **We do not flip the default
+   to 150% unilaterally** — that's a community decision, and
+   shipping a 50% size jump as a forced default invalidates
+   muscle memory across the existing user base. Adrian's
+   stated default can be set on the SOS deployment via a
+   build-time env var (`VITE_DEFAULT_UI_SCALE=1.5`).
+
+### 7.2 Globe shader
+
+Adrian's specific asks: improve contrast and saturation, reduce
+specular, add normal maps if possible.
+
+**Contrast / saturation.** Add a post-processing pass (or a
+shader uniform on the existing earth tile layer) with two
+uniforms: `u_saturation` (0.0–2.0, default 1.0) and
+`u_contrast` (0.0–2.0, default 1.0). Tune the defaults until
+they match the Blue Marble reference Adrian linked in the doc.
+Implementation site: `earthTileLayer.ts` Pass 1 fragment shader
+(currently does night darkening) — extend that pass.
+
+**Reduce specular.** Currently `Earth_Specular_2K.jpg` is
+sampled with a constant strength. Add a `u_specular_strength`
+uniform exposed in the tools menu (Comfortable / Default /
+None presets), defaulting to a value lower than today's.
+
+**Normal maps.** This is the largest sub-task. Three options:
+
+| Option | Pros | Cons |
+|---|---|---|
+| Bake into a precomputed normal-mapped Blue Marble texture | Simple shader, one extra texture | Adds ~8–16 MB to first paint; not GIBS-friendly |
+| Per-pixel normal computation from a derivative of GIBS tiles | No extra asset | Subtle and slow; not what Adrian asked for |
+| Add a global normal map texture as a separate sampler in the earthTileLayer | Cleanest | Need to source/license a 4K Earth normal map |
+
+Recommend **option 3** with NASA's "World Topography" derived
+normal map (CC-BY) or similar. Apply it only on the day side
+(modulated by sun-direction) to add subtle terrain shading
+without competing with city lights at night. Stay below
+2K resolution to keep the bundle delta reasonable.
+
+### 7.3 Files touched
+
+UI scale:
+
+| File | Change |
+|---|---|
+| `tokens/global.json` | Add `ui-scale` token (default 1). |
+| All `src/styles/*.css` | Mechanical sweep wrapping sizes with `calc(... * var(--ui-scale))`. |
+| `src/ui/toolsMenuUI.ts` | UI-size setting (radio group). |
+| `src/services/uiScaleService.ts` | **New.** Persist + apply to `:root`. |
+
+Shader:
+
+| File | Change |
+|---|---|
+| `src/services/earthTileLayer.ts` | New uniforms; optional normal-map sampler. |
+| `src/services/photorealEarth.ts` | Mirror the same uniforms in the VR Earth so the look is consistent. |
+| `public/assets/earth_normal_2K.jpg` (new asset) | Sourced normal map. |
+| `src/ui/toolsMenuUI.ts` | Specular slider preset. |
+
+### 7.4 Risks
+
+- **Performance.** Adding a normal-map sample to the
+  fragment shader for every pixel on every frame is fine for
+  desktop but warrants a check on low-end mobile. Gate
+  behind a feature detection or a "low-detail" toggle if
+  needed.
+- **Visual regression.** Both the contrast/sat change and
+  the normal map will shift the look of every screenshot
+  ever taken of TerraViz. Worth flagging in release notes.
+- **UI-scale sweep blast radius.** Touching every CSS file
+  for the scale wrap is high-churn but low-risk. Should
+  land as a single coordinated PR, reviewed for spacing
+  consistency.
+
+---
+
+## 8. Phase 6 — Power features
+
+**Theme.** Playlists and zip downloads. Both are genuinely
+net-new features and arrive last because they layer on top of
+the catalog UX from Phase 1.
+
+**Estimated size.** ~3–4 weeks. Two distinct sub-features; each
+could be its own branch if priorities shift.
+
+### 8.1 Playlists
+
+Adrian's spec: "stored as cookies in your local browser
+session." That maps to localStorage (not actual cookies —
+cookies are the wrong tool here; clarifying with Adrian is
+trivial).
+
+**Data model.**
+
+```ts
+interface Playlist {
+  id: string;
+  name: string;
+  createdAt: string;
+  datasets: Array<{ datasetId: string; durationSec?: number }>;
+}
+```
+
+**Interactions.**
+
+- "Add to playlist" affordance in info panel and browse cards.
+- Playlist manager panel under Tools menu.
+- Playback: when a playlist is active, advance to the next
+  dataset after `durationSec` (default 30 s) using the same
+  `loadDataset` flow tours use today.
+- Export/import: JSON download/upload so a playlist can be
+  shared across browsers, since localStorage is per-device.
+
+**Persistence.** localStorage with a single key
+`terraviz.playlists.v1` holding an array of `Playlist`.
+
+**Relationship to tours.** Playlists are **not** tours.
+Tours are author-curated, scripted, possibly include narration
+and camera moves. Playlists are user-curated dataset
+sequences. The two live side-by-side. If a playlist entry
+points at a dataset that has a `runTourOnLoad`, the playlist
+plays the tour and waits for it to finish before advancing.
+
+### 8.2 Zip downloads
+
+Adrian's spec: "download source data (images and videos) via
+a zip file."
+
+**Image datasets.** Straightforward. JSZip (already a peer
+dependency in the desktop download path — verify) fetches each
+asset (full-resolution image, legend, captions, thumbnail)
+and packages them with a `manifest.json` describing the
+contents. Trigger as a blob download.
+
+**Video datasets.** Harder. HLS streams aren't a single file —
+they're a manifest plus thousands of TS segments. Three
+options:
+
+| Option | Effort | UX |
+|---|---|---|
+| Download the highest-quality MP4 from the Vimeo proxy | Low | One file, ~good quality, but not the actual HLS source |
+| Concatenate HLS segments client-side via ffmpeg.wasm | High | Slow, large bundle (~25 MB ffmpeg.wasm) |
+| Server-side bundling job | Medium | Requires backend work — out of scope here |
+
+Recommend **option 1** for video datasets — same path the
+desktop downloader already uses. Honest about the tradeoff in
+the UI ("HLS adaptive video; downloaded as best-quality MP4").
+
+**Asset selection.** Let the user pick what to include:
+[ ] Primary data, [ ] Legend, [ ] Captions, [ ] Thumbnail,
+[ ] Metadata JSON. Default: all checked.
+
+### 8.3 Files touched
+
+Playlists:
+
+| File | Change |
+|---|---|
+| `src/services/playlistService.ts` | **New.** CRUD + persistence. |
+| `src/ui/playlistUI.ts` | **New.** Manager panel + "add to playlist" affordances. |
+| `src/services/datasetLoader.ts` | Hook into playlist-advance flow. |
+| `src/ui/playbackController.ts` | "Skip to next playlist item" control when playlist is active. |
+| `locales/en.json` | New keys. |
+
+Zip downloads:
+
+| File | Change |
+|---|---|
+| `src/services/zipDownloadService.ts` | **New.** Web entry point. JSZip-based. |
+| `src/services/downloadService.ts` | Refactor so desktop and web share asset-list logic. |
+| `src/ui/downloadDialogUI.ts` | **New.** Asset-selection checkboxes + progress UI. |
+| `package.json` | Add `jszip` if not already present. |
+
+### 8.4 Risks
+
+- **Browser memory limits.** A multi-GB video zip will OOM
+  the tab. Cap downloads at ~1.5 GB and warn above that.
+- **Cross-origin.** Some assets may not have CORS headers
+  for direct fetch from the browser. May need to route
+  through `video-proxy.zyra-project.org` for some sources.
+- **Persistence loss.** Playlists in localStorage are lost
+  on clear-data. JSON export/import is the mitigation, not a
+  fix — flag this in the playlist UI.
+
+---
+
+## 9. Deferred / dependent
+
+### 9.1 "All SOS datasets" (request #10)
+
+Tracked under `docs/CATALOG_BACKEND_PLAN.md`. The current
+data source is a single S3 snapshot from
+`metadata.sosexplorer.gov`. Federation work — peer subscription,
+catalog node, unified search — lives in the catalog backend
+plan, **not** in this branch. This plan notes the request for
+visibility but takes no action.
+
+If Beth's priority is high enough to advance ahead of the
+backend track, a tactical interim is possible: include
+additional dataset snapshots as static JSON in the deployment
+and merge them client-side at fetch time. This is an
+escape valve — not the durable answer — and should only be
+pursued if the federation track slips materially.
+
+### 9.2 Region / bounding-box filter
+
+Listed in §6.1 as deferred. The filter itself is feasible;
+the UI surface conflicts with catalog mode's hidden-globe
+default. A "show a small inline map for region picking"
+component is realistic but warrants its own design pass.
+
+### 9.3 Audio narration playback
+
+Mentioned only obliquely in the doc (Beth's "notable
+features"), but tours sometimes include narration. Out of
+scope here; flag for future planning.
+
+---
+
+## 10. Open questions for the requesters
+
+Before starting Phase 1, get answers to these — they affect
+sequencing and avoid mid-phase rework.
+
+1. **Default landing experience.** When a user opens
+   `terraviz.zyra-project.org` with no query params, should
+   they see the catalog or the globe? Adrian's wording
+   ("catalog mode") and Hilary's wording ("default to our
+   catalog as it is") both lean catalog-first, but this
+   inverts the current behaviour and breaks every existing
+   share link expectation. **Strong recommendation:** keep
+   the current globe-first default; add `?catalog=true` as
+   an opt-in entry, and make the SOS website link directly
+   to `?catalog=true` for catalog visitors.
+
+2. **Filter inventory (Beth).** Which specific filters from
+   the SOS catalog need to be in v1? "Most used" was
+   mentioned but not enumerated. A ranked list of 5–8 would
+   shape Phase 4 substantially.
+
+3. **Frame/label bug datasets (Beth, Hilary).** Specific
+   dataset IDs that exhibit the time/frame issue would let
+   us reproduce reliably. Climate models that have yearly
+   frames with monthly labels — which ones?
+
+4. **UI scale (Adrian).** Hard-coded 150% default for the SOS
+   deployment, or user-selectable with a sensible default? §7.1
+   recommends the latter; confirm before implementing.
+
+5. **Playlist semantics (Adrian).** When a playlist plays back,
+   should each dataset play for a fixed duration, or follow
+   the dataset's natural duration (full video / tour length)?
+   Adrian's "cookies" wording suggests a casual feature, so
+   per-dataset fixed duration with sensible defaults is likely
+   the right answer — confirm.
+
+6. **Globe shader reference (Adrian).** The doc has image
+   placeholders for "SOSx blue marble" / "Google Maps" /
+   "Actual photograph". If those images can be shared
+   directly, the contrast/saturation defaults are easier to
+   tune to match.
+
+---
+
+## 11. Sequencing summary
+
+| Phase | Title | Estimated size | Gate |
+|---|---|---|---|
+| 1 | Catalog-first UX | 1–1.5 weeks | Open question #1 |
+| 2 | Info panel completeness | 3–5 days | none |
+| 3 | Playback fidelity | ~1 week | Open question #3 |
+| 4 | Filters & search | 1–2 weeks | Open question #2 |
+| 5 | UI polish & shader | ~2 weeks | Open question #4, #6 |
+| 6 | Playlists + zip downloads | ~3–4 weeks | Open question #5 |
+| — | All SOS datasets | — | Blocked on `CATALOG_BACKEND_PLAN.md` |
+
+Phases 1, 2, and 3 are the highest leverage and can land in
+roughly three weeks combined. They address every request from
+Beth and Hilary except the filters work and the "all SOS"
+gap, and they address Adrian's catalog-mode and fullscreen
+asks. Phases 4–6 then layer on; each is independently
+shippable.
+
+---
+
+## 12. Cross-references
+
+- [`docs/CATALOG_BACKEND_PLAN.md`](CATALOG_BACKEND_PLAN.md)
+  — federation track that gates request #10.
+- [`docs/CATALOG_IMAGE_SEQUENCE_PLAN.md`](CATALOG_IMAGE_SEQUENCE_PLAN.md)
+  — Phase 3pg will surface per-frame metadata, enabling a
+  cleaner fix for the frame/label bug (Phase 3 here).
+- [`docs/ANALYTICS_CONTRIBUTING.md`](ANALYTICS_CONTRIBUTING.md)
+  — every new event added in this branch must follow the
+  reviewer checklist.
+- [`docs/CSS_ARCHITECTURE_PLAN.md`](CSS_ARCHITECTURE_PLAN.md)
+  — RTL safety constraints for the new catalog-mode CSS.
+- [`docs/I18N_PLAN.md`](I18N_PLAN.md) — all new strings
+  pass through `t(...)` and `npm run check:i18n-strings`.
+- [`STYLE_GUIDE.md`](../STYLE_GUIDE.md) — glass-surface
+  visual conventions the new surfaces must respect.
