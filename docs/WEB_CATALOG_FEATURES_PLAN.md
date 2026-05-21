@@ -6,7 +6,7 @@
 > from Adrian, Beth, and Hilary scoping TerraViz as a catalog
 > replacement for the SOS website.
 >
-> Branch: `claude/access-google-docs-p9R8e`.
+> Branch: `claude/web-catalog-features-plan`.
 
 The Google Doc gathers 17 requests across three reviewers. This
 plan triages each request against the current codebase, groups
