@@ -395,6 +395,47 @@ describe('GET /api/v1/datasets/{id}/frames (3pg/B)', () => {
     expect(res.status).toBe(400)
   })
 
+  it('rejects non-canonical numeric forms in ?limit / ?cursor (3pg-review/E)', async () => {
+    // Mirrors the strict frameIndex policy — `Number()` would
+    // silently coerce these. Copilot discussion_r3282216200 /
+    // _r3282216289.
+    const sqlite = seedFramesRow()
+    const env = {
+      CATALOG_DB: asD1(sqlite),
+      CATALOG_KV: makeKV(),
+      CATALOG_R2: makeBucket(buildManifest(5)),
+      R2_PUBLIC_BASE: PUBLIC_BASE,
+    }
+    for (const bad of ['1e2', '10.0', '0x10', '+5', ' 3 ']) {
+      const limitRes = await onRequestGet(
+        makeCtx<'id'>({
+          env,
+          params: { id: DATASET_ID },
+          url: `https://test.local/api/v1/datasets/${DATASET_ID}/frames?limit=${encodeURIComponent(bad)}`,
+        }),
+      )
+      expect(limitRes.status, `limit=${JSON.stringify(bad)}`).toBe(400)
+      const cursorRes = await onRequestGet(
+        makeCtx<'id'>({
+          env,
+          params: { id: DATASET_ID },
+          url: `https://test.local/api/v1/datasets/${DATASET_ID}/frames?cursor=${encodeURIComponent(bad)}`,
+        }),
+      )
+      expect(cursorRes.status, `cursor=${JSON.stringify(bad)}`).toBe(400)
+    }
+    // Empty cursor specifically — `?cursor=` is a string the
+    // URL parser surfaces as the empty string, not null.
+    const emptyCursor = await onRequestGet(
+      makeCtx<'id'>({
+        env,
+        params: { id: DATASET_ID },
+        url: `https://test.local/api/v1/datasets/${DATASET_ID}/frames?cursor=`,
+      }),
+    )
+    expect(emptyCursor.status).toBe(400)
+  })
+
   it('renders pure-sequence display names when period is null', async () => {
     const sqlite = seedFramesRow({ frameCount: 3, startTime: null, period: null })
     const env = {

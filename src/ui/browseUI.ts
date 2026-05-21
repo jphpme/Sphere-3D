@@ -116,13 +116,20 @@ function renderFrameScrubber(d: Dataset): string {
     : nowMs < startMs
       ? t('browse.card.scrubber.beforeStart')
       : t('browse.card.scrubber.afterEnd')
-  const startLabel = escapeAttr(formatDate(d.startTime))
+  // Raw formatted strings here — `t(...)` interpolates them into
+  // the localised template, and the single `escapeAttr` on the
+  // resulting aria-label below handles attribute-context encoding
+  // exactly once. Escaping the inputs first would double-encode
+  // entities (e.g. `&` → `&amp;` → `&amp;amp;`) and corrupt the
+  // screen-reader label. Phase 3pg-review/E — Copilot
+  // discussion_r3282216335.
+  const startLabel = formatDate(d.startTime)
   // Last frame's timestamp (not `end_time`) — `period × (count - 1)`
   // is the moment of the final frame; `period × count` is one
   // period past the last frame and used only as the right edge of
   // the scrub track.
   const lastFrameIso = new Date(startMs + periodMs * (frames.count - 1)).toISOString()
-  const endLabel = escapeAttr(formatDate(lastFrameIso))
+  const endLabel = formatDate(lastFrameIso)
   return `
     <div class="browse-card-scrubber" role="img" aria-label="${escapeAttr(
       t('browse.card.scrubber.aria', { count: countLabel, start: startLabel, end: endLabel }),

@@ -68,20 +68,31 @@ function jsonError(status: number, error: string, message: string): Response {
 
 function parseLimit(raw: string | null): number | { error: string } {
   if (raw == null) return DEFAULT_LIMIT
-  const n = Number(raw)
-  if (!Number.isInteger(n) || n < 1 || n > MAX_LIMIT) {
-    return { error: `limit must be an integer in [1, ${MAX_LIMIT}].` }
+  // Strict base-10 digits only — matches the `frameIndex` policy
+  // on the sibling endpoint. `Number()` would silently accept
+  // `1e2`, `10.0`, `+10`, leading whitespace, etc. Phase 3pg-
+  // review/E — Copilot discussion_r3282216200.
+  if (!/^\d+$/.test(raw)) {
+    return { error: `limit must be a base-10 integer in [1, ${MAX_LIMIT}].` }
+  }
+  const n = parseInt(raw, 10)
+  if (n < 1 || n > MAX_LIMIT) {
+    return { error: `limit must be a base-10 integer in [1, ${MAX_LIMIT}].` }
   }
   return n
 }
 
 function parseCursor(raw: string | null): number | { error: string } {
   if (raw == null) return 0
-  const n = Number(raw)
-  if (!Number.isInteger(n) || n < 0) {
-    return { error: 'cursor must be a non-negative integer.' }
+  // Strict base-10 digits only. The cursor is the start-index of
+  // the next page (a base-10 integer in `[0, frame_count]`), so
+  // `cursor=` (empty), `cursor=3e2`, `cursor=0x10`, etc. should
+  // all 400 rather than coerce to surprising offsets. Phase 3pg-
+  // review/E — Copilot discussion_r3282216289.
+  if (!/^\d+$/.test(raw)) {
+    return { error: 'cursor must be a non-negative base-10 integer.' }
   }
-  return n
+  return parseInt(raw, 10)
 }
 
 function parseIsoTimestamp(raw: string, label: string): number | { error: string } {
