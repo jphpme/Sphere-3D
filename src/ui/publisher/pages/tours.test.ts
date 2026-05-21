@@ -122,4 +122,79 @@ describe('renderToursPage (tour/A → /G)', () => {
     expect(content.querySelector('.stale')).toBeNull()
     expect(content.querySelector('.publisher-shell')).toBeTruthy()
   })
+
+  describe('Delete (tour/G)', () => {
+    it('confirms first, then DELETEs and removes the row on success', async () => {
+      const content = document.createElement('div')
+      const deleteFn = vi.fn(async () => ({ deleted_id: '01HX_T1' }))
+      const confirm = vi.fn<(message: string) => boolean>(() => true)
+      await renderToursPage(content, {
+        navigate: () => {},
+        createDraft: vi.fn(),
+        listFn: vi.fn(async () => ({
+          tours: [makeTour({ id: '01HX_T1', title: 'Goodbye tour' })],
+          next_cursor: null,
+        })),
+        deleteFn,
+        confirm,
+      })
+      const deleteBtn = content.querySelector<HTMLButtonElement>(
+        '.publisher-row-delete',
+      )!
+      deleteBtn.click()
+      expect(confirm).toHaveBeenCalledOnce()
+      expect(confirm.mock.calls[0]?.[0]).toContain('Goodbye tour')
+      // Microtask pumps for the async delete + DOM removal.
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(deleteFn).toHaveBeenCalledWith('01HX_T1')
+      expect(content.querySelector('tbody tr')).toBeNull()
+    })
+
+    it('does not DELETE when the publisher cancels the confirm', async () => {
+      const content = document.createElement('div')
+      const deleteFn = vi.fn()
+      await renderToursPage(content, {
+        navigate: () => {},
+        createDraft: vi.fn(),
+        listFn: vi.fn(async () => ({
+          tours: [makeTour({ id: '01HX_T1' })],
+          next_cursor: null,
+        })),
+        deleteFn,
+        confirm: () => false,
+      })
+      content.querySelector<HTMLButtonElement>('.publisher-row-delete')!.click()
+      await Promise.resolve()
+      expect(deleteFn).not.toHaveBeenCalled()
+      // Row stays.
+      expect(content.querySelectorAll('tbody tr')).toHaveLength(1)
+    })
+
+    it('surfaces a server error inline and keeps the row visible', async () => {
+      const content = document.createElement('div')
+      const deleteFn = vi.fn(async () => ({ error: 'Server error (500)' }))
+      await renderToursPage(content, {
+        navigate: () => {},
+        createDraft: vi.fn(),
+        listFn: vi.fn(async () => ({
+          tours: [makeTour({ id: '01HX_T1' })],
+          next_cursor: null,
+        })),
+        deleteFn,
+        confirm: () => true,
+      })
+      const deleteBtn = content.querySelector<HTMLButtonElement>(
+        '.publisher-row-delete',
+      )!
+      deleteBtn.click()
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(content.querySelectorAll('tbody tr')).toHaveLength(1)
+      expect(
+        content.querySelector('.publisher-row-action-status')?.textContent,
+      ).toContain('Server error')
+      expect(deleteBtn.disabled).toBe(false)
+    })
+  })
 })

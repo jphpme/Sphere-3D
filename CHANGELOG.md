@@ -108,8 +108,8 @@ auto-assign sequential `dataset1` / `dataset2` / … handles
 so `unloadDataset` has something concrete to reference.
 Total captured-task types: 18.
 
-**tour/G — Publish flow + real tour list.** Two more backend
-endpoints:
+**tour/G — Publish flow + real tour list + delete.** Three
+more backend endpoints:
 
   - `GET /api/v1/publish/tours` — list the publisher's tours
     with cursor pagination (ULID `id < ?` for stable order
@@ -121,6 +121,11 @@ endpoints:
     published bundles aren't deleted — federation subscribers
     may still hold the prior ref; immutability keeps those
     references valid.
+  - `DELETE /api/v1/publish/tours/{id}` — hard-delete the row
+    + best-effort drop the draft R2 blob. Published immutable
+    snapshots are left in place (same federation-safety
+    rationale). Phase 4's soft-retract gesture supersedes
+    this for published tours when it lands.
 
 The dock gains a green **Publish** button in the header
 that flushes the autosave queue first (so the snapshot
@@ -128,7 +133,9 @@ matches the publisher's latest capture), then POSTs
 /publish. Status flows through `idle → publishing →
 published` (or `error`). The `/publish/tours` page is
 rewritten to fetch via `GET /publish/tours` and render rows
-in the same table shape `datasets.ts` uses.
+in the same table shape `datasets.ts` uses; each row gets a
+**Delete** button with a `window.confirm` gate and inline
+error surfacing.
 
 **Reviewer iterations.** One Copilot review pass during the
 PR generated seven actionable comments; landed as
@@ -161,9 +168,11 @@ PR generated seven actionable comments; landed as
     globe placemark, audio/video file pickers, question form.
     The JSON editor (tour/D) is the universal escape hatch
     for these task types until typed mini-forms ship.
-  - **Delete tour from the dashboard** — the list page shows
-    Edit only today; a follow-up adds Delete + Retract
-    buttons.
+  - **Retract** a published tour from the dashboard — Delete
+    works, but a soft-retract (sets a `retracted_at` column,
+    leaves the row in place for federation peers to notice)
+    is the right Phase 4 gesture. Requires a tours-schema
+    migration first.
 
 ---
 

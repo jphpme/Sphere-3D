@@ -9,7 +9,12 @@
  */
 
 import { t } from '../../../i18n'
-import { listTours, createDraftTour, type TourListItem } from '../../tourAuthoring/api'
+import {
+  createDraftTour,
+  deleteTour,
+  listTours,
+  type TourListItem,
+} from '../../tourAuthoring/api'
 
 export interface ToursPageOptions {
   /** Host-supplied navigator. Tests stub this. Defaults to
@@ -20,6 +25,11 @@ export interface ToursPageOptions {
   createDraft?: typeof createDraftTour
   /** Override the GET /publish/tours API call — tests inject a stub. */
   listFn?: typeof listTours
+  /** Override the DELETE /publish/tours/{id} API call — tests inject a stub. */
+  deleteFn?: typeof deleteTour
+  /** Confirmation hook — defaults to `window.confirm`. Tests
+   *  inject a stub that auto-accepts or auto-cancels. */
+  confirm?: (message: string) => boolean
 }
 
 export async function renderToursPage(
@@ -31,6 +41,8 @@ export async function renderToursPage(
   })
   const createDraft = options.createDraft ?? createDraftTour
   const list = options.listFn ?? listTours
+  const del = options.deleteFn ?? deleteTour
+  const confirmFn = options.confirm ?? ((msg: string) => window.confirm(msg))
 
   // Loading state first so the page doesn't blank-flash.
   content.replaceChildren(buildLoadingShell())
@@ -41,7 +53,7 @@ export async function renderToursPage(
     return
   }
 
-  content.replaceChildren(buildShell(result.tours, navigate, createDraft))
+  content.replaceChildren(buildShell(result.tours, navigate, createDraft, del, confirmFn))
 }
 
 function buildLoadingShell(): HTMLElement {
@@ -71,6 +83,8 @@ function buildShell(
   tours: TourListItem[],
   navigate: (url: string) => void,
   createDraft: typeof createDraftTour,
+  del: typeof deleteTour,
+  confirmFn: (message: string) => boolean,
 ): HTMLElement {
   const shell = document.createElement('main')
   shell.className = 'publisher-shell'
@@ -131,13 +145,15 @@ function buildShell(
     return shell
   }
 
-  shell.appendChild(buildTable(tours, navigate))
+  shell.appendChild(buildTable(tours, navigate, del, confirmFn))
   return shell
 }
 
 function buildTable(
   tours: TourListItem[],
   navigate: (url: string) => void,
+  del: typeof deleteTour,
+  confirmFn: (message: string) => boolean,
 ): HTMLElement {
   const wrap = document.createElement('div')
   wrap.className = 'publisher-table-wrap publisher-glass'
@@ -161,7 +177,7 @@ function buildTable(
 
   const tbody = document.createElement('tbody')
   for (const tour of tours) {
-    tbody.appendChild(buildRow(tour, navigate))
+    tbody.appendChild(buildRow(tour, navigate, del, confirmFn))
   }
   table.appendChild(tbody)
 
@@ -172,6 +188,8 @@ function buildTable(
 function buildRow(
   tour: TourListItem,
   navigate: (url: string) => void,
+  del: typeof deleteTour,
+  confirmFn: (message: string) => boolean,
 ): HTMLElement {
   const tr = document.createElement('tr')
 
@@ -213,6 +231,40 @@ function buildRow(
     navigate(`/?tourEdit=${encodeURIComponent(tour.id)}`)
   })
   actionsCell.appendChild(editLink)
+
+  // Phase 3pt/G — Delete (×) button. Confirms first; on
+  // success removes the row from the DOM rather than re-
+  // rendering the whole list. Server-side errors land in an
+  // inline status next to the actions.
+  const deleteBtn = document.createElement('button')
+  deleteBtn.type = 'button'
+  deleteBtn.className = 'publisher-row-action publisher-row-delete'
+  deleteBtn.textContent = t('publisher.tours.action.delete')
+  deleteBtn.setAttribute(
+    'aria-label',
+    t('publisher.tours.action.delete.aria', { title: tour.title }),
+  )
+  const statusSpan = document.createElement('span')
+  statusSpan.className = 'publisher-row-action-status'
+  deleteBtn.addEventListener('click', () => {
+    const confirmed = confirmFn(
+      t('publisher.tours.delete.confirm', { title: tour.title }),
+    )
+    if (!confirmed) return
+    deleteBtn.disabled = true
+    statusSpan.textContent = ''
+    void del(tour.id).then(result => {
+      if ('error' in result) {
+        deleteBtn.disabled = false
+        statusSpan.textContent = result.error
+        statusSpan.classList.add('publisher-row-action-status-error')
+        return
+      }
+      tr.remove()
+    })
+  })
+  actionsCell.appendChild(deleteBtn)
+  actionsCell.appendChild(statusSpan)
   tr.appendChild(actionsCell)
 
   return tr

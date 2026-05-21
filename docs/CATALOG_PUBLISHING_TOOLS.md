@@ -247,10 +247,11 @@ Two cross-cutting policies sit on top of the per-field rules:
 >
 > Deferred: "Play from here" preview, rich-UI captures
 > (overlay drag-to-place, click-on-globe placemark, audio /
-> video file pickers, question form), and Delete / Retract
-> on the tour list. The JSON editor remains the universal
-> escape hatch for any task type the typed captures don't
-> cover yet.
+> video file pickers, question form), and soft-retract for
+> published tours (Phase 4 federation gesture). The JSON
+> editor remains the universal escape hatch for any task
+> type the typed captures don't cover yet. Delete (hard) is
+> wired today — click × on a tour list row.
 
 This is the larger subproject. Goal: a publisher records a
 sequence of camera positions, dataset loads, overlay shows, and

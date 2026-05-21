@@ -130,6 +130,28 @@ export async function publishTour(
   return result.data
 }
 
+/**
+ * Phase 3pt/G — hard-delete a tour. Removes the D1 row +
+ * best-effort drops the draft R2 blob. Used by the tour list
+ * page's × button on each row. The publisher confirms via
+ * `window.confirm` before this fires so an accidental click
+ * can't drop weeks of work.
+ */
+export async function deleteTour(
+  id: string,
+  opts?: { fetchFn?: typeof fetch },
+): Promise<{ deleted_id: string } | { error: string }> {
+  const result = await publisherSend<{ deleted_id: string }>(
+    `/api/v1/publish/tours/${encodeURIComponent(id)}`,
+    undefined,
+    { method: 'DELETE', fetchFn: opts?.fetchFn },
+  )
+  if (!result.ok) {
+    return { error: errorLabel(result) }
+  }
+  return result.data
+}
+
 /** Surface a short string for the dock's autosave-status badge.
  *  The dock doesn't try to handle validation errors specifically —
  *  the JSON-editor validation in `dock.ts` should keep them out of

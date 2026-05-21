@@ -10,7 +10,7 @@
 
 import { describe, expect, it } from 'vitest'
 import { onRequestGet as toursList, onRequestPost } from './tours'
-import { onRequestGet as tourGet, onRequestPut as tourPut } from './tours/[id]'
+import { onRequestDelete as tourDelete, onRequestGet as tourGet, onRequestPut as tourPut } from './tours/[id]'
 import { onRequestPost as tourPreview } from './tours/[id]/preview'
 import { asD1, makeKV, seedFixtures } from '../_lib/test-helpers'
 import type { PublisherRow } from '../_lib/publisher-store'
@@ -248,5 +248,66 @@ describe('GET /api/v1/publish/tours (tour/G)', () => {
       )
       expect(res.status, `limit=${bad}`).toBe(400)
     }
+  })
+})
+
+describe('DELETE /api/v1/publish/tours/{id} (tour/G)', () => {
+  it('removes the row + drops the row from subsequent list reads', async () => {
+    const { env, sqlite } = setupEnv()
+    // Create a tour to delete.
+    const created = await onRequestPost(
+      ctx({
+        env,
+        method: 'POST',
+        body: { title: 'To delete', tour_json_ref: 'r2:tours/seed.json' },
+      }),
+    )
+    const id = (await readJson<{ tour: { id: string } }>(created)).tour.id
+    const res = await tourDelete(
+      ctx<'id'>({ env, method: 'DELETE', params: { id } }),
+    )
+    expect(res.status).toBe(200)
+    const body = await readJson<{ deleted_id: string }>(res)
+    expect(body.deleted_id).toBe(id)
+    // Row is gone from D1.
+    const row = sqlite
+      .prepare('SELECT id FROM tours WHERE id = ?')
+      .get(id)
+    expect(row).toBeUndefined()
+  })
+
+  it('returns 404 for an unknown id', async () => {
+    const { env } = setupEnv()
+    const res = await tourDelete(
+      ctx<'id'>({
+        env,
+        method: 'DELETE',
+        params: { id: '01HXAAAAAAAAAAAAAAAAAAAAAA' },
+      }),
+    )
+    expect(res.status).toBe(404)
+  })
+
+  it('succeeds when CATALOG_R2 is unbound (best-effort blob delete)', async () => {
+    // No R2 binding — the row should still be deleted from D1
+    // and the response should be 200. Orphaned blobs are
+    // harmless until a cleanup job runs.
+    const { env, sqlite } = setupEnv()
+    delete (env as { CATALOG_R2?: unknown }).CATALOG_R2
+    const created = await onRequestPost(
+      ctx({
+        env,
+        method: 'POST',
+        body: { title: 'No-R2 delete', tour_json_ref: 'r2:tours/seed.json' },
+      }),
+    )
+    const id = (await readJson<{ tour: { id: string } }>(created)).tour.id
+    const res = await tourDelete(
+      ctx<'id'>({ env, method: 'DELETE', params: { id } }),
+    )
+    expect(res.status).toBe(200)
+    expect(
+      sqlite.prepare('SELECT id FROM tours WHERE id = ?').get(id),
+    ).toBeUndefined()
   })
 })

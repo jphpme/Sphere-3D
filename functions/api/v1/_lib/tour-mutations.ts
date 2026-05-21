@@ -380,6 +380,53 @@ export async function publishTour(
   return { ok: true, tour: updated!, publishId }
 }
 
+/**
+ * Phase 3pt/G — hard-delete a tour. Removes the D1 row and
+ * best-effort deletes the draft R2 blob. Published immutable
+ * snapshots under `tours/{id}/published/{publish_id}.json` are
+ * NOT removed — if any federation subscriber holds the
+ * `tour_json_ref` URL it should keep resolving until the peer
+ * notices the parent row is gone and prunes its cache. Once
+ * Phase 4 federation lands a soft-retract gesture can replace
+ * this; for v1 the publisher's intent ("clean up my drafts")
+ * is what matters.
+ *
+ * Visibility gating goes through `getTourForPublisher` so a
+ * community publisher can only delete their own; staff /
+ * admin / service tokens can delete anything.
+ */
+export async function deleteTour(
+  env: CatalogEnv,
+  publisher: PublisherRow,
+  id: string,
+): Promise<
+  | { ok: true; deleted_id: string }
+  | { ok: false; status: number; error: string; message: string }
+> {
+  const row = await getTourForPublisher(env.CATALOG_DB!, publisher, id)
+  if (!row) {
+    return { ok: false, status: 404, error: 'not_found', message: `Tour ${id} not found.` }
+  }
+  await env.CATALOG_DB!
+    .prepare('DELETE FROM tours WHERE id = ?')
+    .bind(id)
+    .run()
+  // Best-effort blob delete. A missing blob (cold-start row that
+  // never autosaved) is fine; a binding-missing deployment is
+  // also fine — the row is gone, and orphaned blobs are
+  // harmless until a future cleanup job runs.
+  if (env.CATALOG_R2) {
+    try {
+      await env.CATALOG_R2.delete(tourDraftR2Key(id))
+    } catch {
+      // Don't fail the delete because R2 hiccuped — the
+      // canonical "tour exists" state lives in D1, which is
+      // already cleared.
+    }
+  }
+  return { ok: true, deleted_id: id }
+}
+
 export async function getTourForPublisher(
   db: D1Database,
   publisher: PublisherRow,
