@@ -13,18 +13,22 @@
  */
 
 import { t } from '../../../i18n'
+import { createDraftTour } from '../../tourAuthoring/api'
 
 export interface ToursPageOptions {
   /** Host-supplied navigator. Tests stub this. Defaults to
    *  `window.location.assign` so the SPA-mode entry actually
    *  leaves the publisher portal. */
   navigate?: (url: string) => void
+  /** Override the POST /draft API call — tests inject a stub. */
+  createDraft?: typeof createDraftTour
 }
 
 export function renderToursPage(content: HTMLElement, options: ToursPageOptions = {}): void {
   const navigate = options.navigate ?? ((url: string) => {
     window.location.assign(url)
   })
+  const createDraft = options.createDraft ?? createDraftTour
 
   const shell = document.createElement('main')
   shell.className = 'publisher-shell'
@@ -42,10 +46,31 @@ export function renderToursPage(content: HTMLElement, options: ToursPageOptions 
   newBtn.setAttribute('aria-label', t('publisher.tours.new.aria'))
   newBtn.textContent = t('publisher.tours.new')
   newBtn.addEventListener('click', () => {
-    // `?tourEdit=new` is the sentinel the SPA-side dock checks.
-    // No backend round-trip in tour/A — autosave + the
-    // create-row path land in tour/E.
-    navigate('/?tourEdit=new')
+    // Phase 3pt/E — POST /publish/tours/draft mints a fresh
+    // row + writes an empty TourFile blob, then we navigate to
+    // the SPA with the new id. Disable the button while in-
+    // flight so a double-click can't create two drafts.
+    newBtn.disabled = true
+    newBtn.textContent = t('publisher.tours.new.creating')
+    void createDraft().then(result => {
+      if ('error' in result) {
+        // Re-enable so the user can retry; surface the error
+        // inline below the button.
+        newBtn.disabled = false
+        newBtn.textContent = t('publisher.tours.new')
+        let err = newBtn.parentElement?.querySelector(
+          '.publisher-tour-new-error',
+        ) as HTMLElement | null
+        if (!err) {
+          err = document.createElement('p')
+          err.className = 'publisher-tour-new-error'
+          newBtn.parentElement?.appendChild(err)
+        }
+        err.textContent = result.error
+        return
+      }
+      navigate(`/?tourEdit=${encodeURIComponent(result.tour.id)}`)
+    })
   })
   header.appendChild(newBtn)
   shell.appendChild(header)

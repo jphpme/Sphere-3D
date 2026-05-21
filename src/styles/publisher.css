@@ -1098,3 +1098,9 @@
   font-size: 0.8rem;
   margin-block-start: 0.5rem;
 }
+
+.publisher-tour-new-error {
+  color: #ff8a8a;
+  font-size: 0.75rem;
+  margin-block-start: 0.5rem;
+}

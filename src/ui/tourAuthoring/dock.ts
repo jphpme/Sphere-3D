@@ -36,6 +36,8 @@ import {
   removeTaskAt,
   updateTaskAt,
 } from './state'
+import { fetchTourJson } from './api'
+import { createAutosaveManager, type AutosaveStatus } from './autosave'
 
 /**
  * Host-supplied callbacks. The dock only needs:
@@ -81,20 +83,61 @@ export function mountTourAuthoringDock(
 ): TourAuthoringHandle {
   let state = createEmptyState(tourId)
   // Phase 3pt/D — index of the task currently expanded for inline
-  // JSON edit; -1 when no row is being edited. Single-row at a
-  // time keeps the UI obvious (no juggling unsaved drafts across
-  // rows) and mirrors how the SOS authoring tool surfaces task
-  // edits.
+  // JSON edit; -1 when no row is being edited.
   let editingIndex = -1
-  // Drag source index — tracked across `dragstart`/`drop` events
-  // so the drop handler can compute the move without parsing the
-  // DataTransfer payload (which can be flaky cross-browser).
+  // Drag source index — tracked across `dragstart`/`drop` events.
   let draggingIndex = -1
+  // Phase 3pt/E — autosave status surfaced in the dock header.
+  let autosaveStatus: AutosaveStatus = 'idle'
+  let autosaveError = ''
   const root = document.createElement('div')
   root.className = 'tour-authoring-dock'
   root.setAttribute('aria-label', t('tour.dock.aria'))
   root.setAttribute('role', 'region')
   document.body.appendChild(root)
+
+  // Phase 3pt/E — autosave manager. Promotes a `'new'` sentinel
+  // to a server-issued ULID after the first save; the dock's
+  // `getTourId` getter reads through so callers stay current.
+  const autosave = createAutosaveManager(tourId, {
+    onStatusChange: (status, error) => {
+      autosaveStatus = status
+      autosaveError = error ?? ''
+      render()
+    },
+    onTourIdResolved: newId => {
+      state = { ...state, tourId: newId }
+      // Rewrite the URL so a reload reopens the same draft.
+      // History.replaceState keeps the back button clean (no
+      // intermediate `?tourEdit=new` entry).
+      const url = new URL(window.location.href)
+      url.searchParams.set('tourEdit', newId)
+      window.history.replaceState({}, '', url.toString())
+    },
+  })
+
+  function requestAutosave(): void {
+    autosave.requestSave({ tourTasks: state.tasks })
+  }
+
+  // Phase 3pt/E — re-opening an existing tour. Fetch the
+  // persisted TourFile and seed state before the first render.
+  if (tourId !== 'new') {
+    void fetchTourJson(tourId).then(result => {
+      if ('error' in result) {
+        autosaveStatus = 'error'
+        autosaveError = result.error
+        render()
+        return
+      }
+      const tasks = Array.isArray(result.tourFile?.tourTasks)
+        ? result.tourFile.tourTasks
+        : []
+      state = { ...state, tasks }
+      autosaveStatus = 'saved'
+      render()
+    })
+  }
 
   function render(): void {
     // Capture buttons grouped by intent — the simple stack at the
@@ -106,6 +149,10 @@ export function mountTourAuthoringDock(
     root.innerHTML = `
       <div class="tour-authoring-dock-header">
         <span class="tour-authoring-dock-title">${escapeHtml(t('tour.dock.title'))}</span>
+        <span class="tour-authoring-dock-status tour-authoring-dock-status-${autosaveStatus}"
+              role="status"
+              aria-live="polite"
+              title="${escapeAttr(autosaveError || autosaveStatusLabel(autosaveStatus))}">${escapeHtml(autosaveStatusLabel(autosaveStatus))}</span>
         <button type="button" class="tour-authoring-dock-close"
                 aria-label="${escapeAttr(t('tour.dock.discard.aria'))}">×</button>
       </div>
@@ -208,6 +255,7 @@ export function mountTourAuthoringDock(
   function pushCaptured(task: TourTaskDef | null): void {
     if (!task) return
     state = appendTask(state, task)
+    requestAutosave()
     render()
   }
 
@@ -281,6 +329,7 @@ export function mountTourAuthoringDock(
             state = removeTaskAt(state, idx)
             if (editingIndex === idx) editingIndex = -1
             else if (editingIndex > idx) editingIndex -= 1
+            requestAutosave()
             render()
           }
         })
@@ -318,6 +367,7 @@ export function mountTourAuthoringDock(
         if (parsed.ok) {
           state = updateTaskAt(state, idx, parsed.task)
           editingIndex = -1
+          requestAutosave()
           render()
         } else {
           // Inline error keeps the user in the editor with their
@@ -365,6 +415,7 @@ export function mountTourAuthoringDock(
           } else if (editingIndex >= 0) {
             editingIndex = -1
           }
+          requestAutosave()
         }
         draggingIndex = -1
         render()
@@ -381,8 +432,30 @@ export function mountTourAuthoringDock(
   render()
   return {
     dispose() {
+      // Flush pending writes before tearing down — the host
+      // typically calls dispose on Discard or navigation. We
+      // fire-and-forget; a network failure here can't be
+      // surfaced through the UI since we're tearing it down.
+      void autosave.flush()
       root.remove()
     },
+  }
+}
+
+/** Phase 3pt/E — render the autosave status badge text. The
+ *  badge has its own CSS class per status so a colour change
+ *  signals state without the user having to read the label.
+ *  Error tooltip carries the server's message verbatim. */
+function autosaveStatusLabel(status: AutosaveStatus): string {
+  switch (status) {
+    case 'saving':
+      return t('tour.dock.autosave.saving')
+    case 'saved':
+      return t('tour.dock.autosave.saved')
+    case 'error':
+      return t('tour.dock.autosave.error')
+    case 'idle':
+      return t('tour.dock.autosave.idle')
   }
 }
 
