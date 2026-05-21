@@ -66,14 +66,56 @@ correctness, not net-new feature work:
 | Credits / source / data-added | All present in `EnrichedMetadata` (`datasetDeveloper`, `visDeveloper`, `dateAdded`, `catalogUrl`). | Not rendered in the info panel. |
 | Thumbnails | `Dataset.thumbnailLink` shown in browse cards. | Not shown or downloadable in the info panel. |
 | Download as zip | Desktop has [`downloadService.ts`](../src/services/downloadService.ts) (Tauri-only). | Web has no equivalent. |
-| All SOS datasets | Catalog points to `metadata.sosexplorer.gov/dataset.json` (one snapshot). | Federation work is gated on `CATALOG_BACKEND_PLAN.md`. |
+| All SOS datasets | Catalog points to `metadata.sosexplorer.gov/dataset.json` (one snapshot — 204 datasets, 176 visible). | See §1.4 — the enriched metadata file in the repo already covers 415 additional datasets; surfacing them is UI work, not federation. |
 
 This matters for sequencing: items in the "already exists,
 expose it better" column belong in an early, low-risk phase;
 items requiring a new subsystem (catalog routing, web downloads,
 shader rewrite) belong later.
 
-### 1.3 Non-goals
+### 1.4 Data audit
+
+Cross-referencing the live catalog against the enriched
+metadata file in the repo gives sharper guidance on
+sequencing — especially for Beth's "all SOS datasets" request
+(#10) and the filter inventory (#15).
+
+**Sources audited:**
+
+- Live catalog: `https://s3.dualstack.us-east-1.amazonaws.com/metadata.sosexplorer.gov/dataset.json` (the source `dataService.ts` fetches today).
+- Enriched metadata: [`public/assets/sos_dataset_metadata.json`](../public/assets/sos_dataset_metadata.json), 1.8 MB, merged client-side.
+- Authoritative catalog: <https://sos.noaa.gov/catalog/datasets/> (referenced; sandbox network policy blocked direct fetch — the local files are a workable proxy).
+
+**Counts:**
+
+- Live catalog: **204 datasets, 176 visible, 28 hidden** (the SOSx subset TerraViz exposes today).
+- Enriched metadata: **520 datasets** total. `available_for` field marks **499 SOS** and **176 Explorer** (overlapping sets — 415 of the 520 are not in the live catalog at all).
+- Years covered: 2010–2025; ~149 of 520 added in 2010, tapering to ~10/yr in recent years.
+
+**Filter taxonomy (live catalog `tags` field — 11 distinct):**
+
+| Tag | Count | Tag | Count |
+|---|---|---|---|
+| Water | 80 | Real-Time | 10 |
+| People | 63 | Tours | 8 |
+| Air | 56 | Snow and Ice | 7 |
+| Land | 39 | Layers | 1 |
+| Movies | 35 | Extras | 1 |
+| Space | 34 | | |
+
+This is the filter chip set Phase 4 should ship — it matches
+what the live catalog already labels datasets with. The
+single-count tags (Layers, Extras) are edge cases and can be
+de-emphasised or rolled into a default chip set.
+
+**Asset availability for SOS-only datasets:** every entry in
+the enriched file has a `movie_preview` URL; 501 of 520 also
+have `ftp_download`. Surfacing the 415 SOS-only datasets is
+therefore feasible without backend changes — the asset
+quality is lower than the SOSx subset's Vimeo HLS streams,
+which is the honest tradeoff to surface in the UI.
+
+### 1.5 Non-goals
 
 To keep the branch scoped, the following are explicitly **out**:
 
@@ -81,7 +123,8 @@ To keep the branch scoped, the following are explicitly **out**:
   are a sibling concept, not a tour extension.
 - Backend work on the catalog node — this plan assumes the
   current `dataService.ts` data source is fixed for now.
-  "All SOS datasets" is deferred to the federation track.
+  Federation-quality high-fidelity assets for the 415 SOS-only
+  datasets remain on the federation track (§9.1).
 - VR / AR changes — the doc is explicit that catalog work is
   the scope.
 - Localisation of net-new strings is **not** a non-goal — every
@@ -106,7 +149,7 @@ feasibility verdict and the phase it lands in.
 | 7 | Frame-by-frame scrolling with labels matching (Beth) | **Yes — bug fix** | 3 | Real bug. `inferDisplayInterval` snaps to year boundaries; labels advance by month. Needs a frame-aware cadence. |
 | 8 | Closed captions visible (Beth) | **Yes** | 3 | Loader exists; CC button visibility and SRT-presence indicator missing. |
 | 9 | Related datasets at bottom of description (Beth) | **Yes** | 2 | Exact-title matches today; upgrade to category/keyword-based recommendation. |
-| 10 | All SOS datasets, not just SOSx (Beth) | **Deferred** | — | Blocked on `CATALOG_BACKEND_PLAN.md`. Tracked there; mention in this plan only for visibility. |
+| 10 | All SOS datasets, not just SOSx (Beth) | **Yes — partial** | 4 | Reframed after data audit (§1.4). 415 SOS-only datasets already live in the repo's enriched metadata file with `movie_preview` URLs — surfacing them is UI work, not federation work. High-fidelity assets remain federation-track. |
 | 11 | Display full description + notable features (Beth) | **Yes** | 2 | Truncated at 600 chars on a sentence boundary. Add expand/collapse + scrollable variant. |
 | 12 | Display credits and source (Beth) | **Yes** | 2 | Fields exist in `EnrichedMetadata`; just render them. |
 | 13 | Data Added (Beth) | **Yes** | 2 | `enriched.dateAdded`, already in metadata; render. |
@@ -115,9 +158,10 @@ feasibility verdict and the phase it lands in.
 | 16 | Catalog ↔ sphere tab toggle (Hilary) | **Yes** | 1 | Same surface as #2. |
 | 17 | Fix time and frame issue (Hilary) | **Yes — same as #7** | 3 | Duplicate of #7; tracked together. |
 
-**Counts.** 14 feasible and in-plan; 1 partial (zip downloads);
-1 deferred to the catalog backend (all SOS); 1 duplicate of
-another. That's 16 unique tracked items across 6 phases.
+**Counts.** 15 feasible and in-plan; 2 partial (zip downloads,
+all SOS — preview-quality only until federation lands); 1
+duplicate of another (#17 = #7). That's 16 unique tracked
+items across 6 phases.
 
 ---
 
@@ -373,29 +417,26 @@ The infrastructure exists. The user-visible gap is:
 
 **Theme.** Reach parity with the SOS catalog's filter surface.
 
-**Estimated size.** ~1–2 weeks, gated on requirements
-clarification.
+**Estimated size.** ~1–2 weeks. Also delivers the
+"all SOS datasets" widening (#10) — see §6.4.
 
-### 6.1 Open question first
+### 6.1 Filter inventory
 
-Beth's request — "All the filters currently in the catalog" —
-is unbounded until we have the SOS catalog filter inventory.
-**Action item for §10:** ask Beth to enumerate which filters
-matter, ideally in priority order.
+The data audit in §1.4 identified the 11 tags the live SOS
+catalog already labels datasets with. That's the v1 filter
+set; no further inventory work is needed.
 
-Based on a reading of the current SOS catalog UI (not a primary
-source — verify with Beth), the candidate filter list is:
-
-| Filter | Driving field | Effort |
-|---|---|---|
-| Category | `tags`, `enriched.categories` | Already exists — multi-select upgrade only |
-| Theme / subject | `enriched.categories` (subset) | Medium — needs a vocabulary |
-| Date added | `enriched.dateAdded` | Easy — date range slider |
-| Time range | `startTime`, `endTime` | Medium — temporal coverage filter |
-| Region / bounding box | `boundingBox` | Hard — needs map-based picker; defer |
-| Format | `format` (video / image / hls) | Easy — chip filter |
-| Has closed captions | `closedCaptionLink` non-empty | Easy — boolean toggle |
-| Has tour | `runTourOnLoad` non-empty | Easy — boolean toggle |
+| Filter | Driving field | v1? | Effort | Notes |
+|---|---|---|---|---|
+| Category — multi-select chips | `tags` | **Yes** | Low | 11 chips: Water (80), People (63), Air (56), Land (39), Movies (35), Space (34), Real-Time (10), Tours (8), Snow and Ice (7), Layers (1), Extras (1). Upgrade today's single-select to AND-across-chips. |
+| Format | `format` (video/mp4, image/jpg, tour/json…) | **Yes** | Low | Coarse buckets: Video, Image, Tour, Other. |
+| Date added | `enriched.date_added` (year) | **Yes** | Low | Year-range slider, 2010–current. |
+| Has closed captions | `closedCaptionLink` non-empty | **Yes** | Low | Boolean toggle — addresses Beth's CC request indirectly. |
+| Has tour | `runTourOnLoad` non-empty | **Yes** | Low | Boolean toggle — surfaces the existing 11 tour-equipped datasets. |
+| SOS source quality | `available_for` (`SOS` vs `Explorer`) | **Yes** | Low | Boolean toggle: "include lower-fidelity SOS-only datasets". Off by default. See §6.4. |
+| Time range (data coverage) | `startTime`, `endTime` | Stretch | Medium | Temporal coverage filter — only if the chip filters feel sparse. |
+| Developer / organisation | `enriched.dataset_developer.name` | Stretch | Medium | 78 distinct developers — likely too granular as chips; defer or expose as search prefix. |
+| Region / bounding box | `boundingBox` | **No** | High | Map picker; conflicts with catalog-mode hidden globe. Phase 6 or later. |
 
 A region/bounding-box filter is the most user-visible win but
 needs the most UI work (a map picker that doesn't conflict
@@ -425,24 +466,63 @@ links are shareable. Encode as compact query params:
 `history.replaceState` (not `pushState`) on filter changes —
 we don't want every keystroke clogging the back button.
 
-### 6.4 Files touched
+### 6.4 Widening to the full SOS catalog (request #10)
+
+Beth's request to surface all SOS datasets — not just the
+SOSx subset — is partly tractable here, not deferred. The data
+audit (§1.4) found 415 SOS-only datasets in the repo's enriched
+metadata file, each with a `movie_preview` URL.
+
+**Approach.**
+
+1. Change `dataService.ts` to use the enriched file as the
+   *primary* catalog source rather than a sidecar — merging
+   the live 204-entry SOSx data on top for high-fidelity
+   `dataLink` URLs where available.
+2. For SOS-only datasets, synthesise a `Dataset` record from
+   the enriched entry: title, description, keywords (as tags),
+   `dataset_developer` (as organisation), `movie_preview` (as
+   `dataLink`), `thumbnail_image` (as `thumbnailLink`).
+3. Mark synthesised records with an `available_for: SOS`
+   flag (mapped through to `Dataset`), and surface this in
+   the UI as a subtle "lower-fidelity preview" badge so
+   users understand the quality difference.
+4. Default the chip filter "SOS source quality" toggle to
+   show *only* `Explorer` (i.e., today's 204 SOSx subset) so
+   existing users see no regression; flipping the toggle
+   reveals all 520.
+
+**Honest tradeoff.** SOS-only datasets play back at preview
+quality, not the same Vimeo HLS adaptive bitrate the SOSx
+subset enjoys. The federation track (§9.1) is the path to
+first-class assets — this phase merely surfaces the
+existence and metadata of the long tail.
+
+### 6.5 Files touched
 
 | File | Change |
 |---|---|
 | `src/ui/browseUI.ts` | Multi-select chips; new filter rail. |
 | `src/services/datasetFilter.ts` | **New.** Pure predicate composition module. Drives both UI and prefixed-search. |
+| `src/services/dataService.ts` | Restructure merge so enriched file is the union, live catalog is the high-fidelity overlay. New synthesis path for SOS-only entries. |
 | `src/services/deepLinkService.ts` | Encode/decode filter state to URL. |
-| `src/styles/browse.css` | Filter rail layout. |
-| `locales/en.json` | Filter labels. |
+| `src/styles/browse.css` | Filter rail layout; SOS-only badge styling. |
+| `src/types/index.ts` | Add `availableFor: 'SOS' \| 'Explorer' \| 'Both'` field to `Dataset`. |
+| `locales/en.json` | Filter labels; SOS-only badge tooltip. |
 
-### 6.5 Risks
+### 6.6 Risks
 
-- **Filter inventory bloat.** Without a clear priority list,
-  this phase could expand indefinitely. Cap at the top 5
-  filters Beth confirms.
-- **Catalog size.** ~300 datasets means filtering is
-  effectively instant. If federation lands and the catalog
-  grows to 10k+, indexing matters; out of scope here.
+- **Asset-link rot.** `movie_preview` URLs in the enriched
+  file point at CloudFront origins that may 404 individually.
+  Need a 404 fallback ("Preview unavailable") rather than a
+  hard error.
+- **Bundle size.** The 1.8 MB enriched file is already
+  loaded today as a sidecar. Promoting it to primary doesn't
+  grow the bundle but does affect cold-start time — measure
+  before/after.
+- **Catalog size.** Today's 204 datasets means filtering is
+  effectively instant. The new 520-entry catalog is still
+  small enough for client-side filtering with no indexing.
 
 ---
 
@@ -657,21 +737,18 @@ Zip downloads:
 
 ## 9. Deferred / dependent
 
-### 9.1 "All SOS datasets" (request #10)
+### 9.1 High-fidelity assets for SOS-only datasets
 
-Tracked under `docs/CATALOG_BACKEND_PLAN.md`. The current
-data source is a single S3 snapshot from
-`metadata.sosexplorer.gov`. Federation work — peer subscription,
-catalog node, unified search — lives in the catalog backend
-plan, **not** in this branch. This plan notes the request for
-visibility but takes no action.
+The 415 SOS-only datasets surfaced in Phase 4 (§6.4) play back
+at `movie_preview` quality, not the Vimeo HLS adaptive bitrate
+the SOSx subset enjoys. Upgrading those to first-class assets
+remains gated on the federation track in
+[`docs/CATALOG_BACKEND_PLAN.md`](CATALOG_BACKEND_PLAN.md) and
+[`docs/architecture/federation-scoping.md`](architecture/federation-scoping.md).
 
-If Beth's priority is high enough to advance ahead of the
-backend track, a tactical interim is possible: include
-additional dataset snapshots as static JSON in the deployment
-and merge them client-side at fetch time. This is an
-escape valve — not the durable answer — and should only be
-pursued if the federation track slips materially.
+Phase 4 surfaces the metadata; the catalog backend plan
+surfaces the data. This plan owns the former and explicitly
+defers the latter.
 
 ### 9.2 Region / bounding-box filter
 
@@ -704,10 +781,16 @@ sequencing and avoid mid-phase rework.
    an opt-in entry, and make the SOS website link directly
    to `?catalog=true` for catalog visitors.
 
-2. **Filter inventory (Beth).** Which specific filters from
-   the SOS catalog need to be in v1? "Most used" was
-   mentioned but not enumerated. A ranked list of 5–8 would
-   shape Phase 4 substantially.
+2. **Filter inventory (Beth).** **Partially resolved by the
+   data audit (§1.4 / §6.1).** The 11 tags the live catalog
+   already uses (Water, People, Air, Land, Movies, Space,
+   Real-Time, Tours, Snow and Ice, Layers, Extras) form the
+   v1 chip set. Outstanding question: does Beth want any
+   *additional* filters beyond chip-tags + format + date-added
+   + boolean toggles (captions / tour / source quality)? The
+   live <https://sos.noaa.gov/catalog/datasets/> page is the
+   reference. Region/boundary picking is deferred to a later
+   phase per §9.2.
 
 3. **Frame/label bug datasets (Beth, Hilary).** Specific
    dataset IDs that exhibit the time/frame issue would let
@@ -740,17 +823,19 @@ sequencing and avoid mid-phase rework.
 | 1 | Catalog-first UX | 1–1.5 weeks | Open question #1 |
 | 2 | Info panel completeness | 3–5 days | none |
 | 3 | Playback fidelity | ~1 week | Open question #3 |
-| 4 | Filters & search | 1–2 weeks | Open question #2 |
+| 4 | Filters & search + all-SOS widening | 1–2 weeks | none (closed by §1.4 audit) |
 | 5 | UI polish & shader | ~2 weeks | Open question #4, #6 |
 | 6 | Playlists + zip downloads | ~3–4 weeks | Open question #5 |
-| — | All SOS datasets | — | Blocked on `CATALOG_BACKEND_PLAN.md` |
+| — | High-fidelity assets for SOS-only datasets | — | Federation track (`CATALOG_BACKEND_PLAN.md`) |
 
 Phases 1, 2, and 3 are the highest leverage and can land in
 roughly three weeks combined. They address every request from
-Beth and Hilary except the filters work and the "all SOS"
-gap, and they address Adrian's catalog-mode and fullscreen
-asks. Phases 4–6 then layer on; each is independently
-shippable.
+Beth and Hilary except the filters work, and they address
+Adrian's catalog-mode and fullscreen asks. Phase 4 then
+delivers both the filter surface and the "all SOS datasets"
+widening together (at preview quality, with the federation
+track owning the high-fidelity upgrade). Phases 5–6 layer on;
+each is independently shippable.
 
 ---
 
