@@ -64,14 +64,14 @@ correctness, not net-new feature work:
 | Credits / source / data-added | All present in `EnrichedMetadata` (`datasetDeveloper`, `visDeveloper`, `dateAdded`, `catalogUrl`). | Not rendered in the info panel. |
 | Thumbnails | `Dataset.thumbnailLink` shown in browse cards. | Not shown or downloadable in the info panel. |
 | Download as zip | Desktop has [`downloadService.ts`](../src/services/downloadService.ts) (Tauri-only). | Web has no equivalent. |
-| All SOS datasets | Catalog points to `metadata.sosexplorer.gov/dataset.json` (one snapshot — 204 datasets, 176 visible). | See §1.4 — the enriched metadata file in the repo already covers 415 additional datasets; surfacing them is UI work, not federation. |
+| All SOS datasets | Catalog points to `metadata.sosexplorer.gov/dataset.json` (one snapshot — 204 datasets, 176 visible). | See §1.3 — the enriched metadata file in the repo already covers 415 additional datasets; surfacing them is UI work, not federation. |
 
 This matters for sequencing: items in the "already exists,
 expose it better" column belong in an early, low-risk phase;
 items requiring a new subsystem (catalog routing, web downloads,
 shader rewrite) belong later.
 
-### 1.4 Data audit
+### 1.3 Data audit
 
 Cross-referencing the live catalog against the enriched
 metadata file in the repo gives sharper guidance on
@@ -124,7 +124,7 @@ Disciplinary Core Ideas. None of these terms appear in
 requires importing additional metadata from the SOS catalog
 backend (likely a WordPress export, a direct database dump, or
 a scrape of the dataset detail pages — open question for the
-SOS team). §1.6 covers how this interacts with federation.
+SOS team). §1.4 covers how this interacts with federation.
 
 The screenshot also confirms one design point: **the SOS
 catalog already has a "View My Playlist" button.** Adrian's
@@ -132,7 +132,7 @@ playlist request (§8.1) is therefore not a net-new feature
 for SOS users — it's parity with existing functionality,
 which raises the bar slightly on what "good" looks like.
 
-### 1.6 Federation forward-compatibility for facets
+### 1.4 Federation forward-compatibility for facets
 
 The user's question on review — "in a federated catalog
 environment how we might want to implement custom search
@@ -196,7 +196,7 @@ alignment, query degradation — should be added to
 `docs/architecture/federation-scoping.md` §8 as a new resolved
 decision before Phase 4 federation work begins.
 
-### 1.7 Non-goals
+### 1.5 Non-goals
 
 To keep the branch scoped, the following are explicitly **out**:
 
@@ -230,7 +230,7 @@ feasibility verdict and the phase it lands in.
 | 7 | Frame-by-frame scrolling with labels matching (Beth) | **Yes — bug fix** | 3 | Real bug. `inferDisplayInterval` snaps to year boundaries; labels advance by month. Needs a frame-aware cadence. |
 | 8 | Closed captions visible (Beth) | **Yes** | 3 | Loader exists; CC button visibility and SRT-presence indicator missing. |
 | 9 | Related datasets at bottom of description (Beth) | **Yes** | 2 | Exact-title matches today; upgrade to category/keyword-based recommendation. |
-| 10 | All SOS datasets, not just SOSx (Beth) | **Yes — partial** | 4 | Reframed after data audit (§1.4). 415 SOS-only datasets already live in the repo's enriched metadata file with `movie_preview` URLs — surfacing them is UI work, not federation work. High-fidelity assets remain federation-track. |
+| 10 | All SOS datasets, not just SOSx (Beth) | **Yes — partial** | 4 | Reframed after data audit (§1.3). 415 SOS-only datasets already live in the repo's enriched metadata file with `movie_preview` URLs — surfacing them is UI work, not federation work. High-fidelity assets remain federation-track. |
 | 11 | Display full description + notable features (Beth) | **Yes** | 2 | Truncated at 600 chars on a sentence boundary. Add expand/collapse + scrollable variant. |
 | 12 | Display credits and source (Beth) | **Yes** | 2 | Fields exist in `EnrichedMetadata`; just render them. |
 | 13 | Data Added (Beth) | **Yes** | 2 | `enriched.dateAdded`, already in metadata; render. |
@@ -524,7 +524,7 @@ availability — not a flat tag cloud. This mirrors the GSL
 Depot Explorer pattern (Observation Type / Model / Domain /
 Phenomenon / Instrument / Project shown as distinct,
 color-coded facet sections) and matches the federation
-`facet_schema` shape sketched in §1.6. Each group also seeds
+`facet_schema` shape sketched in §1.4. Each group also seeds
 one node cluster in the optional Graph view (§6.7); colour
 per group is single-sourced from
 [`tokens/global.json`](../tokens/global.json) so chips, graph
@@ -562,7 +562,7 @@ is Low unless flagged otherwise inline.
 | Has tour | `runTourOnLoad` non-empty | Boolean toggle — surfaces the existing 11 tour-equipped datasets. |
 | SOS source quality | `available_for` (`SOS` vs `Explorer`) | Boolean toggle: "include lower-fidelity SOS-only datasets". Off by default. See §6.4. |
 
-**SOS-parity (blocked on additional metadata — see §1.6).** All
+**SOS-parity (blocked on additional metadata — see §1.4).** All
 land in a new *Education & curation* group once the SOS team
 provides the metadata.
 
@@ -609,11 +609,11 @@ surface from the globe.
 
 **Implementation note — federation forward-compatibility.**
 The `datasetFilter.ts` predicate engine is designed against a
-generic `Record<facetName, FacetPredicate>` shape (§1.6).
+generic `Record<facetName, FacetPredicate>` shape (§1.4).
 Baseline facets are hardcoded keys in v1; SOS-parity facets
 slot in by name once metadata lands; federated peer facets
 become a runtime-discovered set once the federation
-`facet_schema` declaration in §1.6 is specified and shipped.
+`facet_schema` declaration in §1.4 is specified and shipped.
 No predicate-engine rewrite required at any tier transition.
 
 ### 6.2 Search semantics
@@ -643,7 +643,7 @@ we don't want every keystroke clogging the back button.
 
 Beth's request to surface all SOS datasets — not just the
 SOSx subset — is partly tractable here, not deferred. The data
-audit (§1.4) found 415 SOS-only datasets in the repo's enriched
+audit (§1.3) found 415 SOS-only datasets in the repo's enriched
 metadata file, each with a `movie_preview` URL.
 
 **Approach.**
@@ -772,7 +772,7 @@ default-card-grid path pays nothing.
 availability / Education & curation). Nodes inherit the hue
 of their parent facet; dataset nodes are neutral grey. The
 palette lives in `tokens/global.json` so chips, graph nodes,
-and federated peer facets (§1.6) share one source of truth.
+and federated peer facets (§1.4) share one source of truth.
 
 **Mobile.** Falls back to the card grid below the existing
 ≤ 768px breakpoint. A 6-inch viewport with a force-directed
@@ -814,7 +814,7 @@ panning session doesn't flood the queue.
   users continue to use the card grid (which already meets
   the existing a11y baseline).
 - **Federation extensibility.** When peer-advertised facets
-  surface (§1.6), the palette must extend dynamically. Keep
+  surface (§1.4), the palette must extend dynamically. Keep
   the colour-token map keyed by facet name, not hardcoded to
   the v1 group set.
 - **Graph thrash on filter change.** Re-laying out a
@@ -837,7 +837,7 @@ system.
 
 **Why a third view.** Cards answer *what's in the catalog*;
 Graph answers *what relates to what*; Timeline answers *when*.
-TerraViz's `startTime` / `endTime` audit (§1.4) confirms
+TerraViz's `startTime` / `endTime` audit (§1.3) confirms
 populated coverage from year 0 through current for climate
 reconstructions and into the future for forecast datasets —
 the temporal span is a genuine axis worth its own surface.
@@ -961,7 +961,7 @@ orthogonal axes; together they form a complete browsing
 toolkit. The motivating context is forward-looking — most of
 today's SOSx catalog is global, but **non-global data is the
 trajectory**: the 415 SOS-only datasets in the audit
-(§1.4) include regional model outputs and case studies;
+(§1.3) include regional model outputs and case studies;
 federation (§10.1) brings in regional partner datasets
 (Arctic-focused peers, CIMSS, regional reanalyses); and the
 catalog backend plan reserves space for non-global formats.
@@ -1061,7 +1061,7 @@ mobile.
 | `src/types/index.ts` | Add `geographicRegion?: BoundingBox` to the predicate state type. |
 | `locales/en.json` | View-mode label (`browse.viewMode.map`), tooltip strings, global-hide toggle label, footnote text. |
 
-**Federation forward-compat.** The §1.6 `facet_schema`
+**Federation forward-compat.** The §1.4 `facet_schema`
 declaration should add `type: 'bbox'` alongside enumerated /
 open-ended / range. A federated peer can then advertise the
 geographic region(s) it indexes — an Arctic-focused peer
@@ -1227,7 +1227,7 @@ session." That maps to localStorage (not actual cookies —
 cookies are the wrong tool here; clarifying with Adrian is
 trivial).
 
-**Important context** (§1.4 data audit): the SOS catalog
+**Important context** (§1.3 data audit): the SOS catalog
 already exposes a "View My Playlist" button. This is not a
 net-new TerraViz feature — it's a parity feature. Worth
 asking Adrian whether SOS's existing playlist behaviour
@@ -1401,7 +1401,7 @@ continue-watching paradigm, no account needed.
 **Privacy.** Visit memory is local-only — never sent
 server-side. Existing analytics covers aggregate visit
 signals; the per-user log is exclusively a client
-convenience. Document in §1.7 non-goals and in the Privacy
+convenience. Document in §1.5 non-goals and in the Privacy
 panel (`src/ui/privacyUI.ts`).
 
 **Files touched.**
@@ -1572,7 +1572,7 @@ sequencing and avoid mid-phase rework.
    to `?catalog=true` for catalog visitors.
 
 2. **Filter inventory (Beth).** **Mostly resolved by the
-   data audit + SOS filter-panel screenshot (§1.4 / §6.1).**
+   data audit + SOS filter-panel screenshot (§1.3 / §6.1).**
    Baseline filters ship Phase 4. The four-filter NGSS bundle
    plus Theme are real SOS-parity items but require metadata
    we don't have — see Open Question #7.
@@ -1608,7 +1608,7 @@ sequencing and avoid mid-phase rework.
    this, Phase 4 ships baseline filters but not full SOS
    parity.
 
-8. **Federation facet protocol (Eric / Zyra core).** §1.6
+8. **Federation facet protocol (Eric / Zyra core).** §1.4
    sketches three pieces — facet schema declaration in the
    well-known doc, vocabulary namespacing (`sos:*`, `ngss:*`,
    `local:*`), and federated query degradation. These belong
