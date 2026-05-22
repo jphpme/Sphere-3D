@@ -249,6 +249,7 @@
   "info.panel.aria": "Dataset information",
   "info.picker.aria": "Select dataset to view",
   "info.picker.label": "Showing info for",
+  "infoPanel.captionsAvailable": "Captions available",
   "infoPanel.catalogLink": "View in SOS catalog ↗",
   "infoPanel.dateAdded": "Added",
   "infoPanel.description.showLess": "Show less",

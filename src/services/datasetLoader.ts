@@ -284,11 +284,17 @@ export async function loadVideoDataset(
 
   // Infer display interval from time range + video duration.
   // Only the primary panel's load drives the shared playback state.
+  // Pass `period` and `frames.count` so the cadence matches the
+  // imagery rather than the ms-per-frame estimate — fixes the
+  // climate-dataset label-crawl bug (Plan §5.1).
   if (isPrimary) {
     if (dataset.startTime && dataset.endTime) {
       const start = new Date(dataset.startTime)
       const end = new Date(dataset.endTime)
-      playbackState.displayInterval = inferDisplayInterval(start, end, video.duration)
+      playbackState.displayInterval = inferDisplayInterval(start, end, video.duration, {
+        period: dataset.period,
+        frameCount: dataset.frames?.count,
+      })
       logger.info('[App] Inferred display interval:', playbackState.displayInterval)
     } else {
       playbackState.displayInterval = null
@@ -497,6 +503,17 @@ export function displayDatasetInfo(
       html += `<span class="info-keyword">${escapeHtml(kw)}</span>`
     })
     html += `</div>`
+  }
+
+  // "Captions available" indicator — disambiguates "this dataset
+  // has no captions" from "captions failed to load" (Plan §5.2).
+  // The CC button on the transport only appears after a successful
+  // SRT fetch; this badge surfaces the *intent* unconditionally.
+  if (dataset.closedCaptionLink) {
+    html += `<p class="info-captions-badge">`
+    html += `<span class="info-captions-badge-glyph" aria-hidden="true">CC</span>`
+    html += escapeHtml(t('infoPanel.captionsAvailable'))
+    html += `</p>`
   }
 
   // --- Credits section — Phase 2 §4.1 -----------------------------

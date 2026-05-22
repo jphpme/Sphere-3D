@@ -170,6 +170,35 @@
     font-size: 0.7rem;
 }
 
+/* --- Captions-available badge (Phase 3 §5.2) -------------------
+   Surfaces "this dataset has captions" in the info panel even
+   when the SRT fetch hasn't (yet) succeeded — keeps the affordance
+   discoverable for screen-reader users and disambiguates load
+   failures from genuine absence. The glyph mirrors the CC button
+   on the playback transport so the two visually pair. */
+.info-captions-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    margin-top: 0.5rem;
+    font-size: 0.7rem;
+    color: var(--color-text-secondary);
+}
+.info-captions-badge-glyph {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 2em;
+    padding: 0.05rem 0.3rem;
+    font-size: 0.6rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    color: var(--color-text);
+    background: var(--white-o12);
+    border: 1px solid var(--white-o12);
+    border-radius: 3px;
+}
+
 /* --- Description show-more / show-less (Phase 2 §4.1) ----------
    When the description exceeds the panel's collapsed character cap
    we render the snippet and a "Show more" button right below it.

@@ -2199,11 +2199,17 @@ class InteractiveSphere {
       updatePlayButton(newPrimaryPanel!.hlsService!.paused)
       // Recompute the display interval for the new primary's temporal
       // range so scrubber snapping and time label formatting are correct.
+      // Pass `period` and `frames.count` for an imagery-accurate cadence
+      // (Plan §5.1) — without these, multi-year climate datasets fall
+      // back to the snap-list estimate and tick the label too fast.
       if (hasTemporalRange && newPrimaryPanel!.hlsService) {
         const start = new Date(newDataset!.startTime!)
         const end = new Date(newDataset!.endTime!)
         const videoDuration = newPrimaryPanel!.hlsService!.duration ?? 1
-        this.playback.displayInterval = inferDisplayInterval(start, end, videoDuration)
+        this.playback.displayInterval = inferDisplayInterval(start, end, videoDuration, {
+          period: newDataset!.period,
+          frameCount: newDataset!.frames?.count,
+        })
       }
       this.attachPrimaryVideoSync()
       this.doStartPlaybackLoop()

@@ -288,6 +288,19 @@ describe('displayDatasetInfo', () => {
     expect(ids).toEqual(['manual', 'algorithmic'])
   })
 
+  it('renders a "Captions available" badge when closedCaptionLink is set', () => {
+    const dataset = makeDataset({ closedCaptionLink: 'https://example.com/captions.srt' })
+    displayDatasetInfo(dataset, [], vi.fn())
+    const badge = document.querySelector('.info-captions-badge')
+    expect(badge).not.toBeNull()
+    expect(badge!.textContent).toContain('Captions available')
+  })
+
+  it('omits the captions badge when closedCaptionLink is empty', () => {
+    displayDatasetInfo(makeDataset(), [], vi.fn())
+    expect(document.querySelector('.info-captions-badge')).toBeNull()
+  })
+
   it('preserves ?catalog=true when a related-dataset link is clicked', () => {
     const onLoad = vi.fn()
     const target = makeDataset({

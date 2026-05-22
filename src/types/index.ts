@@ -893,7 +893,7 @@ export type VrMode = 'ar' | 'vr'
 export type VrExitReason = 'user' | 'error' | 'session_lost'
 export type VrGesture = 'drag' | 'pinch' | 'thumbstick_zoom' | 'flick_spin' | 'hud_tap'
 export type ErrorCategory =
-  | 'tile' | 'hls' | 'llm' | 'download' | 'vr' | 'tour'
+  | 'tile' | 'hls' | 'llm' | 'download' | 'vr' | 'tour' | 'caption'
   | 'uncaught' | 'console' | 'native_panic'
 export type ErrorSource =
   | 'caught' | 'window_error' | 'unhandledrejection'
