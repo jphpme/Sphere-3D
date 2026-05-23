@@ -581,6 +581,26 @@ class InteractiveSphere {
       notifyDatasetChanged(dataset)
       setHelpActiveDataset(dataset.id)
     }
+    // Catalog-mode integration — a URL-driven load just resolved
+    // (dataset, preview, tour, or native deep-link), which means
+    // the globe is now the active surface. Drop the
+    // `catalog-empty` flag so the CSS rule that hides `#map-grid`
+    // releases, and (if we're still in catalog mode) flip the
+    // tab control to Sphere active. Mirrors the inline sync that
+    // `selectDatasetFromBrowse` does for browse-driven loads.
+    //
+    // Plan §3.5 explicitly required this for the tour-in-catalog
+    // path ("tours assume globe is mounted; if a tour starts in
+    // catalog mode, it must implicitly flip to sphere mode") and
+    // the `?catalog=true&preview=…` consumer would otherwise
+    // load the draft dataset to an invisible canvas. Centralising
+    // the sync here covers every URL-driven entry point through
+    // a single hook.
+    document.body.classList.remove('catalog-empty')
+    if (getCatalogMode()) {
+      showCatalogTabs()
+      setActiveCatalogTab('sphere')
+    }
   }
 
   /** Extract the `dataset` query parameter from the current URL. */
@@ -2711,9 +2731,12 @@ class InteractiveSphere {
     // "back to catalog" affordance. The body class stays set so CSS
     // continues to recognise the catalog-mode surface; the regular
     // load flow swaps the visible browse panel for the globe via
-    // `dismissBrowseAfterLoad()`.
+    // `dismissBrowseAfterLoad()`. Read `getCatalogMode()` once so
+    // the URL state we observe and the tab state we update agree
+    // by construction.
+    const inCatalogMode = getCatalogMode()
     const nextParams = new URLSearchParams()
-    if (getCatalogMode()) nextParams.set('catalog', 'true')
+    if (inCatalogMode) nextParams.set('catalog', 'true')
     nextParams.set('dataset', id)
     window.history.pushState({}, '', `?${nextParams.toString()}`)
     // The globe is now the active surface — drop the
@@ -2722,7 +2745,7 @@ class InteractiveSphere {
     // Flip the tab control to Sphere since the globe is what the
     // visitor is now looking at.
     document.body.classList.remove('catalog-empty')
-    if (getCatalogMode()) setActiveCatalogTab('sphere')
+    if (inCatalogMode) setActiveCatalogTab('sphere')
     await this.loadDataset(id, 'orbit')
     if (gen !== this.loadGeneration) return // a newer load superseded this one
     this.setLoading(false)
