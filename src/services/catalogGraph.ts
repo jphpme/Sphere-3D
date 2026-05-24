@@ -518,6 +518,18 @@ export function buildGraph(
       const firstParent = matchingParents[0].parentId
       const display = keywordDisplay.get(keywordId)
         ?? keywordId.slice('keyword:'.length)
+      // Compute the set of datasets actually connected to this
+      // keyword node in the rendered graph: only those that
+      // overlap at least one expanded parent. Hoisted above the
+      // addNode call so `datasetCount` reflects the same value
+      // the membership-edge loop below uses — see PR #137 review,
+      // a keyword visible in multiple clusters but only one
+      // expanded would otherwise tooltip "10 datasets" while
+      // showing 5 edges.
+      const visibleDatasets = new Set<string>()
+      for (const { overlap } of matchingParents) {
+        for (const id of overlap) visibleDatasets.add(id)
+      }
       addNode({
         id: keywordId,
         kind: 'keyword',
@@ -529,7 +541,7 @@ export function buildGraph(
         // edges to both anyway; the colour just keys the visual
         // cluster.
         group: nodeIndex.get(firstParent)?.group ?? null,
-        datasetCount: datasetIds.size,
+        datasetCount: visibleDatasets.size,
         parentFacetValueId: firstParent,
       })
 
@@ -539,10 +551,6 @@ export function buildGraph(
       // edge count proportional to the user's expansion choice;
       // expanding "Water" shouldn't pull in dataset-keyword edges
       // for datasets that aren't in Water.
-      const visibleDatasets = new Set<string>()
-      for (const { overlap } of matchingParents) {
-        for (const id of overlap) visibleDatasets.add(id)
-      }
       for (const datasetId of visibleDatasets) {
         const targetId = datasetNodeId(datasetId)
         edges.push({

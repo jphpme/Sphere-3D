@@ -382,6 +382,34 @@ describe('buildGraph — auto-expand keywords', () => {
     )).toBe(true)
   })
 
+  it('reports datasetCount as the actually-connected count when a keyword spans multiple clusters but only one is expanded', () => {
+    // Hurricane appears in 3 datasets globally (2 Water + 1 Land).
+    // Only Water is expanded. The keyword's membership edges go
+    // only to the 2 Water datasets (not the Land one). PR #137
+    // review caught the discrepancy: pre-fix the tooltip would
+    // show "3 datasets" while the rendered graph only showed 2
+    // edges — disagreeing with what's actually on screen.
+    const datasets: Dataset[] = [
+      makeDataset({ id: 'w1', tags: ['Water'], enriched: { keywords: ['hurricane'] } }),
+      makeDataset({ id: 'w2', tags: ['Water'], enriched: { keywords: ['hurricane'] } }),
+      makeDataset({ id: 'l1', tags: ['Land'], enriched: { keywords: ['hurricane'] } }),
+    ]
+    const waterId = facetValueNodeId('category', 'Water')
+    const graph = buildGraph(datasets, {}, '', {
+      expandedKeywordParents: new Set([waterId]),
+    })
+    const hurricane = graph.nodes.find(n => n.id === 'keyword:hurricane')
+    expect(hurricane?.datasetCount).toBe(2)
+    // And verify the same value matches the rendered edges so the
+    // tooltip / node-size mapping reads consistently with what
+    // the user sees.
+    const hurricaneDatasetEdges = graph.edges.filter(e =>
+      (e.source === 'keyword:hurricane' && e.target.startsWith('dataset:')) ||
+      (e.target === 'keyword:hurricane' && e.source.startsWith('dataset:')),
+    )
+    expect(hurricaneDatasetEdges).toHaveLength(2)
+  })
+
   it('combines auto-expansion with explicit expandedKeywordParents — explicit parents surface ALL their keywords', () => {
     const datasets: Dataset[] = [
       makeDataset({ id: 'w1', tags: ['Water'], enriched: { keywords: ['hurricane', 'storm', 'rare-kw'] } }),
