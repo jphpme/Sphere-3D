@@ -551,6 +551,38 @@ export type QAIndex = Record<string, QAEntry[]>
 
 // --- Tour types ---
 
+/**
+ * A tour from the public discovery surface
+ * (`GET /api/v1/tours`). Distinct from `Dataset` because tours
+ * have less metadata (no temporal range, no organization, no
+ * bounding box) and they launch into a different code path
+ * (`tourEngine`) than dataset cards do.
+ *
+ * The Phase 1a workaround surfaced legacy SOS tours as datasets
+ * with `format: 'tour/json'`. New-style tours (from the
+ * publisher dock) flow through this type instead — the SPA
+ * normalises both into the same browse card list at render
+ * time.
+ */
+export interface Tour {
+  id: string
+  slug: string
+  title: string
+  description: string | null
+  /** Resolved HTTPS URL the tour engine fetches. May be null
+   * when the server can't render an R2 URL (R2_PUBLIC_BASE
+   * unset); browse should show the card but the run button
+   * should refuse to launch. */
+  tourJsonUrl: string | null
+  thumbnailUrl: string | null
+  visibility: string
+  schemaVersion: number
+  createdAt: string
+  updatedAt: string
+  publishedAt: string
+  originNode: string
+}
+
 /** Raw tour JSON file structure */
 export interface TourFile {
   tourTasks: TourTaskDef[]
