@@ -70,7 +70,7 @@
   "browse.graph.showFormat.aria": "Show format-bucket nodes in the graph",
   "browse.graph.showFormat.label": "Show formats",
   "browse.graph.tooltip.coOccurrence": "Top co-occurring: {neighbours}",
-  "browse.graph.tooltip.datasetCount": "{count} datasets",
+  "browse.graph.tooltip.viewDetails": "Click to view details",
   "browse.noResults": "No datasets match your search.",
   "browse.overlay.aria": "Dataset browser",
   "browse.search.clear.aria": "Clear search",

@@ -34,7 +34,7 @@ import type { Dataset } from '../types'
 import { emit } from '../analytics'
 import { hashQuery } from '../analytics/hash'
 import { escapeHtml, escapeAttr } from './domUtils'
-import { t } from '../i18n'
+import { plural, t } from '../i18n'
 import { formatNumber } from '../i18n/format'
 
 /** Top-N keywords each Category cluster auto-radiates when no
@@ -58,8 +58,17 @@ export interface CatalogGraphCallbacks {
    *  §6.7 — node clicks call back via this so the chip rail reacts
    *  identically. */
   onToggleFacet: (facet: string, value: string) => void
-  /** Same path the card grid uses to open the info panel. */
-  onSelectDataset: (datasetId: string) => void
+  /**
+   * Click on a dataset node — show the dataset's metadata card so
+   * the user can read description / source / time range / keywords
+   * before deciding whether to load it. PR #137 review feedback:
+   * directly loading on node-click skipped the metadata most users
+   * actually want to skim first. The implementation in browseUI.ts
+   * switches the view to Cards and expands the matching card; the
+   * card's existing "Load" button then funnels through the same
+   * `onSelectDataset` path the card grid uses.
+   */
+  onPreviewDataset: (datasetId: string) => void
 }
 
 export interface CatalogGraphUpdate {
@@ -406,7 +415,10 @@ export function createCatalogGraph(
       if (kind === 'dataset') {
         const datasetId = node.data('datasetId') as string
         emitNodeClick(kind, '', datasetId)
-        callbacks.onSelectDataset(datasetId)
+        // Preview rather than directly load — the user wants to
+        // skim the dataset's metadata before deciding. The view
+        // switches to Cards and expands the matching card.
+        callbacks.onPreviewDataset(datasetId)
         return
       }
       if (kind === 'keyword') {
@@ -468,7 +480,24 @@ export function createCatalogGraph(
     const label = node.data('label') as string
     const count = node.data('datasetCount') as number
     let body = `<strong>${escapeHtml(label)}</strong>`
-    body += `<br><span class="browse-graph-tooltip-count">${escapeHtml(t('browse.graph.tooltip.datasetCount', { count: formatNumber(count) }))}</span>`
+    if (kind === 'dataset') {
+      // Dataset nodes always have count=1, so a "1 dataset" line
+      // is pure redundancy. The label IS the dataset's title.
+      // A "click for details" hint nudges the user toward the
+      // preview card (the click handler switches to Cards view
+      // and expands the matching card).
+      body += `<br><span class="browse-graph-tooltip-count">${escapeHtml(t('browse.graph.tooltip.viewDetails'))}</span>`
+    } else {
+      // Facet-value and keyword nodes: pluralised count via the
+      // existing browse.count.{one,other} keys so "1 dataset" /
+      // "5 datasets" reads correctly in every locale's plural form.
+      const countLine = plural(
+        count,
+        { one: 'browse.count.one', other: 'browse.count.other' },
+        { count: formatNumber(count) },
+      )
+      body += `<br><span class="browse-graph-tooltip-count">${escapeHtml(countLine)}</span>`
+    }
     if (kind === 'facet-value') {
       const top = topCoOccurrences(lastGraph, node.id(), 3)
       if (top.length > 0) {

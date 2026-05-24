@@ -1077,6 +1077,80 @@ export function showBrowseUI(
   }
 
   /**
+   * Surface a dataset's card with all its metadata expanded. Wired
+   * to the Graph view's dataset-node click (see `onPreviewDataset`
+   * in the `createCatalogGraph` call below) per PR #137 review
+   * feedback — directly loading on graph-node click skipped the
+   * description / source / time-range / keywords most users want
+   * to skim first.
+   *
+   * Switches the view to Cards (the card UI is the established
+   * metadata surface), waits for `applyViewMode` to make the grid
+   * visible, finds the matching `<div class="browse-card">` by
+   * data-id, expands it, scrolls it into view, and focuses it for
+   * keyboard users. From there the user clicks the existing Load
+   * button if they want — that still funnels through
+   * `callbacks.onSelectDataset`, same path the card grid has
+   * always used.
+   *
+   * No-ops if the dataset is missing from the filtered set (the
+   * card wouldn't be in the DOM anyway); the chip rail must be
+   * loose enough to surface it.
+   */
+  function previewDatasetInCards(datasetId: string): void {
+    if (viewMode !== 'cards') {
+      const previous = viewMode
+      viewMode = 'cards'
+      saveViewMode(viewMode)
+      renderViewModeBar()
+      // Emit the view-mode-change telemetry so the dashboard sees
+      // graph→cards preview pivots distinctly from explicit toggle
+      // clicks. Same shape as the user-clicked-the-toggle path.
+      const cardCount = document.querySelectorAll('#browse-grid .browse-card').length
+      emit({
+        event_type: 'catalog_view_mode_changed',
+        view_mode: viewMode,
+        from: previous,
+        result_count_bucket: bucketResultCount(cardCount),
+      })
+    }
+    void applyViewMode().then(() => expandCardById(datasetId))
+  }
+
+  /** Find a card by its dataset id, collapse any other expanded
+   *  card, expand the target, scroll it into view, and focus it.
+   *  Safe to call when the card isn't in the DOM (filtered out) —
+   *  silently no-ops.
+   *
+   *  Iterates `.browse-card` and matches on `dataset.id` rather
+   *  than using a CSS attribute selector, because dataset IDs can
+   *  contain characters that would need escaping inside `[data-id="..."]`
+   *  (ULIDs are safe but `legacyId` strings like `INTERNAL_SOS_768`
+   *  aren't always — defensive code paths in the codebase prefer
+   *  property reads). */
+  function expandCardById(datasetId: string): void {
+    const grid = document.getElementById('browse-grid')
+    if (!grid) return
+    let card: HTMLElement | null = null
+    const cards = grid.querySelectorAll<HTMLElement>('.browse-card')
+    for (const candidate of cards) {
+      if (candidate.dataset.id === datasetId) {
+        card = candidate
+        break
+      }
+    }
+    if (!card) return
+    grid.querySelectorAll<HTMLElement>('.browse-card.expanded').forEach(c => {
+      c.classList.remove('expanded')
+      c.setAttribute('aria-expanded', 'false')
+    })
+    card.classList.add('expanded')
+    card.setAttribute('aria-expanded', 'true')
+    card.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    card.focus()
+  }
+
+  /**
    * Lazy-import `catalogGraphUI` on first activation. Mirrors the
    * Three.js pattern in `vrSession.ts` — cytoscape is ~70 KB
    * gzipped and only users who toggle into Graph view pay that
@@ -1098,7 +1172,9 @@ export function showBrowseUI(
           onToggleFacet: (facet, value) => {
             applyState(toggleFacet(filterState, facet, value), searchQuery)
           },
-          onSelectDataset: callbacks.onSelectDataset,
+          onPreviewDataset: (datasetId: string) => {
+            previewDatasetInCards(datasetId)
+          },
         })
         return graphController
       })
