@@ -12,6 +12,23 @@ vi.mock('../services/dataService', () => ({
   }
 }))
 
+// Mock the Graph view's lazy-loaded UI module. `browseUI.ts` uses
+// `import('./catalogGraphUI')` on the first toggle into Graph view
+// (or boot path when localStorage has `viewMode='graph'`). The real
+// module pulls in cytoscape + cytoscape-cola, which under coverage
+// instrumentation timing on CI can leak past the test boundary and
+// cause flakiness in subsequent tests (the same shape as the
+// real-timer leak fixed in 350f05c). Stubbing the module keeps the
+// promise resolution synchronous and deterministic — tests that
+// verify aria-pressed / localStorage / analytics on the toggle
+// don't need (and shouldn't depend on) cytoscape actually loading.
+vi.mock('./catalogGraphUI', () => ({
+  createCatalogGraph: vi.fn(() => ({
+    update: vi.fn(),
+    destroy: vi.fn(),
+  })),
+}))
+
 // ---------------------------------------------------------------------------
 // escapeHtml / escapeAttr
 // ---------------------------------------------------------------------------
@@ -954,7 +971,16 @@ describe('hideBrowseUI', () => {
 describe('view-mode toggle', () => {
   const VIEW_MODE_KEY = 'sos-browse-view-mode.v1'
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    // Drain any in-flight async work from the previous test before
+    // we reset analytics state — `void applyViewMode()` in
+    // showBrowseUI fire-and-forgets a Promise chain that goes
+    // through the (mocked) `./catalogGraphUI` import when
+    // viewMode='graph'. Under coverage instrumentation on slower
+    // CI this chain can resolve INSIDE the next test's body and
+    // emit into the new analytics queue (same shape as the
+    // real-timer leak fix in 350f05c).
+    await new Promise<void>(resolve => setTimeout(resolve, 50))
     localStorage.clear()
     resetForTests()
     setTier('research')
@@ -966,7 +992,10 @@ describe('view-mode toggle', () => {
     window.history.replaceState(null, '', '/')
   })
 
-  afterEach(() => {
+  afterEach(async () => {
+    // Symmetric drain so the LAST view-mode test doesn't leak its
+    // async chain into whatever describe-block runs after this one.
+    await new Promise<void>(resolve => setTimeout(resolve, 50))
     localStorage.clear()
     window.history.replaceState(null, '', '/')
   })
