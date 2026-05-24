@@ -138,31 +138,38 @@ function resolveTokens(): ResolvedTokens {
 
 /**
  * Cola layout options shared by the initial layout and every
- * subsequent rebuild. `infinite: true` keeps the simulation alive
- * after the initial settle so dragging a node ripples through the
- * graph (other nodes follow naturally). `edgeLength` is keyed by
- * edge kind:
+ * subsequent rebuild.
  *
- *   - co-occurrence edges → longer (the Category and Format hubs
- *     should sit apart so the visual hierarchy reads)
- *   - membership edges    → shorter (dataset nodes hug their hub)
+ * NOT `infinite: true`. The first version of this code set
+ * `infinite: true` for "drag a node, others follow" — but the
+ * continuous simulation fought wheel-zoom in browser testing,
+ * apparently triggering a viewport-related side effect on every
+ * animation-frame iteration. Drag-to-follow now comes from a
+ * `grab`-handler that re-runs cola for the duration of the drag
+ * (`wireCyEvents` below). Cola's constraint solver naturally pins
+ * grabbed nodes to the mouse and relaxes everything else around
+ * them.
  *
  * `randomize` is true only on first instantiation; subsequent
  * rebuild calls reuse positions so chip-toggle thrashes don't
  * re-seed the simulation (the §6.7 "graph thrash" risk).
  *
- * Typed `unknown` because cytoscape-cola's options aren't on
+ * `edgeLength` is keyed by edge kind:
+ *
+ *   - co-occurrence edges → longer (the Category and Format hubs
+ *     should sit apart so the visual hierarchy reads)
+ *   - membership edges    → shorter (dataset nodes hug their hub)
+ *
+ * Typed via cast because cytoscape-cola's options aren't on
  * `cytoscape.LayoutOptions` and we don't ship type defs for the
- * extension. The cast to `cytoscape.LayoutOptions` happens at the
- * call site since cytoscape's typings treat layout options as
- * extension-defined `Record<string, unknown>`-ish.
+ * extension.
  */
 function colaLayoutOptions(randomize: boolean): cytoscape.LayoutOptions {
   return {
     name: 'cola',
     animate: true,
     refresh: 1,
-    maxSimulationTime: 2000,
+    maxSimulationTime: 2500,
     ungrabifyWhileSimulating: false,
     fit: randomize,
     padding: 30,
@@ -170,7 +177,7 @@ function colaLayoutOptions(randomize: boolean): cytoscape.LayoutOptions {
     avoidOverlap: true,
     handleDisconnected: true,
     nodeSpacing: 8,
-    infinite: true,
+    centerGraph: false,
     edgeLength: (edge: { data: (key: string) => unknown }) => {
       const kind = edge.data('kind')
       if (kind === 'co-occurrence') return 160
@@ -179,10 +186,10 @@ function colaLayoutOptions(randomize: boolean): cytoscape.LayoutOptions {
   } as unknown as cytoscape.LayoutOptions
 }
 
-/** Stop any previous cola layout and start a new one. Cola
- *  `infinite: true` keeps the simulation registered; without
- *  stopping first you'd accumulate multiple parallel simulations
- *  on every rebuild. */
+/** Stop any previous cola layout and start a new one. Without
+ *  stopping first, a re-run started during an in-flight layout
+ *  would leave the previous one running its animation frames in
+ *  parallel — wasted work and conflicting position writes. */
 function startColaLayout(instance: Core, randomize: boolean): void {
   // Cytoscape's typings expose a generic `stop()` on layouts but
   // the typing surface for in-flight layouts is anaemic. Cast.
@@ -449,6 +456,17 @@ export function createCatalogGraph(
     })
     instance.on('mouseout', 'node', () => hideTooltip())
     instance.on('pan zoom', () => hideTooltip())
+
+    // Drag-to-follow — re-run cola on grab. Cola pins the grabbed
+    // node to the user's mouse position and relaxes constraints
+    // around it, so connected nodes follow naturally during the
+    // drag. The simulation auto-stops after `maxSimulationTime`
+    // (2.5 s) so it doesn't fight wheel-zoom once the user
+    // releases. Re-runs are cheap because positions are reused
+    // (randomize:false) — cola picks up from the current state.
+    instance.on('grab', 'node', () => {
+      startColaLayout(instance, false)
+    })
   }
 
   function showTooltip(node: NodeSingular): void {
