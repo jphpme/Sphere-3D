@@ -180,10 +180,51 @@ describe('encode/decode round-trip', () => {
     const baselineFacets = [
       'category', 'keyword', 'format', 'dateAdded',
       'dataCoverageYear', 'hasCaptions', 'hasTour', 'includeSos',
+      'geographicRegion',
     ]
     for (const facet of baselineFacets) {
       expect(FACET_URL_KEYS[facet]).toBeTruthy()
     }
+  })
+
+  it('round-trips a geographicRegion bbox predicate (§6.9 Map view)', () => {
+    const state: FilterState = {
+      geographicRegion: { kind: 'bbox', n: 40.5, s: 10.25, e: 30, w: -10.125 },
+    }
+    const params = encodeFilterState(state, '')
+    // Compact NSEW form with comma separators; the dash separator
+    // in encoded ranges doesn't collide because the bbox values
+    // can be negative (the parser uses comma-splitting, not the
+    // range-shape `min-max` regex).
+    expect(params.get('gr')).toBe('40.5,10.25,30,-10.125')
+    const decoded = decodeFilterState(params)
+    expect(decoded.state).toEqual(state)
+  })
+
+  it('rejects malformed geographicRegion URL values', () => {
+    // Wrong arity — three values, not four.
+    expect(decodeFilterState(new URLSearchParams('gr=10,20,30')).state).toEqual({})
+    // Non-numeric corner.
+    expect(decodeFilterState(new URLSearchParams('gr=10,foo,30,40')).state).toEqual({})
+    // Empty segment — `Number('')` is `0`, so without an explicit
+    // empty-check the decoder would silently treat `gr=10,,30,40`
+    // as `{n:10, s:0, e:30, w:40}` and the user wouldn't know
+    // their hand-edited URL was malformed.
+    expect(decodeFilterState(new URLSearchParams('gr=10,,30,40')).state).toEqual({})
+    expect(decodeFilterState(new URLSearchParams('gr=,20,30,40')).state).toEqual({})
+    expect(decodeFilterState(new URLSearchParams('gr=10,20,30,')).state).toEqual({})
+    // Whitespace-only segments — same as empty after trim.
+    expect(decodeFilterState(new URLSearchParams('gr=10, ,30,40')).state).toEqual({})
+  })
+
+  it('rounds geographicRegion bounds to 3 decimals on encode', () => {
+    // Mirrors `camera.ts` precision so a high-resolution drag
+    // doesn't leak fingerprinting bits into the URL.
+    const state: FilterState = {
+      geographicRegion: { kind: 'bbox', n: 40.123456789, s: 10, e: 30, w: -10 },
+    }
+    const params = encodeFilterState(state, '')
+    expect(params.get('gr')).toBe('40.123,10,30,-10')
   })
 })
 
