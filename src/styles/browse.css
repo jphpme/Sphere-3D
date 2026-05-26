@@ -959,21 +959,58 @@ body.browse-view-timeline .browse-title {
 .browse-timeline-axis-ticks line {
     stroke: var(--white-o15);
 }
+/* Brush band — the d3-brush `.overlay` rect is the interactive
+   surface. We give it a low-opacity amber fill and a dashed
+   inset border so the band reads as a distinct interactive zone
+   (PR #138 review: users didn't realise it was draggable). The
+   hint label inside the band — "↔ Drag to filter by year" —
+   reinforces the affordance and fades out once a selection
+   exists. Hover state nudges the fill a touch brighter for
+   feedback. */
+.browse-timeline-brush .overlay {
+    fill: var(--facet-color-time);
+    fill-opacity: 0.06;
+    stroke: var(--facet-color-time);
+    stroke-opacity: 0.35;
+    stroke-width: 1;
+    stroke-dasharray: 3 3;
+    cursor: crosshair;
+    transition: fill-opacity 0.15s, stroke-opacity 0.15s;
+}
+.browse-timeline-brush:hover .overlay {
+    fill-opacity: 0.12;
+    stroke-opacity: 0.55;
+}
+.browse-timeline-axis-svg.browse-timeline-has-brush .browse-timeline-brush .overlay {
+    /* Selection rect is the affordance from now on — quiet the
+       overlay's outline so the selection reads clearly. */
+    fill-opacity: 0;
+    stroke-opacity: 0;
+}
+.browse-timeline-brush-hint {
+    fill: var(--facet-color-time);
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.04em;
+    opacity: 0.7;
+    pointer-events: none;
+    transition: opacity 0.15s;
+}
+.browse-timeline-axis-svg.browse-timeline-has-brush .browse-timeline-brush-hint {
+    opacity: 0;
+}
 /* Brush selection — uses the time-facet amber so the brush reads
    as a Time-group affordance, matching the chip-rail's typed-group
    colour scheme. */
 .browse-timeline-brush .selection {
     fill: var(--facet-color-time);
-    fill-opacity: 0.2;
+    fill-opacity: 0.25;
     stroke: var(--facet-color-time);
     stroke-width: 1;
 }
 .browse-timeline-brush .handle {
     fill: var(--facet-color-time);
-    fill-opacity: 0.5;
-}
-.browse-timeline-brush .overlay {
-    cursor: crosshair;
+    fill-opacity: 0.7;
 }
 .browse-timeline-now-marker {
     stroke: var(--color-text-muted);

@@ -214,6 +214,20 @@ export function createCatalogTimeline(
     .attr('role', 'img')
     .attr('aria-hidden', 'true')
   const brushGroup = axisSvg.append('g').attr('class', 'browse-timeline-brush')
+  // Discoverability hint — a low-opacity "↔ Drag to filter by year"
+  // label sitting inside the brush band. Without this the brush
+  // area reads as empty chart space; PR #138 review feedback was
+  // that users didn't realise it was interactive. The label
+  // disappears once a selection exists (the selection rect IS the
+  // affordance from then on); CSS handles the toggle via the
+  // `browse-timeline-has-brush` class set in `syncBrushFromFilterState`.
+  const brushHint = axisSvg
+    .append('text')
+    .attr('class', 'browse-timeline-brush-hint')
+    .attr('text-anchor', 'middle')
+    .attr('dy', '0.35em')
+    .attr('aria-hidden', 'true')
+    .text(t('browse.timeline.brush.hint'))
   const axisGroup = axisSvg.append('g').attr('class', 'browse-timeline-axis-ticks')
   const nowMarker = axisSvg
     .append('line')
@@ -371,6 +385,10 @@ export function createCatalogTimeline(
       'transform',
       `translate(${GUTTER_PX + AXIS_HPADDING_PX}, 0)`,
     )
+    // Centre the discoverability hint inside the brush band.
+    brushHint
+      .attr('x', GUTTER_PX + AXIS_HPADDING_PX + chartWidth / 2)
+      .attr('y', BRUSH_HEIGHT_PX / 2)
 
     // Choose tick count based on chart width — d3-axis honours
     // `ticks(n)` as a hint, not a hard count. Roughly one tick
@@ -557,12 +575,17 @@ export function createCatalogTimeline(
         end: formatNumber(Math.round(clampedMax)),
       })
       brushClearBtn.classList.remove('hidden')
+      // Hide the "↔ Drag to filter by year" hint — the selection
+      // rect itself is now the affordance and the hint would just
+      // crowd it.
+      axisSvg.classed('browse-timeline-has-brush', true)
     } else {
       programmaticBrush = true
       brushGroup.call(brush.move as never, null)
       programmaticBrush = false
       brushSummary.textContent = ''
       brushClearBtn.classList.add('hidden')
+      axisSvg.classed('browse-timeline-has-brush', false)
     }
   }
 
