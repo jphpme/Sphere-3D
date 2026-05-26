@@ -540,14 +540,21 @@ export function createCatalogTimeline(
       const max = Math.max(rawMin, rawMax)
       // Clamp to the visible domain so a brush rendered with stale
       // bounds doesn't extend off the canvas.
-      const x0 = xScale(Math.max(domain.min, min))
-      const x1 = xScale(Math.min(domain.max, max))
+      const clampedMin = Math.max(domain.min, min)
+      const clampedMax = Math.min(domain.max, max)
+      const x0 = xScale(clampedMin)
+      const x1 = xScale(clampedMax)
       programmaticBrush = true
       brushGroup.call(brush.move as never, [x0, x1])
       programmaticBrush = false
+      // Announce the clamped years (what the brush actually shows)
+      // rather than the raw predicate values — if the user has a
+      // predicate of 1850–2100 against a visible domain of
+      // 1900–2050, the brush draws 1900–2050 and the summary should
+      // say the same to avoid the visual vs. text disagreement.
       brushSummary.textContent = t('browse.timeline.brush.summary', {
-        start: formatNumber(Math.round(min)),
-        end: formatNumber(Math.round(max)),
+        start: formatNumber(Math.round(clampedMin)),
+        end: formatNumber(Math.round(clampedMax)),
       })
       brushClearBtn.classList.remove('hidden')
     } else {

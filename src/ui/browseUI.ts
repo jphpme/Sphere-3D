@@ -1947,15 +1947,10 @@ interface ActiveFilterChip {
 }
 
 /**
- * Friendly localised label for each boolean facet. Multi-select
- * values render verbatim (Category tags + Format buckets — the
- * format vocabulary is localised below). Range predicates use
- * the dedicated `browse.activeFilters.range.*` keys.
+ * Friendly localised label for each boolean facet. Switch (not a
+ * lookup table) so `t()` evaluates against the live locale at
+ * chip-build time rather than at module load.
  */
-const BOOLEAN_FACET_LABEL: Readonly<Record<string, string>> = {
-  // Use lazy getters so the `t()` calls evaluate at chip-build
-  // time against the current locale, not at module-load time.
-}
 function booleanFacetLabel(facet: string): string {
   switch (facet) {
     case 'hasCaptions': return t('browse.filter.hasCaptions.label')
@@ -1963,7 +1958,6 @@ function booleanFacetLabel(facet: string): string {
     case 'includeSos': return t('browse.filter.includeSos.label')
     default: return facet
   }
-  void BOOLEAN_FACET_LABEL
 }
 
 function formatBucketLabel(value: string): string {
