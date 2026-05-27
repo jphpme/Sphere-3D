@@ -326,8 +326,16 @@ export function importPlaylists(
     const existingIds = new Set(list.map((p) => p.id))
     for (const incoming of sanitized) {
       if (existingIds.has(incoming.id)) {
-        list.push({ ...incoming, id: generatePlaylistId() })
+        // Loop to dodge the (unlikely but possible) case where a
+        // freshly generated id collides with one we just added —
+        // generatePlaylistId mixes 4 hex chars over Date.now(), so
+        // back-to-back inserts share the timestamp half.
+        let nextId = generatePlaylistId()
+        while (existingIds.has(nextId)) nextId = generatePlaylistId()
+        existingIds.add(nextId)
+        list.push({ ...incoming, id: nextId })
       } else {
+        existingIds.add(incoming.id)
         list.push(incoming)
       }
     }

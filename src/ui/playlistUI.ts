@@ -64,6 +64,11 @@ export interface PlaylistUICallbacks {
 let callbacks: PlaylistUICallbacks = {}
 let managerOpen = false
 let popoverAnchor: HTMLElement | null = null
+/** Dataset id the popover is currently bound to. Captured at
+ *  open time so re-renders (e.g. from `onPlaylistsChange`) can't
+ *  pick up a stale or missing `data-dataset-id` if the caller's
+ *  anchor element has since been re-rendered. */
+let popoverDatasetId: string | null = null
 let unsubPlaylists: (() => void) | null = null
 let unsubPlayback: (() => void) | null = null
 
@@ -78,7 +83,9 @@ export function initPlaylistUI(cb: PlaylistUICallbacks = {}): void {
   unsubPlaylists?.()
   unsubPlaylists = onPlaylistsChange(() => {
     if (managerOpen) renderManager()
-    if (popoverAnchor) renderAddPopover(popoverAnchor)
+    if (popoverAnchor && popoverDatasetId) {
+      renderAddPopover(popoverAnchor, popoverDatasetId)
+    }
   })
 
   // Re-render the manager when playback state changes (the Play
@@ -280,12 +287,13 @@ function wireManagerEvents(panel: HTMLElement, activePlaylistId: string | null):
     btn.addEventListener('click', () => {
       const id = btn.dataset.id
       if (!id) return
+      const target = loadPlaylists().find((p) => p.id === id)
+      if (!target) return
       if (activePlaylistId === id) {
         stopPlaylistPlayback()
-        callbacks.announce?.(t('playlist.stop.announce', { name: btn.getAttribute('aria-label') ?? '' }))
+        callbacks.announce?.(t('playlist.stop.announce', { name: target.name }))
       } else {
-        const target = loadPlaylists().find((p) => p.id === id)
-        if (target) playPlaylist(target)
+        playPlaylist(target)
       }
     })
   })
@@ -436,13 +444,15 @@ export async function handleImportFile(file: File): Promise<void> {
 export function openAddToPlaylistPopover(datasetId: string, anchor: HTMLElement): void {
   if (!datasetId) return
   popoverAnchor = anchor
+  popoverDatasetId = datasetId
   ensurePopoverHost()
-  renderAddPopover(anchor)
+  renderAddPopover(anchor, datasetId)
 }
 
 /** Close the add-to-playlist popover. Idempotent. */
 export function closeAddPopover(): void {
   popoverAnchor = null
+  popoverDatasetId = null
   const host = document.getElementById('playlist-add-popover')
   if (host) host.classList.add('hidden')
 }
@@ -458,10 +468,9 @@ function ensurePopoverHost(): void {
   document.body.appendChild(host)
 }
 
-function renderAddPopover(anchor: HTMLElement): void {
+function renderAddPopover(anchor: HTMLElement, datasetId: string): void {
   const host = document.getElementById('playlist-add-popover')
   if (!host) return
-  const datasetId = anchor.dataset.datasetId
   if (!datasetId) {
     closeAddPopover()
     return

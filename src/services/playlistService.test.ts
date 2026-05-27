@@ -342,6 +342,21 @@ describe('importPlaylists + exportPlaylistsJson', () => {
     expect(list[1].name).toBe('colliding')
   })
 
+  it('merge mode produces unique ids when multiple incoming playlists collide', () => {
+    const original = createPlaylist('original')
+    // Three colliders all carrying the same id as `original`. Without
+    // updating the existingIds set as the merge walks, a freshly
+    // generated id could collide with a previously-merged one.
+    const incoming: Playlist[] = [
+      { id: original.id, name: 'a', createdAt: '2026-01-01T00:00:00.000Z', datasets: [] },
+      { id: original.id, name: 'b', createdAt: '2026-01-01T00:00:00.000Z', datasets: [] },
+      { id: original.id, name: 'c', createdAt: '2026-01-01T00:00:00.000Z', datasets: [] },
+    ]
+    importPlaylists(incoming, { merge: true })
+    const ids = loadPlaylists().map((p) => p.id)
+    expect(new Set(ids).size).toBe(ids.length)
+  })
+
   it('skips invalid items, reports count', () => {
     const incoming = [
       { id: 'ok', name: 'ok', createdAt: '2026-01-01T00:00:00.000Z', datasets: [] },

@@ -231,6 +231,20 @@ describe('tour deferral', () => {
     expect(getActive()?.waitingForTour).toBe(false)
   })
 
+  it('falls back to the per-entry timer when a tour-bearing entry fails to load', async () => {
+    const h = setupHarness({ tourFor: ['A'] })
+    h.loadDataset.mockImplementation(async (id: string) => {
+      if (id === 'A') throw new Error('failed to load tour dataset')
+    })
+    play(makePlaylist([['A', 5], ['B', 5]]))
+    await vi.waitFor(() => expect(h.loadDataset).toHaveBeenCalledWith('A'))
+    // The load failed before a tour could start, so waitingForTour
+    // must release and the per-entry timer must arm.
+    expect(getActive()?.waitingForTour).toBe(false)
+    await vi.advanceTimersByTimeAsync(5_000)
+    await vi.waitFor(() => expect(h.loadDataset).toHaveBeenCalledWith('B'))
+  })
+
   it('notifyTourEnded is a no-op when no tour is pending', async () => {
     const h = setupHarness()
     play(makePlaylist([['A', 5], ['B', 5]]))

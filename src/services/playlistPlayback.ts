@@ -243,9 +243,11 @@ async function loadCurrentEntry(): Promise<void> {
     notify()
   }
 
+  let loadFailed = false
   try {
     await callbacks.loadDataset(entry.datasetId)
   } catch (err) {
+    loadFailed = true
     logger.warn('[playlistPlayback] loadDataset failed:', entry.datasetId, err)
   }
 
@@ -253,6 +255,14 @@ async function loadCurrentEntry(): Promise<void> {
   // Check that we're still on the same entry before arming the timer.
   if (active !== snapshot) return
   if (snapshot.index !== snapshot.playlist.datasets.indexOf(entry)) return
+  // If the load failed, the tour we were speculatively waiting for
+  // will never start — release the wait flag and fall through to the
+  // normal timer so the playlist advances on its per-entry duration
+  // rather than hanging on a tour that won't fire.
+  if (loadFailed && snapshot.waitingForTour) {
+    snapshot.waitingForTour = false
+    notify()
+  }
   // After the load resolves, decide what to do next:
   //  - Tour-bearing entry: wait for `notifyTourEnded()`.
   //  - Paused: record remaining time but don't arm the timer.
