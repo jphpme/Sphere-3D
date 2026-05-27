@@ -15,6 +15,16 @@ import {
 import { initOrbitDebugPanel } from './ui/orbitDebugPanel'
 import { initOrbitPerfHud } from './ui/orbitPerfHud'
 import { initOrbitPostMessageBridge } from './ui/orbitPostMessageBridge'
+import { initShaderSettings } from './services/shaderSettingsService'
+import { maybeInitShaderTuner } from './ui/shaderTunerUI'
+
+// Apply persisted shader settings (§7.2) at module-eval so the
+// photoreal Earth picks them up at first paint — same hook the
+// main app installs in main.ts. Mount the dev shader tuner when
+// `?tune=shader` is present so the Orbit page is a viable testbed
+// for VR Earth shader tuning without needing a Quest headset.
+initShaderSettings()
+maybeInitShaderTuner()
 
 const ALLOWED_STATES = new Set<StateKey>(ALL_STATES)
 const ALLOWED_PALETTES = new Set<PaletteKey>(['cyan', 'green', 'amber', 'violet'])

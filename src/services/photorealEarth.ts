@@ -56,6 +56,10 @@ import {
   buildAtmosphereRaymarchGlsl,
 } from './atmosphereConstants'
 import { computeTransmittanceLut } from './atmosphereLut'
+import {
+  getShaderSettings,
+  onShaderSettingsChange,
+} from './shaderSettingsService'
 
 /** Default radius if `options.radius` is omitted — matches the VR view. */
 const DEFAULT_RADIUS = 0.5
@@ -112,6 +116,18 @@ const EARTH_LIGHTS_URLS = [
   `${EARTH_TEXTURE_BASE}/earth_lights_2048.jpg`,
   `${EARTH_TEXTURE_BASE}/earth_lights_4096.jpg`,
   `${EARTH_TEXTURE_BASE}/earth_lights_8192.jpg`,
+]
+// §7.2 normal-map tiers — mirrors the 2D earthTileLayer ladder
+// (NORMAL_MAP_URLS there) and the diffuse / lights pattern above.
+// Same CloudFront-fronted bucket, ascending order; loadProgressive
+// halts at the first failure and the last successful tier stays
+// applied. MeshPhongMaterial has a built-in `normalMap` slot, so
+// nothing about the shader patch needs to change — only the
+// material binding + `normalScale` driven by shaderSettingsService.
+const EARTH_NORMAL_URLS = [
+  `${EARTH_TEXTURE_BASE}/earth_normal_2048.jpg`,
+  `${EARTH_TEXTURE_BASE}/earth_normal_4096.jpg`,
+  `${EARTH_TEXTURE_BASE}/earth_normal_8192.jpg`,
 ]
 
 const EARTH_SHININESS = 40
@@ -392,6 +408,15 @@ export function createPhotorealEarth(
   // update that writes the current subsolar direction.
   const sunDirUniform = { value: new THREE_.Vector3(1, 0, 0) }
 
+  // ── §7.2 colour-correction uniforms ───────────────────────────────
+  // Mirror the two uniforms `earthTileLayer.ts` Pass 0 introduces on
+  // the 2D side. Identity at 1.0 / 1.0 collapses the shader patch to
+  // a pass-through so the pre-§7.2 look survives a default boot.
+  // Updated by a subscriber below whenever the user picks a Tools-
+  // menu preset or drags a tuner slider.
+  const contrastUniform = { value: getShaderSettings().contrast }
+  const saturationUniform = { value: getShaderSettings().saturation }
+
   // ── Phase 3h dataset-overlay uniforms ─────────────────────────────
   // Mirror the four uniforms `earthTileLayer.ts` introduced for 3e/B
   // on the 2D side, plus a base-diffuse slot the bbox path samples
@@ -459,6 +484,13 @@ export function createPhotorealEarth(
   // combination is what the shader patch uses for night-lights
   // gating; emissiveMap starts null and gets set once the lights
   // texture finishes loading.
+  // Initial specular tint multiplies the texture-based specular map.
+  // Wired below to shaderSettingsService so the Tools-menu specular
+  // preset + the dev tuner page can dial the ocean glint up and down
+  // — same uniform set the 2D MapLibre layer reads each frame
+  // (§7.2). 0xaaaaaa (== ~0.667) was the pre-§7.2 hard-coded value;
+  // the live value is set immediately after material construction
+  // below so VR boot picks up the persisted preset (Default 0.35).
   const material = new THREE_.MeshPhongMaterial({
     map: baseEarthTexture,
     specularMap: specularMapTexture,
@@ -484,6 +516,8 @@ export function createPhotorealEarth(
   //      same fast-path discipline 3e/B brought to the 2D side.
   material.onBeforeCompile = (shader) => {
     shader.uniforms.uSunDir = sunDirUniform
+    shader.uniforms.uContrast = contrastUniform
+    shader.uniforms.uSaturation = saturationUniform
     shader.uniforms.uOverlayHasBbox = overlayHasBboxUniform
     shader.uniforms.uOverlayBbox = overlayBboxUniform
     shader.uniforms.uOverlayLonOrigin = overlayLonOriginUniform
@@ -508,6 +542,8 @@ export function createPhotorealEarth(
       '#include <common>',
       `#include <common>
        varying float vNdotL;
+       uniform float uContrast;
+       uniform float uSaturation;
        uniform int uOverlayHasBbox;
        uniform vec4 uOverlayBbox;       // (n, s, w, e) degrees
        uniform float uOverlayLonOrigin; // degrees
@@ -576,6 +612,38 @@ export function createPhotorealEarth(
            float fv = (uOverlayFlipY == 1) ? (1.0 - vMapUv.y) : vMapUv.y;
            sampledDiffuseColor = texture2D(map, vec2(fu, fv));
          }
+         // §7.2 colour correction — applied to the SAMPLED DIFFUSE
+         // (not gl_FragColor at the end of the pipeline) so the
+         // semantics match the 2D earthTileLayer's Pass 0, which
+         // operates on the Blue Marble framebuffer BEFORE any
+         // night-darken / lights / specular / cloud / atmosphere
+         // composition.
+         //
+         // Critical: applied in sRGB PERCEPTUAL space, not linear.
+         // Three.js samples the diffuse texture with the
+         // SRGBColorSpace transform, so sampledDiffuseColor.rgb at
+         // this point is already linear (Three.js gamma-decoded it
+         // for the lighting pipeline). The 2D Pass 0 reads the
+         // MapLibre framebuffer
+         // which is in sRGB display space (no gamma decode), so
+         // its "contrast around 0.5" treats 0.5 as the perceptual
+         // midpoint. Applying the same maths in linear space would
+         // treat typical earth-brown (sRGB ~0.4 → linear ~0.13) as
+         // much-darker-than-midtone and aggressively crush it at
+         // any contrast > 1, which is exactly what produced the
+         // "sky takes over" symptom — the surface darkened, the
+         // atmosphere shell (unaffected) dominated relatively.
+         // Encode to sRGB, do the maths, decode back to linear.
+         // Approximate gamma 2.2 — the piecewise sRGB transfer
+         // curve is a few %-points more accurate but adds branches
+         // to a hot path; the 2.2 approximation is good enough for
+         // a perceptual-contrast knob.
+         vec3 perceptual = pow(sampledDiffuseColor.rgb, vec3(1.0 / 2.2));
+         perceptual = (perceptual - 0.5) * uContrast + 0.5;
+         float vrLuma = dot(perceptual, vec3(0.299, 0.587, 0.114));
+         perceptual = mix(vec3(vrLuma), perceptual, uSaturation);
+         perceptual = clamp(perceptual, 0.0, 1.0);
+         sampledDiffuseColor.rgb = pow(perceptual, vec3(2.2));
          diffuseColor *= sampledDiffuseColor;
        #endif`,
     )
@@ -588,6 +656,41 @@ export function createPhotorealEarth(
        #endif`,
     )
   }
+
+  // Apply the persisted specular preset to the Phong material's
+  // specular tint and subscribe to future shader-settings changes
+  // (Tools-menu radio + tuner-page sliders). Multiplies the existing
+  // specular MAP, so the per-texel ocean / land masking stays —
+  // we're just scaling intensity. The full setSpecularFromSettings
+  // logic lives once here; an unsubscribe runs in dispose() below.
+  function setSpecularFromSettings() {
+    const s = getShaderSettings().specularStrength
+    material.specular.setRGB(s, s, s)
+  }
+  setSpecularFromSettings()
+
+  // §7.2 normal-map intensity. MeshPhongMaterial scales the
+  // sampled tangent-space normal by `normalScale` before perturbing
+  // the surface normal, so this is the canonical knob — a value
+  // of (0, 0) collapses to flat-shaded, (1, 1) is the asset's
+  // authored depth, anything in between dials it. We mirror the
+  // shaderSettingsService.bumpStrength scalar onto both axes so
+  // VR + 2D bump intensity track each other. `material.normalMap`
+  // gets bound by the progressive loader below once a tier lands;
+  // until then this is a no-op (MeshPhong skips its normal-map
+  // chunks when the slot is null).
+  function setBumpFromSettings() {
+    const s = getShaderSettings().bumpStrength
+    material.normalScale.set(s, s)
+  }
+  setBumpFromSettings()
+
+  const unsubscribeShaderSettings = onShaderSettingsChange(() => {
+    setSpecularFromSettings()
+    setBumpFromSettings()
+    contrastUniform.value = getShaderSettings().contrast
+    saturationUniform.value = getShaderSettings().saturation
+  })
 
   // 64×64 is plenty for a globe filling ~40° of the viewer's FOV.
   const geometry = new THREE_.SphereGeometry(radius, 64, 64)
@@ -1011,6 +1114,16 @@ export function createPhotorealEarth(
    * keep the effect disabled in that case.
    */
   let lightsTexture: THREE.Texture | null = null
+  /**
+   * Normal-map texture once the CDN fetch lands — kept so dispose()
+   * can free the GPU memory. The MeshPhongMaterial's built-in
+   * `normalMap` slot drives the bump shading; intensity is set via
+   * `material.normalScale` from shaderSettingsService.bumpStrength.
+   * Stays null while pending or failed; the material falls back to
+   * un-perturbed shading in that case (MeshPhong skips the normal-
+   * map chunks when `material.normalMap` is null).
+   */
+  let normalTexture: THREE.Texture | null = null
 
   /**
    * Push `options` into the four overlay uniforms (bbox / lonOrigin /
@@ -1070,6 +1183,7 @@ export function createPhotorealEarth(
     urls: string[],
     apply: (tex: THREE.Texture) => void,
     label: string,
+    colorSpace: THREE.ColorSpace = THREE_.SRGBColorSpace,
   ): Promise<void> {
     for (const url of urls) {
       try {
@@ -1080,7 +1194,15 @@ export function createPhotorealEarth(
         // will ever free.
         if (disposed) return
         const tex = new THREE_.Texture(img)
-        tex.colorSpace = THREE_.SRGBColorSpace
+        // Set colour space BEFORE flagging needsUpdate. Three.js
+        // bakes the texture's colorSpace into the shader chunks at
+        // material compile time (it decides whether to insert a
+        // sRGB → linear conversion at sample time). Setting it AFTER
+        // needsUpdate would leave a normal-map texture compiled with
+        // the sRGB path, gamma-correcting raw normal vectors into
+        // garbage. SRGB is the right default for the diffuse + night-
+        // lights tiers; normal maps pass NoColorSpace explicitly.
+        tex.colorSpace = colorSpace
         tex.needsUpdate = true
         apply(tex)
       } catch (err) {
@@ -1147,6 +1269,35 @@ export function createPhotorealEarth(
       material.needsUpdate = true
     },
     'earth lights',
+  )
+
+  // Normal map — 2K → 4K → 8K. Mirrors the 2D earthTileLayer
+  // ladder so a Tools-menu specular pick + bump tuner-page slide
+  // produces a consistent look across the MapLibre globe and the
+  // VR / Orbit Three.js sphere. material.needsUpdate is required
+  // on first bind because MeshPhongMaterial only compiles its
+  // normal-map shader chunks when the slot transitions from null
+  // to non-null — subsequent tier swaps are texImage uploads and
+  // don't need a re-compile.
+  //
+  // Normal maps load with `NoColorSpace` (4th arg) so Three.js
+  // doesn't gamma-correct the tangent-space normal samples — they
+  // encode geometry, not perceptual colour, and an sRGB→linear
+  // transform would distort the slope vectors into the wrong
+  // direction (the most visible symptom was Brazil reading red
+  // and the Amazon reading sky-blue once the sample bled into
+  // the lighting calculation).
+  void loadProgressive(
+    EARTH_NORMAL_URLS,
+    tex => {
+      const isFirstBind = material.normalMap == null
+      normalTexture?.dispose()
+      normalTexture = tex
+      material.normalMap = tex
+      if (isFirstBind) material.needsUpdate = true
+    },
+    'earth normal',
+    THREE_.NoColorSpace,
   )
 
   return {
@@ -1451,6 +1602,9 @@ export function createPhotorealEarth(
       // progressive diffuse/lights tiers) to drop their result on
       // the floor instead of attaching it to a torn-down scene.
       disposed = true
+      // Drop the shader-settings subscription so a Tools-menu click
+      // after a VR exit doesn't keep mutating a disposed material.
+      unsubscribeShaderSettings()
       // Drop all diffuse subscribers — no point firing them after
       // we're gone, and callers should re-subscribe on fresh handles.
       diffuseSubscribers.clear()
@@ -1467,6 +1621,7 @@ export function createPhotorealEarth(
       specularMapTexture.dispose()
       baseDiffuseTexture?.dispose()
       lightsTexture?.dispose()
+      normalTexture?.dispose()
       material.dispose()
       geometry.dispose()
       if (cloudMesh) {

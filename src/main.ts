@@ -74,6 +74,8 @@ import { resolveFrameQuery } from './utils/frames'
 import { initTourAuthoring } from './ui/tourAuthoring'
 import { bootstrapI18n } from './i18n/bootstrap'
 import { initUiScale } from './services/uiScaleService'
+import { initShaderSettings } from './services/shaderSettingsService'
+import { maybeInitShaderTuner } from './ui/shaderTunerUI'
 
 // Apply the persisted UI-scale to `:root` at module-evaluation
 // time — before DOMContentLoaded, before any UI renders, before
@@ -86,6 +88,18 @@ import { initUiScale } from './services/uiScaleService'
 // SSR-safe (the service no-ops when `document` is undefined).
 // See docs/WEB_CATALOG_FEATURES_PLAN.md §7.1.
 initUiScale()
+
+// Apply persisted shader settings (§7.2) — currently the specular-
+// strength preset. Contrast / saturation / bump are dev-tuned and
+// ship via SHADER_DEFAULTS. The earth-tile-layer + photoreal Earth
+// read getShaderSettings() per-frame, so this just primes the
+// snapshot.
+initShaderSettings()
+
+// Mount the §7.2 shader-tuner panel — no-op unless the URL carries
+// `?tune=shader`. Dev surface for picking the shipped SHADER_DEFAULTS
+// values; never reaches end-users via the Tools menu.
+maybeInitShaderTuner()
 
 // Phase 5: set a body class so CSS can target mobile-native adaptations
 // (larger touch targets, bottom sheets, etc.) without JS per-component.
