@@ -612,6 +612,22 @@ export function createPhotorealEarth(
            float fv = (uOverlayFlipY == 1) ? (1.0 - vMapUv.y) : vMapUv.y;
            sampledDiffuseColor = texture2D(map, vec2(fu, fv));
          }
+         // §7.2 colour correction — applied to the SAMPLED DIFFUSE
+         // (not gl_FragColor at the end of the pipeline) so the
+         // semantics match the 2D earthTileLayer's Pass 0, which
+         // operates on the Blue Marble framebuffer BEFORE any
+         // night-darken / lights / specular / cloud / atmosphere
+         // composition. Putting it at <tonemapping_fragment> instead
+         // (the previous draft) was applying contrast/sat to the
+         // FINAL composed colour including the specular hotspot,
+         // which oversaturated highlights and pushed mid-tones (the
+         // green Amazon, the brown Andes) into perceived-wrong
+         // territory — Brazil read as red, the rainforest as sky-
+         // blue, none of which matched the 2D look.
+         sampledDiffuseColor.rgb = (sampledDiffuseColor.rgb - 0.5) * uContrast + 0.5;
+         float vrLuma = dot(sampledDiffuseColor.rgb, vec3(0.299, 0.587, 0.114));
+         sampledDiffuseColor.rgb = mix(vec3(vrLuma), sampledDiffuseColor.rgb, uSaturation);
+         sampledDiffuseColor.rgb = clamp(sampledDiffuseColor.rgb, 0.0, 1.0);
          diffuseColor *= sampledDiffuseColor;
        #endif`,
     )
@@ -622,23 +638,6 @@ export function createPhotorealEarth(
          float nightFactor = smoothstep( 0.0, -0.2, vNdotL );
          totalEmissiveRadiance *= emissiveColor.rgb * nightFactor * ${NIGHT_LIGHT_STRENGTH.toFixed(2)};
        #endif`,
-    )
-
-    // §7.2 colour correction — applied after <output_fragment> sets
-    // gl_FragColor but BEFORE tonemapping / colorspace_fragment so we
-    // operate in linear space, matching the 2D side's pre-tonemap
-    // composition order. Identity at 1.0/1.0 collapses both lines to
-    // pass-throughs; the shipped defaults are 1.10 / 1.20 to bring
-    // the Phong-lit Earth closer to the Blue Marble reference. The
-    // clamp guards against contrast pushing a value above 1.0 (HDR-
-    // ish), which would propagate through subsequent chunks oddly.
-    shader.fragmentShader = shader.fragmentShader.replace(
-      '#include <tonemapping_fragment>',
-      `gl_FragColor.rgb = (gl_FragColor.rgb - 0.5) * uContrast + 0.5;
-       float vrLuma = dot(gl_FragColor.rgb, vec3(0.299, 0.587, 0.114));
-       gl_FragColor.rgb = mix(vec3(vrLuma), gl_FragColor.rgb, uSaturation);
-       gl_FragColor.rgb = clamp(gl_FragColor.rgb, 0.0, 1.0);
-       #include <tonemapping_fragment>`,
     )
   }
 
@@ -1168,6 +1167,7 @@ export function createPhotorealEarth(
     urls: string[],
     apply: (tex: THREE.Texture) => void,
     label: string,
+    colorSpace: THREE.ColorSpace = THREE_.SRGBColorSpace,
   ): Promise<void> {
     for (const url of urls) {
       try {
@@ -1178,7 +1178,15 @@ export function createPhotorealEarth(
         // will ever free.
         if (disposed) return
         const tex = new THREE_.Texture(img)
-        tex.colorSpace = THREE_.SRGBColorSpace
+        // Set colour space BEFORE flagging needsUpdate. Three.js
+        // bakes the texture's colorSpace into the shader chunks at
+        // material compile time (it decides whether to insert a
+        // sRGB → linear conversion at sample time). Setting it AFTER
+        // needsUpdate would leave a normal-map texture compiled with
+        // the sRGB path, gamma-correcting raw normal vectors into
+        // garbage. SRGB is the right default for the diffuse + night-
+        // lights tiers; normal maps pass NoColorSpace explicitly.
+        tex.colorSpace = colorSpace
         tex.needsUpdate = true
         apply(tex)
       } catch (err) {
@@ -1255,22 +1263,25 @@ export function createPhotorealEarth(
   // normal-map shader chunks when the slot transitions from null
   // to non-null — subsequent tier swaps are texImage uploads and
   // don't need a re-compile.
+  //
+  // Normal maps load with `NoColorSpace` (4th arg) so Three.js
+  // doesn't gamma-correct the tangent-space normal samples — they
+  // encode geometry, not perceptual colour, and an sRGB→linear
+  // transform would distort the slope vectors into the wrong
+  // direction (the most visible symptom was Brazil reading red
+  // and the Amazon reading sky-blue once the sample bled into
+  // the lighting calculation).
   void loadProgressive(
     EARTH_NORMAL_URLS,
     tex => {
       const isFirstBind = material.normalMap == null
-      // Normal maps stay in linear space — they encode geometry,
-      // not perceptual colour, so SRGBColorSpace (the default
-      // loadProgressive applies) would gamma-correct slopes
-      // incorrectly. NoColorSpace tells Three.js to leave the
-      // sampled bytes alone.
-      tex.colorSpace = THREE_.NoColorSpace
       normalTexture?.dispose()
       normalTexture = tex
       material.normalMap = tex
       if (isFirstBind) material.needsUpdate = true
     },
     'earth normal',
+    THREE_.NoColorSpace,
   )
 
   return {
