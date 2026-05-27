@@ -1,24 +1,31 @@
 /**
  * Shader-settings service — the runtime side of the §7.2 globe-
  * shader uniforms. Persists the user's specular-strength preset
- * (Tools menu) and the dev-tuner overrides for contrast,
- * saturation, and bump intensity, and exposes them as a single
- * `getShaderSettings()` snapshot the renderer reads each frame.
+ * (Tools menu only — the other three knobs are dev-tuned via
+ * `?tune=shader`, not user-controllable) and exposes the live
+ * snapshot via `getShaderSettings()` for the renderer to read
+ * each frame.
  *
  * Load precedence per uniform, highest first:
  *
- *   1. Live override set by the `?tune=shader` dev tuner — not
- *      persisted; reset on reload unless explicitly saved.
- *   2. `localStorage[STORAGE_KEY]` — the user's saved choice.
- *   3. The shipped default below (the value the codebase has tuned
- *      against the Blue Marble reference).
+ *   1. Live override set by the `?tune=shader` dev tuner — never
+ *      persisted; resets on reload.
+ *   2. `localStorage[SPECULAR_STORAGE_KEY]` — specular preset only.
+ *   3. `SHADER_DEFAULTS` below (the value the codebase has tuned
+ *      against the Blue Marble reference). Contrast / saturation /
+ *      bump only flow through this layer.
  *
- * The renderer holds a reference to the live snapshot and re-reads
- * it on every frame — there's no event channel; mutating via
- * `setShaderSettings` triggers a `dispatchEvent` that the
- * earth-tile layer + photoreal-earth subscribers latch onto for
- * `triggerRepaint`. The tuner panel listens too so its sliders
- * stay in sync if the same setting is changed from elsewhere.
+ * Renderer integration is event-driven. Subscribers register via
+ * `onShaderSettingsChange(listener)`; the service fires the
+ * listener whenever the snapshot mutates — `setSpecularPreset` or
+ * `setTunerValue` are the only two write paths. Subscribers then
+ * call `getShaderSettings()` to pick up the new values and
+ * `triggerRepaint` (2D) / update Three.js uniforms (VR). The tuner
+ * panel listens too so its sliders re-sync if a Tools-menu click
+ * changes specular from elsewhere.
+ *
+ * `getShaderSettings()` returns a fresh object spread each call so
+ * mutating the returned snapshot can't corrupt the live state.
  */
 
 import type { SpecularPreset } from '../types/index'
@@ -83,8 +90,16 @@ const target: EventTarget = typeof window === 'undefined'
   ? new EventTarget()
   : window
 
-/** Internal — clamp + sanitise a numeric input. */
-function clamp(raw: unknown, min: number, max: number): number | null {
+/**
+ * Internal — validate a numeric input against a [min, max] band.
+ * Despite the legacy name overlap with GLSL's `clamp()`, this is a
+ * REJECTION filter, not a clamp: out-of-band values return `null`
+ * so the caller can decide what to do (the tuner treats nulls as
+ * "no-op the write"; the loader treats them as "fall through to
+ * the next precedence layer"). Hard-clamping silently to the edge
+ * would mask runaway sliders / corrupted persisted state.
+ */
+function validateInBand(raw: unknown, min: number, max: number): number | null {
   if (raw == null) return null
   const n = typeof raw === 'number' ? raw : Number(raw)
   if (!Number.isFinite(n)) return null
@@ -171,7 +186,7 @@ export function setTunerValue(
   raw: number,
 ): void {
   const band = TUNER_BANDS[key]
-  const value = clamp(raw, band.min, band.max)
+  const value = validateInBand(raw, band.min, band.max)
   if (value == null) return
   state[key] = value
   notify()

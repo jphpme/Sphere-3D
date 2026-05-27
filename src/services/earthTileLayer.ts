@@ -426,9 +426,10 @@ const bumpFragSrc = `#version 300 es
     // the south-pole pixels.
     vec2 uv = vUV;
 
-    // Tangent-space normal from the map. Decode from [0, 1] to
-    // [-1, 1]. Z is reconstructed by re-normalising even when the
-    // texture stored a not-quite-unit vector.
+    // Tangent-space normal from the map. Decode each channel from
+    // [0, 1] to [-1, 1], then renormalise so JPEG round-trip and
+    // mipmap-LOD bilinear blending don't leave us with sub-unit
+    // (or super-unit) normals.
     vec3 tN = normalize(texture(uNormalMap, uv).rgb * 2.0 - 1.0);
 
     // Build TBN from the sphere surface normal. T points east, B
@@ -1636,7 +1637,7 @@ export function createEarthTileLayer(): EarthTileLayerControl {
         : setTimeout(loadSpecularMap, 200)
 
       // --- Load normal-map texture (§7.2) — graceful when missing ---
-      // The asset (`earth_normal_2048.jpg`) lives on the same
+      // The asset (`earth_normal_8192.jpg`, URL constant above) lives on the same
       // CloudFront-fronted S3 bucket as the VR diffuse / lights
       // tiers; URL above. If the file isn't present we skip the bump
       // pass entirely rather than render a flat-shaded artifact.

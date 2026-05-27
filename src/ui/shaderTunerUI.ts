@@ -79,12 +79,17 @@ function mountTuner(): void {
   document.body.appendChild(host)
   wireSliders(host)
   wireCopyButton(host)
-  wireCloseButton(host)
-  wireResetButton(host)
   // External changes (Tools-menu specular click, programmatic
   // setSpecularPreset call) should refresh the slider positions
-  // so the tuner stays an accurate mirror of the live state.
-  onShaderSettingsChange((s) => syncSliders(host, s))
+  // so the tuner stays an accurate mirror of the live state. The
+  // unsubscribe handle is passed through to the close-button wiring
+  // so a panel dismiss tears the listener down — without that, a
+  // closed panel keeps a detached `host` reachable via the event
+  // target and every settings change would do dead DOM work
+  // forever.
+  const unsubscribe = onShaderSettingsChange((s) => syncSliders(host, s))
+  wireCloseButton(host, unsubscribe)
+  wireResetButton(host)
   logger.info('[shaderTuner] mounted (?tune=shader)')
 }
 
@@ -195,10 +200,11 @@ function wireResetButton(host: HTMLElement): void {
   })
 }
 
-function wireCloseButton(host: HTMLElement): void {
+function wireCloseButton(host: HTMLElement, unsubscribe: () => void): void {
   const btn = host.querySelector<HTMLButtonElement>('#shader-tuner-close')
   if (!btn) return
   btn.addEventListener('click', () => {
+    unsubscribe()
     host.remove()
   })
 }
