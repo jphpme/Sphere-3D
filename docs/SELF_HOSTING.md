@@ -684,15 +684,24 @@ the tracker directly:
 SELECT name, applied_at FROM d1_migrations ORDER BY id;
 ```
 
-A canary for the most recent migration (`0010_non_global_metadata.sql`)
-is whether the new columns exist:
+The authoritative "is everything applied?" check is the
+`wrangler d1 migrations list` command above — it diffs the whole
+`migrations/catalog/` directory against the remote tracker, so it
+stays correct as the directory grows. **Don't hard-code "the latest
+migration is NNNN" anywhere** — the count climbs every release (as
+of this writing the directory runs through
+`0015_tours_retracted_at.sql`).
+
+A per-migration canary is whether that file's columns exist. For the
+newest at time of writing (`0015`):
 
 ```sql
-SELECT name FROM pragma_table_info('datasets')
- WHERE name IN ('bbox_n', 'celestial_body', 'lon_origin');
+SELECT name FROM pragma_table_info('tours') WHERE name = 'retracted_at';
 ```
 
-Three rows = 0010 is in; zero rows = it isn't.
+One row = `0015` is in; zero rows = it (and likely later files)
+isn't. The same shape works for any migration — substitute the
+table and column it adds.
 
 **Dashboard fallback for applying.** If `wrangler` isn't
 installed where you're deploying from, you can paste each
