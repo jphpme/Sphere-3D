@@ -526,6 +526,9 @@ conceptual framing and points operators at the right tools.
 | `PREVIEW_SIGNING_KEY` | Secret | HMAC-SHA-256 secret for preview-token signing. Without it the preview endpoints fail closed. | The CLI's `terraviz preview` command. |
 | `ACCESS_TEAM_DOMAIN` / `ACCESS_AUD` | Plaintext | Cloudflare Access app credentials for `/api/v1/publish/**`. Without them the publisher middleware 503s with `access_unconfigured`. | Publisher API access. |
 | `TRUSTED_PUBLISHER_DOMAINS` | Plaintext (optional) | Comma-separated email domains whose verified Access user logins JIT-provision as `staff/active/admin=1` instead of the default `community/pending`. Required for single-org deploys where the operator IS the publisher (otherwise SSO sign-in lands the operator at `pending` and locks them out of their own deploy). Match is exact, case-insensitive, no subdomain wildcarding. Service tokens are unaffected. | Single-org publisher portal access (Phase 3pa onward). |
+| `R2_PUBLIC_BASE` | Plaintext | Public origin for the catalog R2 bucket (e.g. `https://assets.terraviz.your-org.org`). The manifest endpoint and SPA build playable HLS / image / tour-asset URLs from this. Bind the domain under R2 → bucket → Settings → Connect Domain first. **Not optional for the audit** (see note below). | Serving any R2-hosted asset (Phase 3 onward). |
+| `R2_S3_ENDPOINT` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | Secret | R2 S3-API credentials for server-side presigned PUT minting and digest verification. Minted at R2 → Manage R2 API Tokens (Read+Write on the bucket). The same three values are also consumed shell-side by the migration CLIs and the transcode workflow. | Browser/CLI asset uploads. |
+| `GITHUB_OWNER` / `GITHUB_REPO` / `GITHUB_DISPATCH_TOKEN` | Plaintext / Plaintext / Secret | Point the video-transcode `repository_dispatch` at **your fork** (e.g. `your-org` / `terraviz`). Token is a PAT with `repo`/Contents:write on that repo. Without them video uploads 503 `github_dispatch_unconfigured`. | Video transcode (§8e). |
 
 Every binding must be wired into **both Production and Preview
 environments** in the dashboard. The most common cutover mistake
@@ -533,6 +536,18 @@ is "works on preview, breaks on production" (or vice versa) from
 forgetting the per-environment toggle. The `npm run
 check:pages-bindings` audit (Phase 1f/B) catches this
 automatically — see step 8d below.
+
+> **The audit's source of truth is
+> [`scripts/lib/expected-bindings.ts`](../scripts/lib/expected-bindings.ts),
+> not this table.** It also asserts the Phase 3 analytics/feedback
+> bindings (`FEEDBACK_DB`, `ANALYTICS`, `TELEMETRY_KILL_SWITCH`) in
+> both environments. So `check:pages-bindings` will report
+> `R2_PUBLIC_BASE` and the R2 / GitHub-dispatch entries above as
+> `MISSING` on a deploy that wired only the rows the older table
+> listed — that's expected, not a false positive. Wire the full set
+> (or, if you genuinely don't run uploads/transcode yet, prune the
+> corresponding entries from `expected-bindings.ts` so the audit
+> reflects your deploy's actual surface).
 
 ### 8b. Workers Paid is recommended, not optional
 
