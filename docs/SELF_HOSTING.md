@@ -94,27 +94,39 @@ The resource *names* (`sphere-feedback`, `terraviz_events`,
 if you rename, keep the dashboard binding + the override env vars
 (`CATALOG_R2_BUCKET`, etc.) in sync.
 
-### Upstream-hosted services — set these for an independent node
+### Upstream-hosted services — when they matter for an independent node
 
-Two runtime dependencies were historically hardcoded to the
+A few runtime dependencies were historically hardcoded to the
 upstream node's infrastructure. They are now resolved from
 **build-time `VITE_*` env vars** (centralised in
 [`src/config/endpoints.ts`](../src/config/endpoints.ts)), defaulting
-to the upstream URLs so an unconfigured demo fork still works. For a
-node that must stand on its own, set these in Pages → Settings →
-Environment variables (build) **and host the proxy / assets
-yourself**:
+to the upstream URLs so an unconfigured demo fork still works.
 
-| Env var | Default | What it is | To be independent |
+> **Most new nodes can ignore the two proxies entirely.** The video
+> and caption proxies only serve **legacy SOS catalog data**
+> (`vimeo:` data_refs and `sos.noaa.gov` captions). A node only ever
+> has those refs if it deliberately runs `terraviz import-snapshot`
+> to mirror the upstream SOS catalog. **Content you add through the
+> publisher interface is transcoded to your own R2 / Cloudflare
+> Stream** (`r2:` / `stream:` data_refs) and never touches either
+> proxy. So a publisher-based node is independent of the proxies out
+> of the box — leave the defaults; they simply never fire.
+
+The one knob that *does* affect every node is the Earth basemap
+texture host. Set these in Pages → Settings → Environment variables
+(build):
+
+| Env var | Default | What it is | When you need to change it |
 |---|---|---|---|
-| `VITE_VIDEO_PROXY_BASE` | `https://video-proxy.zyra-project.org/video` | Resolves legacy `vimeo:` dataset refs (the SOS video catalog) into HLS/MP4. | Run your own proxy worker and point this at it. (The server-side manifest endpoint already honors `VIDEO_PROXY_BASE` — this is its client-side twin.) Datasets you publish to R2/Stream via the catalog backend don't use it at all. |
-| `VITE_CAPTION_PROXY_BASE` | `https://video-proxy.zyra-project.org/captions` | CORS shim for `sos.noaa.gov` caption `.srt` files. | Same proxy, `/captions` path. |
-| `VITE_EARTH_ASSET_BASE` | `https://d3sik7mbbzunjo.cloudfront.net/terraviz/basemaps` | Earth basemap textures (diffuse / night lights / normal / borders) for the photoreal Earth (VR + Orbit) and 2D globe overlays. | Mirror the texture files to your own bucket/CDN and point this at it. |
+| `VITE_EARTH_ASSET_BASE` | `https://d3sik7mbbzunjo.cloudfront.net/terraviz/basemaps` | Earth basemap textures (diffuse / night lights / normal / borders) for the photoreal Earth (VR + Orbit) and 2D globe overlays — loaded by **every** node. | **Recommended for any independent node.** Mirror the texture files (plain static `.jpg`/`.png`) to your own bucket/CDN and point this at it. |
+| `VITE_VIDEO_PROXY_BASE` | `https://video-proxy.zyra-project.org/video` | Resolves **legacy SOS** `vimeo:` data_refs into HLS/MP4. | Only if you mirror the SOS catalog (`import-snapshot`) **and** want video independent of upstream. The proxy worker is not in this repo — you'd run your own. Not needed for publisher-based nodes. |
+| `VITE_CAPTION_PROXY_BASE` | `https://video-proxy.zyra-project.org/captions` | CORS shim for **legacy SOS** `sos.noaa.gov` caption `.srt` files. | Same as above — SOS-mirror only. Publisher-uploaded captions live in your R2. |
 
-If you leave the defaults, your node **functions** but depends on
-upstream's uptime and bandwidth for video playback and the photoreal
-Earth — fine for a quick demo, not for a node meant to run
-independently.
+If you mirror the SOS catalog and leave the proxy defaults, video
+playback for those rows depends on upstream's uptime/bandwidth —
+fine for a demo, not for a node meant to run independently. The
+Earth textures depend on upstream's CDN for **every** node until you
+set `VITE_EARTH_ASSET_BASE`.
 
 The SOS catalog metadata snapshot
 (`s3.…/metadata.sosexplorer.gov/dataset.json` in
