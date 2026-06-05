@@ -21,6 +21,7 @@
 import { t } from '../../../i18n'
 import { publisherGet, publisherSend, handleSessionError } from '../api'
 import { buildErrorCard } from '../components/error-card'
+import { dateTimeToIso } from '../components/dataset-form'
 import '../../../styles/hero-panel.css'
 
 /** Keep in sync with `HERO_HEADLINE_MAX_LEN` in the backend store
@@ -57,22 +58,27 @@ function clientIsPrivileged(me: MeResponse): boolean {
   return me.is_admin === true || me.role === 'staff' || me.role === 'service'
 }
 
-/** ISO timestamp → the `YYYY-MM-DDTHH:mm` shape a `datetime-local`
- *  input wants. Returns '' when unparseable. */
-function isoToLocalInput(iso: string | undefined): string {
+/** Split an ISO timestamp into the local-time `YYYY-MM-DD` value an
+ *  `<input type="date">` wants. Inverse of dataset-form's
+ *  {@link dateTimeToIso} (which composes the local date + time inputs
+ *  back into a UTC ISO string). Returns '' when unparseable. */
+function isoToDateLocal(iso: string | undefined): string {
   if (!iso) return ''
   const ms = Date.parse(iso)
   if (!Number.isFinite(ms)) return ''
   const d = new Date(ms)
   const pad = (n: number) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
 }
 
-/** `datetime-local` value → ISO-8601, or '' when empty/invalid. */
-function localInputToIso(value: string): string {
-  if (!value) return ''
-  const ms = Date.parse(value)
-  return Number.isFinite(ms) ? new Date(ms).toISOString() : ''
+/** Local-time `HH:MM` for an `<input type="time">`. */
+function isoToTimeLocal(iso: string | undefined): string {
+  if (!iso) return ''
+  const ms = Date.parse(iso)
+  if (!Number.isFinite(ms)) return ''
+  const d = new Date(ms)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
 function el<K extends keyof HTMLElementTagNameMap>(
@@ -167,18 +173,24 @@ function renderForm(mount: HTMLElement, state: FormState): void {
   }
   if (currentHero) select.value = currentHero.datasetId
 
-  const startInput = el('input', { type: 'datetime-local', className: 'publisher-hero-input', id: 'hero-start' })
-  const endInput = el('input', { type: 'datetime-local', className: 'publisher-hero-input', id: 'hero-end' })
-  if (currentHero) {
-    startInput.value = isoToLocalInput(currentHero.window.start)
-    endInput.value = isoToLocalInput(currentHero.window.end)
-  } else {
-    // Default span: now → now + 7 days, so the curator only narrows it.
-    const now = new Date()
-    const week = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000)
-    startInput.value = isoToLocalInput(now.toISOString())
-    endInput.value = isoToLocalInput(week.toISOString())
-  }
+  // Separate date + time inputs (not `datetime-local`) to match the
+  // portal convention — some browsers hide the time scrubber on
+  // datetime-local (see dataset-form.ts). Default span: now → +7 days,
+  // so the curator only narrows it.
+  const now = new Date()
+  const week = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000)
+  const startSeed = currentHero ? currentHero.window.start : now.toISOString()
+  const endSeed = currentHero ? currentHero.window.end : week.toISOString()
+  const dateLabel = t('publisher.datasetForm.datetime.date')
+  const timeLabel = t('publisher.datasetForm.datetime.time')
+  const mkDate = (id: string, iso: string, aria: string) =>
+    el('input', { type: 'date', className: 'publisher-hero-input', id, value: isoToDateLocal(iso), ariaLabel: aria })
+  const mkTime = (id: string, iso: string, aria: string) =>
+    el('input', { type: 'time', className: 'publisher-hero-input', id, value: isoToTimeLocal(iso), ariaLabel: aria })
+  const startDate = mkDate('hero-start-date', startSeed, `${t('publisher.hero.windowStart')} ${dateLabel}`)
+  const startTime = mkTime('hero-start-time', startSeed, `${t('publisher.hero.windowStart')} ${timeLabel}`)
+  const endDate = mkDate('hero-end-date', endSeed, `${t('publisher.hero.windowEnd')} ${dateLabel}`)
+  const endTime = mkTime('hero-end-time', endSeed, `${t('publisher.hero.windowEnd')} ${timeLabel}`)
 
   const headlineInput = el('input', {
     type: 'text',
@@ -240,8 +252,8 @@ function renderForm(mount: HTMLElement, state: FormState): void {
 
   setBtn.addEventListener('click', () => {
     const datasetId = select.value
-    const startIso = localInputToIso(startInput.value)
-    const endIso = localInputToIso(endInput.value)
+    const startIso = dateTimeToIso(startDate.value, startTime.value)
+    const endIso = dateTimeToIso(endDate.value, endTime.value)
     status.textContent = ''
     status.classList.remove('publisher-hero-status-error')
     if (!datasetId) {
@@ -293,8 +305,8 @@ function renderForm(mount: HTMLElement, state: FormState): void {
     heading(t('publisher.hero.title')),
     el('p', { className: 'publisher-hero-intro', textContent: t('publisher.hero.intro') }),
     labelled(t('publisher.hero.dataset'), select),
-    labelled(t('publisher.hero.windowStart'), startInput),
-    labelled(t('publisher.hero.windowEnd'), endInput),
+    labelled(t('publisher.hero.windowStart'), dateTimeRow(startDate, startTime)),
+    labelled(t('publisher.hero.windowEnd'), dateTimeRow(endDate, endTime)),
     labelled(t('publisher.hero.headline'), headlineInput),
     el('div', { className: 'publisher-hero-preview-wrap' }, [
       el('span', { className: 'publisher-field-label', textContent: t('publisher.hero.preview') }),
@@ -352,4 +364,9 @@ function labelled(label: string, control: HTMLElement): HTMLElement {
   wrap.append(el('span', { className: 'publisher-field-label', textContent: label }))
   wrap.append(control)
   return wrap
+}
+
+/** A date + time input pair, laid out side by side. */
+function dateTimeRow(dateInput: HTMLElement, timeInput: HTMLElement): HTMLElement {
+  return el('div', { className: 'publisher-hero-datetime-row' }, [dateInput, timeInput])
 }

@@ -1211,6 +1211,17 @@
   color: #f4f7fa;
   background-color: #161b24;
 }
+.publisher-hero-datetime-row {
+  display: flex;
+  gap: calc(0.5rem * var(--ui-scale));
+}
+.publisher-hero-datetime-row .publisher-hero-input[type="date"] {
+  flex: 1 1 auto;
+  min-inline-size: 0;
+}
+.publisher-hero-datetime-row .publisher-hero-input[type="time"] {
+  flex: 0 0 auto;
+}
 .publisher-hero-input:focus-visible,
 .publisher-hero-select:focus-visible {
   outline: 2px solid var(--white-o20, rgba(255, 255, 255, 0.2));

@@ -101,6 +101,30 @@ describe('renderFeaturedHeroPage', () => {
     expect(mount.querySelector('.publisher-hero-status')?.textContent).toBe('Hero set.')
   })
 
+  it('composes the window from the separate date + time inputs', async () => {
+    const routes = baseRoutes()
+    routes['PUT /api/v1/publish/featured-hero'] = { body: { hero: { datasetId: DS, window: { start: '', end: '' } } } }
+    const fetchFn = mockFetch(routes)
+    await renderFeaturedHeroPage(mount, { fetchFn })
+    ;(mount.querySelector('.publisher-hero-select') as HTMLSelectElement).value = DS
+    ;(mount.querySelector('#hero-start-date') as HTMLInputElement).value = '2026-05-01'
+    ;(mount.querySelector('#hero-start-time') as HTMLInputElement).value = '09:00'
+    ;(mount.querySelector('#hero-end-date') as HTMLInputElement).value = '2026-06-01'
+    ;(mount.querySelector('#hero-end-time') as HTMLInputElement).value = '17:30'
+    ;(mount.querySelector('.publisher-btn-primary') as HTMLButtonElement).click()
+    await flush()
+    const putCall = fetchFn.mock.calls.find(c => (c[1] as RequestInit)?.method === 'PUT')!
+    const body = JSON.parse((putCall[1] as RequestInit).body as string) as { window: { start: string; end: string } }
+    // Local date+time → ISO. The absolute values depend on the runner's
+    // timezone, but the *delta* (2026-05-01 09:00 → 2026-06-01 17:30 =
+    // 31d 8.5h) is TZ-independent since both bounds shift by the same
+    // offset.
+    expect(Date.parse(body.window.start)).toBeLessThan(Date.parse(body.window.end))
+    const deltaDays = (Date.parse(body.window.end) - Date.parse(body.window.start)) / 86_400_000
+    expect(deltaDays).toBeGreaterThan(31)
+    expect(deltaDays).toBeLessThan(31.5)
+  })
+
   it('surfaces a validation error from the API on Set', async () => {
     const routes = baseRoutes()
     routes["PUT /api/v1/publish/featured-hero"] = { status: 400, body: { errors: [{ field: 'window', code: 'invalid_range', message: 'Bad window.' }] } }
