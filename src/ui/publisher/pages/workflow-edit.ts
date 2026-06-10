@@ -351,25 +351,31 @@ function buildForm(
 
   // Phase Z3 — richer validation surfacing: highlight the form
   // area each server error belongs to alongside the grouped list.
-  const areaInputs: Record<string, HTMLElement> = {
+  // Complete over errorArea()'s range so 'other' errors still get
+  // a visible anchor — the grouped list itself (PR #178 Copilot
+  // review). tabindex makes the list focusable for the
+  // first-offender focus below.
+  errorList.tabIndex = -1
+  const areaInputs: Record<ReturnType<typeof errorArea>, HTMLElement> = {
     pipeline,
     template,
     name,
     schedule,
     target,
+    other: errorList,
   }
   const showErrors = (errors: PublisherValidationError[]): void => {
     for (const input of Object.values(areaInputs)) input.removeAttribute('aria-invalid')
     errorList.replaceChildren(
       ...errors.map(err => {
         const area = errorArea(err.field)
-        areaInputs[area]?.setAttribute('aria-invalid', 'true')
+        if (area !== 'other') areaInputs[area].setAttribute('aria-invalid', 'true')
         const li = document.createElement('li')
         li.textContent = `${err.field}: ${err.message}` // i18n-exempt: server-side validation messages are en-only in v1
         return li
       }),
     )
-    errors[0] && areaInputs[errorArea(errors[0].field)]?.focus()
+    errors[0] && areaInputs[errorArea(errors[0].field)].focus()
   }
 
   const collectBody = async (): Promise<WorkflowInputBody | null> => {

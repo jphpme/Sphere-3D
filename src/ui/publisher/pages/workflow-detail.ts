@@ -48,6 +48,16 @@ export async function renderWorkflowDetailPage(
   const runsFn = options.runsFn ?? listWorkflowRuns
   const runFn = options.runFn ?? runWorkflow
 
+  // Cancel any pending poll before starting this render — a manual
+  // re-render (Run now) racing a pending timer would otherwise
+  // double-fetch and interleave DOM updates (PR #178 Copilot
+  // review; the dataset-detail.ts cancel-before-cycle pattern).
+  const pendingPoll = activeRunPolls.get(content)
+  if (pendingPoll !== undefined) {
+    clearTimeout(pendingPoll)
+    activeRunPolls.delete(content)
+  }
+
   content.replaceChildren(messageShell(t('publisher.workflows.loading')))
 
   const [workflowResult, runsResult] = await Promise.all([getFn(id), runsFn(id)])
@@ -127,10 +137,8 @@ export async function renderWorkflowDetailPage(
 
   // Phase Z3 — while a run is queued/running, refresh the page on
   // a slow poll so status badges and gha_run_id links go live
-  // without a manual reload. Stops on terminal states; navigation
-  // replaces the mount and the stale timer is cleared above.
-  const previous = activeRunPolls.get(content)
-  if (previous !== undefined) clearTimeout(previous)
+  // without a manual reload. Stops on terminal states; the pending
+  // timer was cancelled at the top of this render.
   const hasActiveRun = runs.some(run => run.status === 'queued' || run.status === 'running')
   if (hasActiveRun) {
     activeRunPolls.set(
