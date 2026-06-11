@@ -4,7 +4,7 @@
 
 import axios from 'axios'
 import type { Dataset, DatasetFormat, DatasetMetadata, EnrichedMetadata, TimeInfo, Tour } from '../types'
-import { parseISO8601Duration } from '../utils/time'
+import { isLiveCadence, parseISO8601Duration, safePeriodMs } from '../utils/time'
 import { logger } from '../utils/logger'
 import { reportError } from '../analytics'
 import { apiFetch, getCatalogSource } from './catalogSource'
@@ -22,18 +22,19 @@ const MIN_PERIOD_TTL_MS = 5 * 60 * 1000
  * 5 minutes — fresh enough to pick up the next scheduled
  * re-publish, bounded enough to not hammer the API.
  */
-export function effectiveCatalogTtl(datasets: Dataset[], defaultMs: number): number {
+export function effectiveCatalogTtl(
+  datasets: Dataset[],
+  defaultMs: number,
+  now: number = Date.now(),
+): number {
   let shortest = defaultMs
   for (const dataset of datasets) {
-    if (!dataset.period) continue
-    const parsed = parseISO8601Duration(dataset.period)
-    const ms =
-      parsed instanceof Date
-        ? NaN
-        : Number.isFinite(parsed.days)
-          ? parsed.days * 24 * 60 * 60 * 1000
-          : NaN
-    if (Number.isFinite(ms) && ms > 0 && ms < shortest) shortest = ms
+    // Only LIVE cadences count — historical time-series rows carry
+    // `period` too, and malformed periods are ignored rather than
+    // thrown (PR #179 review).
+    if (!isLiveCadence(dataset.period, dataset.endTime, now)) continue
+    const ms = safePeriodMs(dataset.period)
+    if (ms !== null && ms < shortest) shortest = ms
   }
   return Math.max(shortest, MIN_PERIOD_TTL_MS)
 }

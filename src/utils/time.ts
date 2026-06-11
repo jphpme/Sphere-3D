@@ -330,3 +330,41 @@ export function formatDuration(seconds: number): string {
   if (h > 0) return `${h}:${pad(m)}:${pad(sec)}`
   return `${m}:${pad(sec)}`
 }
+
+/**
+ * Parse a `Dataset.period` ISO-8601 duration to milliseconds,
+ * returning null (never throwing) for malformed, calendar-fuzzy,
+ * or non-positive values — a single bad catalog row must not break
+ * cache math (Phase Z4, PR #179 review).
+ */
+export function safePeriodMs(period: string | null | undefined): number | null {
+  if (!period) return null
+  try {
+    const parsed = parseISO8601Duration(period)
+    if (parsed instanceof Date) return null
+    const ms = parsed.days * 24 * 60 * 60 * 1000
+    return Number.isFinite(ms) && ms > 0 ? ms : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Is this dataset's update cadence plausibly live? True when
+ * `period` parses AND the data's trailing edge is within two
+ * cadences of `now` (or `endTime` is absent — an updating row not
+ * yet stamped). Historical time-series rows carry `period` too;
+ * their stale `endTime` keeps them out (Phase Z4, PR #179 review).
+ */
+export function isLiveCadence(
+  period: string | null | undefined,
+  endTime: string | null | undefined,
+  nowMs: number,
+): boolean {
+  const periodMs = safePeriodMs(period)
+  if (periodMs === null) return false
+  if (!endTime) return true
+  const end = Date.parse(endTime)
+  if (!Number.isFinite(end)) return false
+  return nowMs - end <= 2 * periodMs
+}

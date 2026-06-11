@@ -429,26 +429,42 @@ describe('tourWireToDataset', () => {
 
 describe('effectiveCatalogTtl (Phase Z4)', () => {
   const HOUR = 60 * 60 * 1000
+  const NOW = Date.parse('2026-06-11T12:00:00Z')
+  const RECENT = '2026-06-11T00:00:00Z' // within 2 cadences for sub-daily+ periods
 
   it('keeps the default TTL for static catalogs', async () => {
     const { effectiveCatalogTtl } = await import('./dataService')
-    expect(effectiveCatalogTtl([{ id: 'a' } as never], HOUR)).toBe(HOUR)
+    expect(effectiveCatalogTtl([{ id: 'a' } as never], HOUR, NOW)).toBe(HOUR)
   })
 
-  it('shrinks to the shortest period present, never grows', async () => {
+  it('shrinks to the shortest LIVE period present, never grows', async () => {
     const { effectiveCatalogTtl } = await import('./dataService')
     const datasets = [
-      { id: 'a', period: 'P1W' },
-      { id: 'b', period: 'PT30M' },
+      { id: 'a', period: 'P1W', endTime: RECENT },
+      { id: 'b', period: 'PT30M', endTime: '2026-06-11T11:45:00Z' },
     ] as never[]
     // PT30M wins; P1W (longer than the default) cannot grow the TTL.
-    expect(effectiveCatalogTtl(datasets, HOUR)).toBe(30 * 60 * 1000)
-    expect(effectiveCatalogTtl([{ id: 'a', period: 'P1W' } as never], HOUR)).toBe(HOUR)
+    expect(effectiveCatalogTtl(datasets, HOUR, NOW)).toBe(30 * 60 * 1000)
+    expect(effectiveCatalogTtl([{ id: 'a', period: 'P1W', endTime: RECENT } as never], HOUR, NOW)).toBe(HOUR)
+  })
+
+  it('ignores historical time-series rows (stale endTime) despite period', async () => {
+    const { effectiveCatalogTtl } = await import('./dataService')
+    const archived = [{ id: 'a', period: 'PT30M', endTime: '2020-01-01T00:00:00Z' } as never]
+    expect(effectiveCatalogTtl(archived, HOUR, NOW)).toBe(HOUR)
+  })
+
+  it('treats malformed periods as no cadence signal instead of throwing', async () => {
+    const { effectiveCatalogTtl } = await import('./dataService')
+    const bad = [{ id: 'a', period: 'not-a-duration', endTime: RECENT } as never]
+    expect(() => effectiveCatalogTtl(bad, HOUR, NOW)).not.toThrow()
+    expect(effectiveCatalogTtl(bad, HOUR, NOW)).toBe(HOUR)
   })
 
   it('tracks sub-hour cadences and floors at five minutes', async () => {
     const { effectiveCatalogTtl } = await import('./dataService')
-    expect(effectiveCatalogTtl([{ id: 'a', period: 'PT15M' } as never], HOUR)).toBe(15 * 60 * 1000)
-    expect(effectiveCatalogTtl([{ id: 'a', period: 'PT1M' } as never], HOUR)).toBe(5 * 60 * 1000)
+    const at = (period: string) => [{ id: 'a', period, endTime: '2026-06-11T11:59:00Z' } as never]
+    expect(effectiveCatalogTtl(at('PT15M'), HOUR, NOW)).toBe(15 * 60 * 1000)
+    expect(effectiveCatalogTtl(at('PT1M'), HOUR, NOW)).toBe(5 * 60 * 1000)
   })
 })

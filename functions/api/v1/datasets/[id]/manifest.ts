@@ -48,6 +48,7 @@
  */
 
 import { CatalogEnv } from '../../_lib/env'
+import { parseScheduleSeconds } from '../../_lib/workflow-schedule'
 import { getNodeIdentity, getPublicDataset } from '../../_lib/catalog-store'
 import { isConfigurationError } from '../../_lib/errors'
 import { streamPlaybackUrl } from '../../_lib/stream-store'
@@ -56,16 +57,26 @@ import { encodeR2Key, resolveR2HlsPublicUrl, resolveR2PublicUrl } from '../../_l
 
 const CACHE_CONTROL = 'public, max-age=300, stale-while-revalidate=600'
 
-/** Phase Z4 (docs/ZYRA_INTEGRATION_PLAN.md): rows with an update
- *  cadence re-bind to their newest upload bundle faster — a
+/** Phase Z4 (docs/ZYRA_INTEGRATION_PLAN.md): rows with a LIVE
+ *  update cadence re-bind to their newest upload bundle faster — a
  *  workflow re-publish is visible within ~1 minute instead of 5.
- *  The bundle URLs themselves are immutable per upload_id, so this
- *  only shortens the pointer's cache, never re-fetches video
- *  bytes. */
+ *  Liveness requires `period` AND a trailing edge within two
+ *  cadences of now — historical time-series rows carry `period`
+ *  too and keep the standard policy (PR #179 review). Bundle URLs
+ *  are immutable per upload_id, so this only shortens the
+ *  pointer's cache, never re-fetches video bytes. */
 const CACHE_CONTROL_REALTIME = 'public, max-age=60, stale-while-revalidate=120'
 
-function cacheControlFor(row: { period?: string | null }): string {
-  return row.period ? CACHE_CONTROL_REALTIME : CACHE_CONTROL
+export function cacheControlFor(
+  row: { period: string | null; end_time: string | null },
+  now: number = Date.now(),
+): string {
+  const seconds = row.period ? parseScheduleSeconds(row.period) : null
+  if (seconds === null) return CACHE_CONTROL
+  if (!row.end_time) return CACHE_CONTROL_REALTIME
+  const end = Date.parse(row.end_time)
+  if (!Number.isFinite(end)) return CACHE_CONTROL
+  return now - end <= 2 * seconds * 1000 ? CACHE_CONTROL_REALTIME : CACHE_CONTROL
 }
 const CONTENT_TYPE = 'application/json; charset=utf-8'
 const DEFAULT_VIDEO_PROXY_BASE = 'https://video-proxy.zyra-project.org/video'
@@ -432,7 +443,7 @@ export const onRequestGet: PagesFunction<CatalogEnv, 'id'> = async context => {
 
   const body = JSON.stringify(result.manifest)
   const etag = await computeEtag(body)
-  const cacheControl = cacheControlFor(row as { period?: string | null })
+  const cacheControl = cacheControlFor(row)
   if (context.request.headers.get('if-none-match') === etag) {
     return new Response(null, {
       status: 304,

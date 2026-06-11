@@ -43,6 +43,7 @@
  *    service samples `Date.now()` once per build.
  */
 
+import { isLiveCadence } from '../utils/time'
 import type { Dataset } from '../types'
 import {
   BASELINE_RESOLVERS,
@@ -194,11 +195,13 @@ export function toFractionalYear(value: string | undefined | null): number | und
  * tooltips without re-implementing the rule.
  */
 export function isRealtimeRow(dataset: Dataset, now: number): boolean {
-  // Phase Z4 (docs/ZYRA_INTEGRATION_PLAN.md): a row with an update
-  // cadence is real-time by definition — workflow-maintained
-  // datasets set `period` on every run, so the marker no longer
-  // depends on the curated tag or the 24 h endTime heuristic.
-  if (dataset.period) return true
+  // Phase Z4 (docs/ZYRA_INTEGRATION_PLAN.md): `period` widens the
+  // freshness window around `endTime` rather than blanket-marking —
+  // historical time-series rows carry `period` too, so the marker
+  // only fires when the trailing edge is within two cadences of
+  // now (PR #179 review). The tag override and the 24 h heuristic
+  // below are unchanged.
+  if (isLiveCadence(dataset.period, dataset.endTime, now)) return true
   if ((dataset.tags ?? []).includes(REALTIME_TAG)) return true
   if (!dataset.endTime) return false
   const ms = Date.parse(dataset.endTime)

@@ -10,7 +10,7 @@
  * to `WORKFLOW_OUTPUT_PATH` by construction.
  *
  * Frame-gap handling follows current upstream CLI shape
- * (`zyra process scan-frames … --output manifest.json`, then
+ * (`zyra process scan-frames … --output /work/frames-meta.json`, then
  * `zyra process pad-missing … --fill nearest`; fill choices are
  * blank | solid | basemap | nearest). pad-missing sits between the
  * scan and compose-video so cadence gaps don't show as time-jumps
