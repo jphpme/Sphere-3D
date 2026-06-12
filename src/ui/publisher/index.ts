@@ -50,7 +50,7 @@ const PORTAL_CONTENT_ID = 'publisher-content'
  */
 export function routeForPath(
   pathname: string,
-): 'me' | 'datasets' | 'tours' | 'featured_hero' | 'import' | 'workflows' | 'analytics' | 'unknown' {
+): 'me' | 'datasets' | 'tours' | 'featured_hero' | 'import' | 'workflows' | 'analytics' | 'feedback' | 'unknown' {
   if (pathname === '/publish' || pathname.startsWith('/publish/me')) return 'me'
   if (pathname.startsWith('/publish/datasets')) return 'datasets'
   if (pathname.startsWith('/publish/tours')) return 'tours'
@@ -58,6 +58,7 @@ export function routeForPath(
   if (pathname.startsWith('/publish/featured-hero')) return 'featured_hero'
   if (pathname.startsWith('/publish/import')) return 'import'
   if (pathname.startsWith('/publish/analytics')) return 'analytics'
+  if (pathname.startsWith('/publish/feedback')) return 'feedback'
   return 'unknown'
 }
 
