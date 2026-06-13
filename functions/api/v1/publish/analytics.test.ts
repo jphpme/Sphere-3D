@@ -102,6 +102,8 @@ function setup() {
   insertDim.run(YESTERDAY, 'search_zero', 'hashAAA', 2, 0)
   insertDim.run(YESTERDAY, 'dwell', 'chat', 5, 75000)
   insertDim.run(YESTERDAY, 'vr_gesture', 'pinch', 3, 2.4)
+  insertDim.run(YESTERDAY, 'tour_start', 'browse', 4, 0)
+  insertDim.run(YESTERDAY, 'tour_start', 'auto', 2, 0)
   // Internal traffic — must be excluded.
   insertDaily.run(YESTERDAY, 'session_start', 'production', 1, 'US', 'web', 99, 99)
   // Preview environment — excluded under environment=production.
@@ -296,6 +298,7 @@ describe('GET /api/v1/publish/analytics', () => {
     const data = await getData<{
       days: Array<Record<string, unknown>>
       outcomes: { tour_ended: Record<string, number>; vr_session_started: Record<string, number> }
+      toursStartedBySource: Record<string, number>
     }>(env, '?section=funnel&days=30')
     expect(data.days).toEqual([
       { day: YESTERDAY, tours_started: 6, tours_ended: 4, vr_started: 2, orbit_turns: 20 },
@@ -303,6 +306,8 @@ describe('GET /api/v1/publish/analytics', () => {
     // Preview-environment outcomes excluded under environment=production.
     expect(data.outcomes.tour_ended).toEqual({ completed: 3, abandoned: 1 })
     expect(data.outcomes.vr_session_started).toEqual({ ar: 2 })
+    // Source mix powers the user-started denominator (6 started − 2 auto = 4).
+    expect(data.toursStartedBySource).toEqual({ browse: 4, auto: 2 })
   })
 
   it('spatial: includes the map_click hit-kind mix', async () => {

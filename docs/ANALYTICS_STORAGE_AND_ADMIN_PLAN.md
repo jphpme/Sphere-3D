@@ -560,6 +560,29 @@ usage, Orbit *response-timing-per-model* and *turn-outcome-mix*
 sub-panels) stay in Grafana, which is why Phase D demoted it rather
 than deleting it.
 
+### Tour-completion accuracy fix
+
+The Funnel section's tour-completion rate was overstated (~88%)
+because `dataset.runTourOnLoad` auto-tours — which auto-play to
+completion with no user intent — were counted in both legs. They
+now carry a distinct provenance:
+
+- `tour_started.source` gained an `'auto'` value; the auto-start
+  paths in `main.ts` pass `source: 'auto'`.
+- `tour_ended` gained a `was_auto` boolean (alphabetically last, so
+  it appends to the positional layout without shifting fields).
+- The export job excludes `was_auto` rows from
+  `analytics_outcomes_daily` and rolls the `tour_started` source mix
+  into `analytics_dimension_daily` under `metric = 'tour_start'`.
+- `queryFunnel` returns `toursStartedBySource`; the page computes the
+  rate over **user-started** tours (total − `auto`) and surfaces the
+  excluded auto-tour count.
+
+This is a collection-layer change: it cleans data going forward.
+Historical `tour_ended` rows predating the change can't be
+re-labelled, so the rate stays blended until those days age out of
+the reporting window.
+
 ---
 
 ## Sequencing

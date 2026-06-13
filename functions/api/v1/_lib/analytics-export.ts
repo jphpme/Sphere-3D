@@ -509,7 +509,11 @@ export function computeRollups(rows: DecodedEventRow[], day: string): DayRollups
     }
 
     const outcomeField = OUTCOME_FIELDS[row.event_type]
-    if (outcomeField) {
+    // `runTourOnLoad` auto-tours auto-play to completion and would
+    // inflate the completion funnel — exclude them from the outcomes
+    // rollup so the rate reflects user-started tours only. Their
+    // source mix is still captured via the `tour_start` dimension.
+    if (outcomeField && !(row.event_type === 'tour_ended' && bool(row.fields, 'was_auto'))) {
       const value = str(row.fields, outcomeField)
       if (value !== '') {
         const key = [row.environment, row.event_type, value].join('\u0000')
@@ -685,6 +689,11 @@ export function computeRollups(rows: DecodedEventRow[], day: string): DayRollups
     } else if (row.event_type === 'orbit_load_followed') {
       const path = str(row.fields, 'path')
       if (path) addDimension(row.environment, 'orbit_follow', path, w, num(row.fields, 'latency_ms') * w)
+    } else if (row.event_type === 'tour_started') {
+      // Source mix (browse | orbit | deeplink | auto). The funnel
+      // derives user-started tours by subtracting the `auto` bucket.
+      const source = str(row.fields, 'source')
+      if (source) addDimension(row.environment, 'tour_start', source, w)
     }
   }
 

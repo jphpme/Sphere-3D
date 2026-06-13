@@ -267,6 +267,39 @@ describe('computeRollups', () => {
     expect(rollups.outcomes.some(o => o.value === 'error')).toBe(false) // internal excluded
   })
 
+  it('excludes runTourOnLoad auto-tours from the outcomes rollup', () => {
+    const rollups = computeRollups(
+      [
+        // Two user-started completions...
+        decoded({ event_type: 'tour_ended', fields: { tour_id: 't1', outcome: 'completed', task_index: 8, duration_ms: 1000, was_auto: false } }),
+        decoded({ event_type: 'tour_ended', fields: { tour_id: 't2', outcome: 'completed', task_index: 3, duration_ms: 500, was_auto: false } }),
+        // ...and two auto-tours that auto-played to completion — must
+        // not inflate the funnel.
+        decoded({ event_type: 'tour_ended', fields: { tour_id: 't3', outcome: 'completed', task_index: 9, duration_ms: 900, was_auto: true } }),
+        decoded({ event_type: 'tour_ended', fields: { tour_id: 't4', outcome: 'completed', task_index: 9, duration_ms: 900, was_auto: true } }),
+      ],
+      DAY,
+    )
+    const completed = rollups.outcomes.find(o => o.event_type === 'tour_ended' && o.value === 'completed')
+    expect(completed?.count).toBe(2)
+  })
+
+  it('rolls up tour_started source mix into the tour_start dimension', () => {
+    const rollups = computeRollups(
+      [
+        decoded({ event_type: 'tour_started', fields: { tour_id: 't1', tour_title: 'A', source: 'browse', task_count: 5 } }),
+        decoded({ event_type: 'tour_started', fields: { tour_id: 't2', tour_title: 'B', source: 'browse', task_count: 5 }, sample_interval: 2 }),
+        decoded({ event_type: 'tour_started', fields: { tour_id: 't3', tour_title: 'C', source: 'auto', task_count: 5 } }),
+        decoded({ event_type: 'tour_started', fields: { tour_id: 't4', tour_title: 'D', source: 'orbit', task_count: 5 } }),
+      ],
+      DAY,
+    )
+    const dims = rollups.dimensions.filter(d => d.metric === 'tour_start')
+    expect(dims.find(d => d.key === 'browse')?.count).toBe(3) // 1 + 2 (sample-weighted)
+    expect(dims.find(d => d.key === 'auto')?.count).toBe(1)
+    expect(dims.find(d => d.key === 'orbit')?.count).toBe(1)
+  })
+
   it('derives the footprint radius from zoom with floor and cap', () => {
     expect(footprintRadiusDeg(0)).toBe(MAX_FOOTPRINT_DEG)
     expect(footprintRadiusDeg(5)).toBeCloseTo(90 / 32, 6)

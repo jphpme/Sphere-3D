@@ -378,7 +378,15 @@ export async function queryErrors(
 export async function queryFunnel(
   db: D1Database,
   f: AnalyticsFilters,
-): Promise<{ days: FunnelDay[]; outcomes: FunnelOutcomes }> {
+): Promise<{
+  days: FunnelDay[]
+  outcomes: FunnelOutcomes
+  /** tour_started counts by source (browse | orbit | deeplink |
+   * auto), from the `tour_start` dimension. The `auto` bucket is
+   * `runTourOnLoad` auto-tours, which the outcomes rollup excludes;
+   * the page subtracts it to compute the user-started denominator. */
+  toursStartedBySource: Record<string, number>
+}> {
   const rows = await db
     .prepare(
       `SELECT day,
@@ -408,7 +416,20 @@ export async function queryFunnel(
     if (row.event_type === 'tour_ended') outcomes.tour_ended[row.value] = row.count
     else if (row.event_type === 'vr_session_started') outcomes.vr_session_started[row.value] = row.count
   }
-  return { days: rows.results ?? [], outcomes }
+
+  const sourceRows = await db
+    .prepare(
+      `SELECT key, SUM(count) AS count
+         FROM analytics_dimension_daily
+        WHERE day >= ? AND environment = ? AND metric = 'tour_start'
+        GROUP BY key`,
+    )
+    .bind(f.sinceDay, f.environment)
+    .all<{ key: string; count: number }>()
+  const toursStartedBySource: Record<string, number> = {}
+  for (const row of sourceRows.results ?? []) toursStartedBySource[row.key] = row.count
+
+  return { days: rows.results ?? [], outcomes, toursStartedBySource }
 }
 
 // --- Phase E sections ---

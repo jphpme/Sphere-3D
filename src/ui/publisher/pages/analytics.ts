@@ -148,6 +148,7 @@ interface FunnelData {
     tour_ended: Record<string, number>
     vr_session_started: Record<string, number>
   }
+  toursStartedBySource: Record<string, number>
 }
 
 export interface AnalyticsPageOptions {
@@ -530,19 +531,39 @@ export async function renderAnalyticsPage(
       return
     }
     const outcomes = res.data.data.outcomes
+    const bySource = res.data.data.toursStartedBySource ?? {}
     const toursStarted = days.reduce((n, d) => n + d.tours_started, 0)
+    // `runTourOnLoad` auto-tours auto-play to completion; the export
+    // job excludes them from the outcomes rollup, so the denominator
+    // must drop them too or the rate is understated. Subtract the
+    // `auto` source bucket to get user-started tours.
+    const autoStarted = bySource.auto ?? 0
+    const userStarted = Math.max(0, toursStarted - autoStarted)
     const toursCompleted = outcomes.tour_ended.completed ?? 0
     const completionBlocks: HTMLElement[] = []
     if (toursStarted > 0 || Object.keys(outcomes.tour_ended).length > 0) {
-      completionBlocks.push(
-        el('div', { className: 'publisher-analytics-stats' }, [
+      const tiles: HTMLElement[] = [
+        renderStatTile(
+          t('publisher.analytics.funnel.completionRate'),
+          userStarted > 0
+            ? formatNumber(toursCompleted / userStarted, { style: 'percent', maximumFractionDigits: 0 })
+            : '—',
+        ),
+        renderStatTile(
+          t('publisher.analytics.funnel.userStarted'),
+          formatNumber(userStarted),
+        ),
+      ]
+      if (autoStarted > 0) {
+        tiles.push(
           renderStatTile(
-            t('publisher.analytics.funnel.completionRate'),
-            toursStarted > 0
-              ? formatNumber(toursCompleted / toursStarted, { style: 'percent', maximumFractionDigits: 0 })
-              : '—',
+            t('publisher.analytics.funnel.autoExcluded'),
+            formatNumber(autoStarted),
           ),
-        ]),
+        )
+      }
+      completionBlocks.push(
+        el('div', { className: 'publisher-analytics-stats' }, tiles),
         el('h3', { className: 'publisher-analytics-subheading', textContent: t('publisher.analytics.funnel.tourOutcomes') }),
         renderMixBar(outcomes.tour_ended, t('publisher.analytics.funnel.tourOutcomes')),
       )
