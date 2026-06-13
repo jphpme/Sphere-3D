@@ -190,6 +190,14 @@ the four server-stamped blobs. Order is alphabetical by field name
 | `double5` | `pitch` (degrees) |
 | `double6` | `zoom` (2 decimals) |
 
+Emitted on `moveend` (drag release, wheel stop, `flyTo`/`easeTo`
+completion). **Auto-rotate moves are excluded** — the 2D globe's
+auto-rotate sweeps the centre longitude on a timer, and emitting
+those completions would paint a spurious latitude-wide band across
+the spatial heatmap, so `mapRenderer` skips the emit while
+auto-rotate is driving the camera (it stops on user interaction, so
+genuine settles still emit).
+
 ### `map_click` (Tier A)
 
 | Position | Field |
