@@ -1643,12 +1643,24 @@ on:
      `<hash>.terraviz-visual.pages.dev`); the workflow captures that URL
      and prints it in the run summary. Add a custom domain only if you
      want a vanity hostname.
-3. **Optional** — set a repo **variable** `VISUAL_DEPLOY_URL` to your
-   production SPA URL (e.g. `https://terraviz.your-org.org`). When set,
-   the `main` run re-captures the report against the *live* site with the
-   accessibility scan on, so the deployed report reflects production
-   (real tiles, network, console). Left unset, it deploys the local
-   capture.
+3. **Optional** — set `VISUAL_DEPLOY_URL` to your production SPA URL
+   (e.g. `https://terraviz.your-org.org`; it's the same value as your
+   `TERRAVIZ_SERVER` variable). Set it as a repository **Variable**, not
+   a Secret — it's a non-sensitive URL read as `vars.VISUAL_DEPLOY_URL`:
+   **repo Settings → Secrets and variables → Actions → Variables tab →
+   New repository variable**. When set, the `main` run re-captures the
+   report against the *live* site with the accessibility scan on, so the
+   deployed report reflects production (real tiles, network, console).
+   Left unset, it deploys the local capture.
+
+   > If your `/publish/**` routes sit behind Cloudflare Access at the
+   > edge (Step 7), the headless capture of the publisher/admin scenes
+   > will hit the SSO wall when run against production — the public
+   > scenes still capture fine. The scene *data* is fixture-stubbed
+   > regardless; it's only the page shell that Access can gate. Leave
+   > `VISUAL_DEPLOY_URL` unset (local capture) if that bothers you, or
+   > exempt the static `/publish/*` route from Access (the `/api/v1/publish/**`
+   > API stays protected).
 
 The deploy step is `continue-on-error`, so skipping all of the above
 breaks nothing: PRs still get the smoke gate, the report artifact, and
