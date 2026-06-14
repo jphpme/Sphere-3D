@@ -1,0 +1,61 @@
+/**
+ * Screenshot-trace recorder for the Weblate screenshot pipeline.
+ *
+ * Gated entirely behind `import.meta.env.VITE_I18N_TRACE`: the only
+ * production caller is `t()` in `./index.ts`, inside an
+ * `if (import.meta.env.VITE_I18N_TRACE)` branch. When the flag is
+ * unset Vite statically replaces it with `false`, Rollup drops the
+ * call, and — because this module has no import-time side effects —
+ * the whole module falls out of the bundle. Keep it side-effect-free
+ * at module scope for that elimination to hold.
+ *
+ * When the flag *is* set (CI screenshot-capture builds only), every
+ * resolved message key is collected into a Set and mirrored onto
+ * `window.__i18nTrace`. The Playwright capturer drives the app to a
+ * scene, reads which keys that scene rendered, and associates them
+ * with the uploaded screenshot in Weblate.
+ *
+ * See `docs/WEBLATE_SCREENSHOT_SYNC_PLAN.md`.
+ */
+
+/** Handle the Playwright capturer reads off `window.__i18nTrace`. */
+export interface I18nTrace {
+  /** Keys resolved since the last {@link I18nTrace.reset}. */
+  readonly seen: Set<string>
+  /** Clear the set — the capturer calls this between scenes. */
+  reset(): void
+}
+
+declare global {
+  interface Window {
+    __i18nTrace?: I18nTrace
+  }
+}
+
+const seen = new Set<string>()
+
+const trace: I18nTrace = {
+  seen,
+  reset() {
+    seen.clear()
+  },
+}
+
+/**
+ * Record a resolved message key. Publishes the trace handle on
+ * `window` lazily on first call so the module carries no import-time
+ * side effect (which is what lets it tree-shake away when the flag
+ * is off). Safe in non-DOM contexts (SSR / tests) — the `window`
+ * write is guarded.
+ */
+export function recordI18nKey(key: string): void {
+  seen.add(key)
+  if (typeof window !== 'undefined' && window.__i18nTrace !== trace) {
+    window.__i18nTrace = trace
+  }
+}
+
+/** Test-only: drop the collected keys between cases. */
+export function __resetI18nTraceForTests(): void {
+  seen.clear()
+}

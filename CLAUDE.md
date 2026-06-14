@@ -479,6 +479,7 @@ not individually documented):
 | `src/i18n/format.ts` | Locale-aware formatting helpers (numbers, dates, lists) |
 | `src/i18n/applyI18nAttributes.ts` | DOM walker that translates static markup carrying `data-i18n` attributes |
 | `src/i18n/rtl.ts` | RTL locale set + `<html dir>` resolution |
+| `src/i18n/screenshotTrace.ts` | Build-flag-gated (`VITE_I18N_TRACE`) recorder — `t()` mirrors every resolved key onto `window.__i18nTrace` for the Weblate screenshot-capture pipeline (`docs/WEBLATE_SCREENSHOT_SYNC_PLAN.md`); tree-shakes out of normal builds |
 
 ### When you add a new UI string
 
