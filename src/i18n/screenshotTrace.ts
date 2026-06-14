@@ -34,30 +34,38 @@ declare global {
   }
 }
 
-const seen = new Set<string>()
+// Allocated lazily on first `recordI18nKey()` rather than at module
+// scope, so import time is *unambiguously* side-effect-free (just a
+// binding declaration + functions). That's what lets Rollup drop the
+// whole module when the `VITE_I18N_TRACE` guard is dead — a
+// module-scope `new Set()` could be treated conservatively as a side
+// effect and keep the module as a bare import.
+let trace: I18nTrace | undefined
 
-const trace: I18nTrace = {
-  seen,
-  reset() {
-    seen.clear()
-  },
+function ensureTrace(): I18nTrace {
+  if (!trace) {
+    const seen = new Set<string>()
+    trace = { seen, reset: () => seen.clear() }
+  }
+  return trace
 }
 
 /**
- * Record a resolved message key. Publishes the trace handle on
- * `window` lazily on first call so the module carries no import-time
- * side effect (which is what lets it tree-shake away when the flag
- * is off). Safe in non-DOM contexts (SSR / tests) — the `window`
- * write is guarded.
+ * Record a resolved message key. Lazily creates the trace and
+ * publishes its handle on `window` on first call, so the module
+ * carries no import-time side effect (which is what lets it
+ * tree-shake away when the flag is off). Safe in non-DOM contexts
+ * (SSR / tests) — the `window` write is guarded.
  */
 export function recordI18nKey(key: string): void {
-  seen.add(key)
-  if (typeof window !== 'undefined' && window.__i18nTrace !== trace) {
-    window.__i18nTrace = trace
+  const t = ensureTrace()
+  t.seen.add(key)
+  if (typeof window !== 'undefined' && window.__i18nTrace !== t) {
+    window.__i18nTrace = t
   }
 }
 
-/** Test-only: drop the collected keys between cases. */
+/** Test-only: reset to the pristine (un-allocated) state between cases. */
 export function __resetI18nTraceForTests(): void {
-  seen.clear()
+  trace = undefined
 }
