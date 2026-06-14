@@ -31,20 +31,32 @@
  *     npm run screenshots:capture
  *
  * Config (env):
- *   SCREENSHOT_BASE_URL   default http://localhost:4173
- *   SCREENSHOT_OUT_DIR    default <repo>/screenshots-out
- *   SCREENSHOT_VIEWPORT   default 1440x900   (desktop; mobile is S6)
+ *   SCREENSHOT_BASE_URL     default http://localhost:4173
+ *   SCREENSHOT_OUT_DIR      default <repo>/screenshots-out
+ *   SCREENSHOT_VIEWPORT     default 1440x900 (desktop)
+ *   SCREENSHOT_NAME_SUFFIX  default '' — appended to every scene's
+ *     name/file. A mobile pass is then cheap: a second invocation
+ *     with e.g. SCREENSHOT_VIEWPORT=390x844 SCREENSHOT_NAME_SUFFIX=-mobile
+ *     SCREENSHOT_OUT_DIR=screenshots-out-mobile produces a distinct,
+ *     non-colliding screenshot set (Weblate names stay unique).
  *
- * See `docs/WEBLATE_SCREENSHOT_SYNC_PLAN.md`.
+ * After capture, prints a non-failing coverage report (keys with a
+ * screenshot / total `en.json` keys) and, in CI, writes it to
+ * $GITHUB_STEP_SUMMARY. See `docs/WEBLATE_SCREENSHOT_SYNC_PLAN.md`.
  */
 
 import { createHash } from 'node:crypto'
-import { mkdir, rm, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { chromium, type Browser } from 'playwright'
 
+import {
+  computeCoverage,
+  formatCoverageLine,
+  formatCoverageMarkdown,
+} from './coverage'
 import { scenes, type Scene } from './scenes'
 
 const HERE = resolve(fileURLToPath(import.meta.url), '..')
@@ -53,6 +65,7 @@ const REPO_ROOT = resolve(HERE, '..', '..')
 const BASE_URL = process.env.SCREENSHOT_BASE_URL ?? 'http://localhost:4173'
 const OUT_DIR =
   process.env.SCREENSHOT_OUT_DIR ?? resolve(REPO_ROOT, 'screenshots-out')
+const NAME_SUFFIX = process.env.SCREENSHOT_NAME_SUFFIX ?? ''
 
 function parseViewport(): { width: number; height: number } {
   const raw = process.env.SCREENSHOT_VIEWPORT ?? '1440x900'
@@ -120,10 +133,11 @@ async function captureScene(
     })
     await scene.setup(page)
     const keys = await readTracedKeys(page)
-    const file = `${scene.name}.png`
+    const name = `${scene.name}${NAME_SUFFIX}`
+    const file = `${name}.png`
     const png = await page.screenshot({ path: resolve(OUT_DIR, file) })
     return {
-      name: scene.name,
+      name,
       description: scene.description,
       file,
       sha256: sha256(png),
@@ -181,9 +195,50 @@ async function run(): Promise<void> {
       `${resolve(OUT_DIR, 'screenshots.json')}`,
   )
 
+  await emitCoverage(captured)
+
   // A broken scene (stale selector) must fail the job loudly rather
   // than silently shrinking the screenshot set.
   if (failed > 0) process.exitCode = 1
+}
+
+/**
+ * Print a non-failing coverage report and, in CI, append it to the
+ * job summary. Best-effort: a missing/unreadable `en.json` is logged
+ * and skipped rather than failing the capture.
+ */
+async function emitCoverage(captured: CapturedScene[]): Promise<void> {
+  let enKeys: Set<string>
+  try {
+    const raw = await readFile(resolve(REPO_ROOT, 'locales', 'en.json'), 'utf-8')
+    enKeys = new Set(Object.keys(JSON.parse(raw) as Record<string, string>))
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    // eslint-disable-next-line no-console
+    console.warn(`Coverage skipped — could not read locales/en.json: ${msg}`)
+    return
+  }
+
+  const stats = computeCoverage(
+    captured.map((c) => c.keys),
+    enKeys,
+  )
+  // eslint-disable-next-line no-console
+  console.log(formatCoverageLine(stats))
+  if (stats.unknown.length > 0) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `${stats.unknown.length} captured key(s) not in en.json (stale or dynamic).`,
+    )
+  }
+
+  const summaryPath = process.env.GITHUB_STEP_SUMMARY
+  if (summaryPath) {
+    await appendFile(
+      summaryPath,
+      formatCoverageMarkdown(stats, captured.length),
+    )
+  }
 }
 
 if (

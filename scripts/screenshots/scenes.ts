@@ -104,6 +104,42 @@ export const scenes: Scene[] = [
       await page.locator('#chat-panel').waitFor({ state: 'visible' })
     },
   },
+  {
+    name: 'help-panel',
+    description: 'Help & feedback panel (Guide tab + feedback form)',
+    async setup(page) {
+      await openCatalog(page)
+      await page.locator('#help-trigger-browse').click()
+      await page.locator('#help-panel').waitFor({ state: 'visible' })
+    },
+  },
+  {
+    name: 'browse-graph-view',
+    description: 'Browse overlay switched to the Graph view',
+    async setup(page) {
+      await openCatalog(page)
+      await page.locator('#browse-view-mode [data-view-mode="graph"]').click()
+      await page.locator('#browse-graph:not(.hidden)').waitFor()
+    },
+  },
+  {
+    name: 'browse-timeline-view',
+    description: 'Browse overlay switched to the Timeline view',
+    async setup(page) {
+      await openCatalog(page)
+      await page.locator('#browse-view-mode [data-view-mode="timeline"]').click()
+      await page.locator('#browse-timeline:not(.hidden)').waitFor()
+    },
+  },
+  {
+    name: 'browse-map-view',
+    description: 'Browse overlay switched to the Map (geographic coverage) view',
+    async setup(page) {
+      await openCatalog(page)
+      await page.locator('#browse-view-mode [data-view-mode="map"]').click()
+      await page.locator('#browse-map:not(.hidden)').waitFor()
+    },
+  },
 
   // ── Publisher portal ──────────────────────────────────────────
   // Chrome + forms + degraded states (no backend/auth locally). See
@@ -127,6 +163,27 @@ export const scenes: Scene[] = [
     description: 'Publisher portal — Zyra workflows list',
     async setup(page) {
       await openPublish(page, '/publish/workflows')
+    },
+  },
+  {
+    name: 'publish-workflow-new',
+    description: 'Publisher portal — new-workflow form (YAML editor + validate)',
+    async setup(page) {
+      await openPublish(page, '/publish/workflows/new')
+    },
+  },
+  {
+    name: 'publish-tours',
+    description: 'Publisher portal — tour-creator landing page',
+    async setup(page) {
+      await openPublish(page, '/publish/tours')
+    },
+  },
+  {
+    name: 'publish-import',
+    description: 'Publisher portal — import page',
+    async setup(page) {
+      await openPublish(page, '/publish/import')
     },
   },
   {

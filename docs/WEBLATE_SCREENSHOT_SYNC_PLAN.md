@@ -327,11 +327,43 @@ per the repo's one-logical-change-per-turn discipline.
 | **S3** | Playwright devDependency + capturer + a *starter* `scenes.ts` (3–4 scenes: Browse, Tools, Info panel, Orbit). Output reviewable locally as artifacts; no Weblate writes. | S2 |
 | **S4** | `sync-weblate-screenshots.ts` uploader (idempotent reconcile). Run manually against Weblate once, by hand, to validate the association model end-to-end before automating. | S3 |
 | **S5** | `sync-weblate-screenshots.yml` workflow (dispatch + schedule + scoped `main` push). Capture-only on PRs. | S4 |
-| **S6** | Broaden `scenes.ts` to the full high-traffic surface (~15–25 scenes); add a coverage report (`keys-with-screenshot / total keys`) printed by the sync, non-failing. | S5 |
+| **S6** | Broaden `scenes.ts` to the full high-traffic surface (~15–25 scenes); add a non-failing coverage report (`keys-with-screenshot / total keys`). | S5 |
 
 S1–S2 are safe to land immediately and carry no external side
 effects. S4 is the first phase that writes to Weblate and should
 be validated by hand before S5 automates it.
+
+**Implementation status (this branch).** S1–S6 are all implemented:
+the `VITE_I18N_TRACE` hook (`src/i18n/screenshotTrace.ts`), the
+shared `scripts/weblate-client.ts`, the Playwright capturer +
+`scripts/screenshots/scenes.ts` (19 scenes incl. the publisher
+portal and admin tabs), the idempotent
+`scripts/sync-weblate-screenshots.ts` uploader (`--dry-run`
+supported), the `sync-weblate-screenshots.yml` workflow, and the
+coverage report (`scripts/screenshots/coverage.ts`). Everything is
+verified by unit tests + type-check; the **one outstanding gate is
+the S4 hand-validation** — a real headless-browser capture + a live
+Weblate round-trip — which needs a session whose network policy
+allows the Playwright browser CDN (and, for populated screenshots,
+the app's catalog/tile hosts). Until that runs, scene selectors are
+grounded in the current `index.html` / UI source but not yet
+confirmed against the rendered DOM.
+
+Two refinements made during implementation, noted so the doc
+matches the code:
+
+- **Coverage lives in the capturer, not the uploader.** It runs on
+  PRs (where capture runs but upload does not) and needs no Weblate
+  token, so PR reviewers see coverage. It prints a console line and,
+  in CI, writes a `$GITHUB_STEP_SUMMARY` block.
+- **Mobile is a cheap second pass, not a second code path.** The
+  capturer honours `SCREENSHOT_VIEWPORT` + `SCREENSHOT_NAME_SUFFIX`
+  + `SCREENSHOT_OUT_DIR`, so a mobile set
+  (`…VIEWPORT=390x844 …NAME_SUFFIX=-mobile …OUT_DIR=…-mobile`)
+  produces distinct, non-colliding Weblate screenshots without
+  touching the manifest shape or the uploader. The workflow stays
+  desktop-only for now; adding the mobile pass is a few workflow
+  lines when wanted.
 
 ---
 
@@ -369,18 +401,23 @@ be validated by hand before S5 automates it.
 
 ## Open questions
 
-1. **Viewport matrix.** Desktop only, or also a portrait-mobile
-   pass (the app has real ≤600px portrait behaviour per
-   CLAUDE.md)? Mobile screenshots help translators reason about
-   tighter space, at ~2× the capture cost. *Lean: desktop in S3–S5,
-   add a mobile viewport in S6 if cheap.*
-2. **Schedule cadence.** Weekly vs. only-on-path-push. *Lean:
-   both, with the schedule as a safety net.*
-3. **Coverage visibility.** Print coverage in the job log only, or
-   also write a badge/summary artifact? *Lean: job summary in S6;
-   revisit a badge if anyone asks.*
-4. **Dataset-dependent scenes.** Some surfaces (info panel,
-   playback transport) only populate once a dataset loads, which
-   pulls live catalog data into CI. Use a fixed fixture dataset or
-   a recorded mock? *Lean: a small committed fixture so capture is
-   deterministic and offline.*
+1. **Viewport matrix.** ✅ *Resolved.* Desktop (1440×900) is the
+   default; mobile is available as a cheap second pass via the
+   `SCREENSHOT_VIEWPORT` / `SCREENSHOT_NAME_SUFFIX` /
+   `SCREENSHOT_OUT_DIR` knobs (see implementation status). The
+   workflow is desktop-only until someone wants the mobile set.
+2. **Schedule cadence.** ✅ *Resolved.* Both — weekly `schedule`
+   plus path-scoped `push` to `main`, with the schedule as a safety
+   net. Implemented in `sync-weblate-screenshots.yml`.
+3. **Coverage visibility.** ✅ *Resolved.* Console line on every
+   run + a `$GITHUB_STEP_SUMMARY` block in CI, emitted by the
+   capturer (`coverage.ts`), non-failing. No badge yet — revisit if
+   anyone asks.
+4. **Dataset-dependent scenes.** ⏳ *Still open.* Surfaces that only
+   populate once a dataset loads (info panel, playback transport)
+   are **not** in the scene set yet — capturing them pulls live
+   catalog data into CI. *Lean: a small committed fixture dataset so
+   capture is deterministic and offline; add the fixture-backed
+   scenes once the S4 hand-validation confirms the base pipeline.*
+   The same fixture/auth question gates the *populated* (vs.
+   chrome-only) publisher and admin scenes.

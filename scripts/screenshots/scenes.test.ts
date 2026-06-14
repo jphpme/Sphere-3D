@@ -3,8 +3,9 @@ import { describe, expect, it } from 'vitest'
 import { scenes } from './scenes'
 
 describe('screenshot scene manifest', () => {
-  it('has at least the starter set', () => {
-    expect(scenes.length).toBeGreaterThanOrEqual(4)
+  it('covers the high-traffic surface (~15–25 scenes)', () => {
+    expect(scenes.length).toBeGreaterThanOrEqual(15)
+    expect(scenes.length).toBeLessThanOrEqual(25)
   })
 
   it('every scene has a unique name', () => {
@@ -31,5 +32,17 @@ describe('screenshot scene manifest', () => {
     const names = scenes.map((s) => s.name)
     expect(names).toEqual(expect.arrayContaining(['publish-datasets']))
     expect(names.some((n) => n.startsWith('admin-'))).toBe(true)
+  })
+
+  it('covers the alternate browse views and help', () => {
+    const names = scenes.map((s) => s.name)
+    expect(names).toEqual(
+      expect.arrayContaining([
+        'browse-graph-view',
+        'browse-timeline-view',
+        'browse-map-view',
+        'help-panel',
+      ]),
+    )
   })
 })
