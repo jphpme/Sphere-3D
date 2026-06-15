@@ -70,8 +70,8 @@ export function assertSafeOutDir(dir: string): void {
 }
 
 /** Launch a headless Chromium for a capture run. */
-export function launchBrowser(): Promise<Browser> {
-  return chromium.launch()
+export function launchBrowser(opts: { args?: string[] } = {}): Promise<Browser> {
+  return chromium.launch({ args: opts.args })
 }
 
 /**

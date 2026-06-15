@@ -318,16 +318,35 @@ async function run(): Promise<void> {
       `at ${viewport.width}x${viewport.height} → ${OUT_DIR}`,
   )
 
-  const browser = await launchBrowser()
+  // Hardening for the long capture run: taking ~25 full-page
+  // screenshots in one browser accumulates renderer resources
+  // (notably /dev/shm in containerized CI, plus compositor memory)
+  // until `Page.captureScreenshot` fails in a block of scenes, then
+  // recovers once they're reclaimed. `--disable-dev-shm-usage` moves
+  // that scratch space to /tmp, and we recycle the browser every few
+  // scenes so nothing accumulates far enough to fail. Both are
+  // render-neutral (no GPU/rendering flags). See PR #201.
+  const BROWSER_ARGS = ['--disable-dev-shm-usage']
+  const RECYCLE_EVERY = 5
+
+  let browser = await launchBrowser({ args: BROWSER_ARGS })
   const captured: CapturedScene[] = []
   // Shared across scenes so each distinct string is cropped once
   // (first scene that renders it visibly wins).
   const croppedKeys = new Set<string>()
   let failed = 0
+  let sinceLaunch = 0
   try {
     // Serial: scenes are cheap and serial keeps the log readable and
     // the trace unambiguous (one page in flight at a time).
     for (const scene of captureList) {
+      // Recycle the browser to release accumulated renderer resources
+      // before they exhaust (see BROWSER_ARGS note above).
+      if (sinceLaunch >= RECYCLE_EVERY) {
+        await browser.close()
+        browser = await launchBrowser({ args: BROWSER_ARGS })
+        sinceLaunch = 0
+      }
       try {
         const results = await captureScene(browser, scene, viewport, croppedKeys)
         captured.push(...results)
@@ -345,6 +364,7 @@ async function run(): Promise<void> {
         // eslint-disable-next-line no-console
         console.error(`✗ ${scene.name}: ${msg}`)
       }
+      sinceLaunch++
     }
   } finally {
     await browser.close()
