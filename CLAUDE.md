@@ -131,6 +131,7 @@ npm run screenshots:smoke   # gating interaction tests (search, Orbit, nav)
 | `src/services/voiceBrowserEngines.ts` | Phase 1 browser Web Speech engines (`SpeechRecognition` STT + `speechSynthesis` TTS) registered against `voiceService`'s resolver |
 | `src/services/voiceCloudEngines.ts` | Phase 2 Cloudflare-edge voice engines — STT (`/api/voice/transcribe`, Whisper) + TTS (`/api/voice/synthesize`, MeloTTS/Aura); opt-in `cloud` provider, web-only, honours the `KILL_VOICE` cooldown |
 | `src/services/voiceVad.ts` | Phase 3 local voice-activity detection — pure `EnergyVad` energy-threshold state machine (attack/release hysteresis) + thin `startMicVad` Web Audio capture loop; gates mic audio locally before any realtime streaming (`docs/ORBIT_VOICE_PLAN.md` §9.1) |
+| `src/services/voiceRealtimeSession.ts` | Phase 3 hands-free session controller — composes the streaming STT engine + local VAD gate into one turn cycle; drives both the `open-mic` (VAD-gated) and `push-to-talk` (caller-driven) interaction models; mic/VAD seams injectable for tests (`docs/ORBIT_VOICE_PLAN.md` §9.1) |
 | `src/services/uiScaleService.ts` | Runtime side of the `--ui-scale` token (§7.1) |
 | `src/services/shaderSettingsService.ts` | Runtime side of the globe-shader uniforms (§7.2) |
 | `src/services/atmosphereConstants.ts` | Atmospheric-scattering constants + GLSL snippets shared by `earthTileLayer` and the VR/Orbit Earth |
