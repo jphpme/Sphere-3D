@@ -76,7 +76,16 @@ function makeCallbacks(): MockCallbacks {
     getCurrentDataset: vi.fn().mockReturnValue(null),
     announce: vi.fn(),
     onOpenBrowse: vi.fn(),
+    onVoiceAudioFocus: vi.fn(),
   } as MockCallbacks
+}
+
+/** Let pending micro/macrotasks settle (handleSend is async). */
+async function flush(n = 12): Promise<void> {
+  for (let i = 0; i < n; i++) {
+    await Promise.resolve()
+    await new Promise((r) => setTimeout(r, 0))
+  }
 }
 
 beforeEach(() => {
@@ -84,6 +93,9 @@ beforeEach(() => {
   sessionStorage.clear()
   localStorage.clear()
   resetDegradedForTests()
+  // The message list is module-level; clear it so a test that sends a
+  // message doesn't leak into a later "no messages" assertion.
+  clearChat()
 })
 
 afterEach(() => {
@@ -106,6 +118,21 @@ describe('recognition-language override (voiceLang)', () => {
     sel.value = ''
     save.click()
     expect(loadConfig().voiceLang).toBeUndefined()
+  })
+})
+
+describe('voice audio ducking', () => {
+  it('ducks dataset audio on send and restores it after the turn', async () => {
+    const cb = makeCallbacks()
+    initChatUI(cb)
+    const input = document.getElementById('chat-input') as HTMLTextAreaElement
+    input.value = 'hello orbit'
+    ;(document.getElementById('chat-send') as HTMLButtonElement).click()
+    await flush()
+    const calls = (cb.onVoiceAudioFocus as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0])
+    // Ducked at the start of the turn, restored once it completes.
+    expect(calls[0]).toBe(true)
+    expect(calls[calls.length - 1]).toBe(false)
   })
 })
 

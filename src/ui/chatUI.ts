@@ -66,6 +66,14 @@ export interface ChatCallbacks {
    * which case frame-load buttons silently no-op.
    */
   onLoadFrame?: (datasetId: string, frameQuery: string) => void
+  /**
+   * Phase 3 hands-free — duck the loaded dataset's audio (the HLS
+   * `<video>`, when the user has unmuted it) while a voice turn is
+   * active, restoring it afterward. Prevents the mic transcribing
+   * dataset audio and TTS competing with it (§9.1). Optional; a host
+   * without dataset audio can leave it unbound.
+   */
+  onVoiceAudioFocus?: (active: boolean) => void
 }
 
 let callbacks: ChatCallbacks | null = null
@@ -446,6 +454,14 @@ function wireEvents(): void {
   micBtn?.addEventListener('pointercancel', releasePtt)
   document.getElementById('chat-stop-speaking')?.addEventListener('click', () => {
     stopSpeaking()
+    // Hands-free interrupt: don't just stop Orbit's voice — hand the
+    // turn back to the user immediately by resuming the mic and
+    // restoring dataset audio, rather than waiting for the cancelled
+    // reply to drain. (§9.1 "Stop speaking" → "interrupt".)
+    if ((loadConfig().voiceHandsFree ?? 'off') !== 'off') {
+      handsFree?.setBusy(false)
+      setVoiceAudioFocus(false)
+    }
     callbacks?.announce(t('chat.announce.voiceStopped'))
   })
   // Enabling auto-speak is a user gesture — prime iOS TTS here so the
@@ -553,13 +569,28 @@ function initVoiceInput(): void {
   handsFree = new HandsFreeController({
     onPartial: (text) => fillVoiceInput(text),
     onTurn: (text) => { fillVoiceInput(text); void handleSend() },
-    onStateChange: (state) => setMicListening(state === 'capturing' || state === 'listening'),
+    onStateChange: (state) => {
+      setMicListening(state === 'capturing' || state === 'listening')
+      // Duck dataset audio the moment we start capturing a turn (kept
+      // ducked through send + reply; released at the resume point).
+      if (state === 'capturing') setVoiceAudioFocus(true)
+    },
   })
   syncHandsFree()
 }
 
 /** Module-level hands-free controller (null until init). */
 let handsFree: HandsFreeController | null = null
+
+/** Whether dataset audio is currently ducked for a voice turn. */
+let voiceAudioFocused = false
+
+/** Duck / restore the dataset audio for a voice turn (deduped). */
+function setVoiceAudioFocus(active: boolean): void {
+  if (voiceAudioFocused === active) return
+  voiceAudioFocused = active
+  callbacks?.onVoiceAudioFocus?.(active)
+}
 
 /** Fill the chat input with a (partial or final) transcript, resizing. */
 function fillVoiceInput(text: string): void {
@@ -1131,10 +1162,12 @@ async function handleSend(): Promise<void> {
   // Hands-free: suspend the open mic while Orbit thinks/speaks so it
   // can't transcribe its own reply (§9.1). Resumed once speech drains.
   handsFree?.setBusy(true)
+  setVoiceAudioFocus(true)
 
   const text = input.value.trim()
   if (!text) {
     handsFree?.setBusy(false)
+    setVoiceAudioFocus(false)
     return
   }
 
@@ -1338,7 +1371,11 @@ async function handleSend(): Promise<void> {
   // Resume hands-free listening only once any spoken reply has finished
   // draining (ttsChain), so the open mic doesn't capture Orbit's voice.
   // When auto-speak is off, ttsChain is already resolved → immediate.
-  void ttsChain.finally(() => handsFree?.setBusy(false))
+  // Restore the ducked dataset audio at the same point.
+  void ttsChain.finally(() => {
+    handsFree?.setBusy(false)
+    setVoiceAudioFocus(false)
+  })
 
   // Clean up empty actions array
   if (docentMsg.actions?.length === 0) delete docentMsg.actions
