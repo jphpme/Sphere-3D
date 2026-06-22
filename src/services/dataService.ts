@@ -86,10 +86,25 @@ interface RealtimeDashEntry {
   display_name?: string
   description?: string
   provider?: string
+  /** Legacy field. In schema <1.2 this carried `forecast` to mark a row;
+   *  in 1.2+ it is always `stream` and the kind lives in `dataProductType`. */
   type?: string
+  /** schema 1.2+ — `realtime` | `forecast`. Preferred forecast signal. */
+  dataProductType?: string
   categories?: string[]
   units?: string
   mpd: string
+  dsa?: string
+  /** schema 1.2+ — `global` | `regional`. */
+  coverage?: string
+  /** schema 1.2+ — human-readable org name (e.g. "NOAA Science On a Sphere"). */
+  organization?: string
+  /** schema 1.2+ — URL-style org slug used in the R2 path. */
+  organizationSlug?: string
+  /** schema 1.2+ — region slug for `coverage: regional` rows (e.g. "conus"). */
+  region?: string
+  /** schema 1.2+ — human-readable region name. */
+  regionName?: string
   thumbnail?: string
   colorbar?: string
 }
@@ -164,7 +179,10 @@ async function fetchRealtimeDashDatasets(): Promise<Dataset[]> {
     return entries
       .filter(entry => entry.id && entry.mpd)
       .map((entry, i) => {
-        const isForecast = entry.mpd.startsWith('forecast/') || entry.type === 'forecast'
+        const isForecast =
+          entry.dataProductType === 'forecast' ||
+          entry.type === 'forecast' ||
+          /\/forecast\//.test(entry.mpd)
         const title = prefixedRealtimeDashTitle(entry.display_name ?? entry.name ?? entry.id, isForecast)
         const categories = entry.categories ?? []
         const tags = Array.from(new Set([
@@ -178,7 +196,7 @@ async function fetchRealtimeDashDatasets(): Promise<Dataset[]> {
           title,
           format: 'application/dash+xml',
           dataLink: resolveRealtimeDashAsset(entry.mpd, baseUrl) ?? entry.mpd,
-          organization: entry.provider ? entry.provider.toUpperCase() : 'Cloudflare R2',
+          organization: entry.organization || (entry.provider ? entry.provider.toUpperCase() : 'Cloudflare R2'),
           abstractTxt: entry.description,
           thumbnailLink: resolveRealtimeDashAsset(entry.thumbnail, baseUrl),
           legendLink: resolveRealtimeDashAsset(entry.colorbar, baseUrl),

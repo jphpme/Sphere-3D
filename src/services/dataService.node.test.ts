@@ -200,6 +200,60 @@ describe('DataService — node-mode', () => {
     expect(forecast?.defaultBordersVisible).toBe(true)
   })
 
+  it('detects forecast kind from schema 1.2 dataProductType + new R2 path layout', async () => {
+    // The pachamama-studios.stream index reorganised paths to
+    // `global|regional/<realtime|forecast>/<org-slug>/<name>/...` and
+    // replaced `type: 'forecast'` with `dataProductType`. The legacy
+    // `mpd.startsWith('forecast/')` check no longer matches, so the
+    // loader must read `dataProductType` (and tolerate `/forecast/`
+    // in the path) or every forecast row is mislabelled real-time.
+    vi.stubGlobal(
+      'fetch',
+      mockNodeCatalog([], {
+        schemaVersion: '1.2',
+        baseUrl: 'https://pachamama-studios.stream/',
+        generatedAt: '2026-06-22T19:45:28Z',
+        datasets: [
+          {
+            id: 'clouds_grouped',
+            display_name: 'Global Cloud Cover',
+            type: 'stream',
+            dataProductType: 'realtime',
+            organization: 'NOAA Science On a Sphere',
+            categories: ['atmosphere'],
+            units: '%',
+            mpd: 'global/realtime/noaa-sos/clouds_grouped/stream.mpd',
+          },
+          {
+            id: 'ecmwf_t2m_forecast',
+            display_name: 'Forecast: Surface Temperature (ECMWF)',
+            type: 'stream',
+            dataProductType: 'forecast',
+            organization: 'ECMWF Open Data',
+            categories: ['atmosphere'],
+            units: '°C',
+            mpd: 'global/forecast/ecmwf-open-data/ecmwf_t2m_forecast/stream.mpd',
+          },
+        ],
+      }),
+    )
+
+    const svc = new DataService()
+    const datasets = await svc.fetchDatasets()
+    const realtime = datasets.find(d => d.id === 'R2_DASH_clouds_grouped')
+    const forecast = datasets.find(d => d.id === 'R2_DASH_ecmwf_t2m_forecast')
+
+    expect(realtime?.realtimeKind).toBe('real-time')
+    expect(realtime?.title).toBe('Real Time: Global Cloud Cover')
+    expect(realtime?.organization).toBe('NOAA Science On a Sphere')
+    expect(realtime?.dataLink).toBe('https://pachamama-studios.stream/global/realtime/noaa-sos/clouds_grouped/stream.mpd')
+
+    expect(forecast?.realtimeKind).toBe('forecast')
+    expect(forecast?.title).toBe('Forecast: Surface Temperature (ECMWF)')
+    expect(forecast?.organization).toBe('ECMWF Open Data')
+    expect(forecast?.dataLink).toBe('https://pachamama-studios.stream/global/forecast/ecmwf-open-data/ecmwf_t2m_forecast/stream.mpd')
+  })
+
   it('preserves legacyId from the wire shape and falls back on lookup (1d/T)', async () => {
     // Tour files and other long-lived references hard-code SOS
     // legacy IDs (e.g. INTERNAL_SOS_768); post-cutover the catalog's
