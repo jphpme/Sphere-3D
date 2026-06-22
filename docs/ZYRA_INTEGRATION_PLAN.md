@@ -627,13 +627,32 @@ gets from `acquire --prefer-remote-if-meta-newer`. We do it
 runner-side rather than via that static flag (a static pipeline
 can't condition the flag on a frames-meta that doesn't exist on the
 first, cold-cache run), and more simply than a restore-side marker:
-**synthetic frames are never cached.** `save-frames` reads the
-`pad-missing` report's `created_files`, excludes those frames from
-the upload, and prunes any stale synthetic copy already in the
+**synthetic frames are kept out of the cache.** `save-frames` reads
+the `pad-missing` report's `created_files`, excludes those frames
+from the upload, and prunes any stale synthetic copy already in the
 cache. So the next run restores only real frames, `acquire
 --sync-dir` re-fetches a frame that has since landed upstream, and
-`pad-missing` simply re-creates the ones still genuinely missing. No
-marker, no restore-side change — a refinement on top of the plain
+`pad-missing` re-creates the ones still genuinely missing.
+
+This is the *enabler* of replacement, not a removal from the
+dataset — and the distinction matters for TerraViz, where a frame
+sequence must have **no time gaps** or the playback time label
+desyncs. Two invariants make that safe:
+
+- **The published output is always the full, contiguous post-pad
+  set.** `pad-missing` runs inside the pipeline, and the publish
+  step reads `/work/images/frames` *after* it; `save-frames` only
+  reads that directory and writes the R2 cache, never mutating the
+  local frames the publish step uploads. Padded frames are always in
+  the published dataset.
+- **Caching a padded frame would *block* its replacement.** A padded
+  frame occupies the exact filename (timestamp) the real frame would
+  have, and `acquire --sync-dir` skips filenames already present —
+  so a cached padding would be skipped forever. Keeping it out of
+  the cache is what lets `acquire` fetch the real frame the first run
+  it exists.
+
+No marker, no restore-side change — a refinement on top of the plain
 cache, sequenced after it.
 
 ### Non-goals
