@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import {
   registerBrowserVoiceEngines,
   browserSttEngine,
@@ -144,5 +144,31 @@ describe('browser TTS engine', () => {
 
   it('resolves immediately when speechSynthesis is unavailable', async () => {
     await expect(browserTtsEngine.speak('hi', { lang: 'en' })).resolves.toBeUndefined()
+  })
+
+  it('still resolves via the safety timeout when onend never fires (Chrome stall / GC)', async () => {
+    vi.useFakeTimers()
+    try {
+      class StalledUtterance {
+        text: string
+        lang = ''
+        rate = 1
+        voice: unknown = null
+        onend: (() => void) | null = null
+        onerror: (() => void) | null = null
+        constructor(text: string) { this.text = text }
+      }
+      w['SpeechSynthesisUtterance'] = StalledUtterance
+      // speak() that never reports completion — the bug we guard against.
+      w['speechSynthesis'] = { getVoices: () => [], speak: () => {}, cancel: () => {}, resume: () => {} }
+
+      const promise = browserTtsEngine.speak('hello', { lang: 'en' })
+      let settled = false
+      void promise.then(() => { settled = true })
+      await vi.advanceTimersByTimeAsync(61000)
+      expect(settled).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

@@ -102,6 +102,15 @@ export const browserSttEngine: SttEngine = {
 }
 
 /** TTS via `speechSynthesis`. */
+/**
+ * Live utterances. Chrome garbage-collects a `SpeechSynthesisUtterance`
+ * that isn't referenced from JS while it's mid-flight — the result is
+ * no audio AND `onend` never firing (so a caller awaiting the speak
+ * would hang and a Stop control would stick). Holding a reference here
+ * until the utterance settles avoids that. (ORBIT_VOICE_PLAN §10.2)
+ */
+const liveUtterances = new Set<unknown>()
+
 export const browserTtsEngine: TtsEngine = {
   provider: 'browser',
   supportsLanguage: (lang) => !!lang,
@@ -121,11 +130,34 @@ export const browserTtsEngine: TtsEngine = {
       const match = synth.getVoices?.().find((v: { name: string }) => v.name === opts.voice)
       if (match) utterance.voice = match
     }
-    utterance.onend = () => resolve()
-    utterance.onerror = () => resolve()
-    synth.speak(utterance)
+    liveUtterances.add(utterance)
+    let settled = false
+    // Safety net: if the engine never reports completion (some
+    // browsers drop onend after a cancel, or stall), resolve anyway
+    // so the speech queue can't wedge and the Stop control can't stick.
+    const timeoutMs = Math.min(60000, 4000 + text.length * 120)
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const finish = () => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      liveUtterances.delete(utterance)
+      resolve()
+    }
+    utterance.onend = finish
+    utterance.onerror = finish
+    timer = setTimeout(finish, timeoutMs)
+    try {
+      synth.speak(utterance)
+      // Chrome can leave synthesis paused after a prior cancel(); nudge it.
+      synth.resume?.()
+    } catch (err) {
+      logger.warn('[voice] speechSynthesis.speak failed', err)
+      finish()
+    }
   }),
   cancel: () => {
+    liveUtterances.clear()
     try {
       (window as unknown as Record<string, any>)['speechSynthesis']?.cancel()
     } catch { /* nothing speaking */ }
