@@ -33,6 +33,14 @@ describe('parseArgs', () => {
       parseArgs([`--phase=publish`, `--workflow-id=${ULID}`, `--run-id=${ULID}`, `--wait-seconds=999999`]),
     ).toHaveProperty('error')
   })
+
+  it('accepts the frame-cache phases', () => {
+    for (const phase of ['restore-frames', 'save-frames']) {
+      expect(
+        parseArgs([`--phase=${phase}`, `--workflow-id=${ULID}`, `--run-id=${ULID}`]),
+      ).toMatchObject({ phase, workdir: '_work' })
+    }
+  })
 })
 
 describe('findFramesMeta', () => {

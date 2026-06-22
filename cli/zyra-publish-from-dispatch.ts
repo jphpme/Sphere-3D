@@ -55,10 +55,17 @@ import {
   renderSidecar,
   sanitizeErrorSummary,
 } from './lib/workflow-sidecar'
+import { loadR2ConfigFromEnv, type R2UploadConfig } from './lib/r2-upload'
+import {
+  isoDurationToSeconds,
+  restoreFramesFromR2,
+  saveFramesToR2,
+  windowFrameBudget,
+} from './lib/r2-frames'
 
 const ULID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/
 
-export type Phase = 'fetch' | 'publish' | 'report-failure'
+export type Phase = 'fetch' | 'publish' | 'report-failure' | 'restore-frames' | 'save-frames'
 
 export interface Args {
   phase: Phase
@@ -80,8 +87,16 @@ export function parseArgs(argv: readonly string[]): Args | { error: string } {
   }
 
   const phase = get('phase')
-  if (phase !== 'fetch' && phase !== 'publish' && phase !== 'report-failure') {
-    return { error: `--phase must be fetch, publish, or report-failure; got ${phase ?? '(missing)'}` }
+  if (
+    phase !== 'fetch' &&
+    phase !== 'publish' &&
+    phase !== 'report-failure' &&
+    phase !== 'restore-frames' &&
+    phase !== 'save-frames'
+  ) {
+    return {
+      error: `--phase must be fetch, publish, report-failure, restore-frames, or save-frames; got ${phase ?? '(missing)'}`,
+    }
   }
   const workflowId = get('workflow-id')
   if (!workflowId || !ULID_RE.test(workflowId)) {
@@ -323,6 +338,137 @@ async function phasePublish(client: TerravizClient, args: Args): Promise<number>
   return 0
 }
 
+/** R2 frame-cache config from the runner env, or null when the
+ *  operator hasn't wired the credential trio — in which case the
+ *  cache is simply disabled and the run proceeds uncached. */
+function frameCacheConfig(): R2UploadConfig | null {
+  const cfg = loadR2ConfigFromEnv()
+  if (!cfg.endpoint || !cfg.accessKeyId || !cfg.secretAccessKey) return null
+  return cfg
+}
+
+/** Translate a pipeline `/work/...` path (the container's view of
+ *  the mounted workdir) to the host path the CLI sees. */
+function mapWorkPath(pipelinePath: string | null, workdir: string): string {
+  if (!pipelinePath) return join(workdir, 'images', 'frames')
+  if (pipelinePath === '/work') return workdir
+  if (pipelinePath.startsWith('/work/')) return join(workdir, pipelinePath.slice('/work/'.length))
+  return join(workdir, 'images', 'frames')
+}
+
+interface FrameParams {
+  framesDir: string
+  /** Window budget for the prune, or null to keep everything. */
+  keepFrames: number | null
+}
+
+/** Derive the frames directory + window budget from the stored
+ *  pipeline definition: the acquire stage's `sync-dir` +
+ *  `since-period`, and a scan-frames/metadata stage's
+ *  `period-seconds`. */
+function deriveFrameParams(pipelineJson: string, workdir: string): FrameParams {
+  let stages: Array<Record<string, unknown>> = []
+  try {
+    const parsed = JSON.parse(pipelineJson) as { stages?: unknown }
+    if (Array.isArray(parsed.stages)) stages = parsed.stages as Array<Record<string, unknown>>
+  } catch {
+    /* unparseable pipeline — fall back to defaults below */
+  }
+  let syncDir: string | null = null
+  let sincePeriod: string | null = null
+  let periodSeconds: number | null = null
+  for (const stage of stages) {
+    const args = (stage.args ?? {}) as Record<string, unknown>
+    if (stage.stage === 'acquire') {
+      if (typeof args['sync-dir'] === 'string') syncDir = args['sync-dir']
+      if (typeof args['since-period'] === 'string') sincePeriod = args['since-period']
+    }
+    if (stage.command === 'scan-frames' || stage.command === 'metadata') {
+      const ps = args['period-seconds']
+      if (typeof ps === 'number') periodSeconds = ps
+      else if (typeof ps === 'string' && /^\d+$/.test(ps)) periodSeconds = Number(ps)
+    }
+  }
+  return {
+    framesDir: mapWorkPath(syncDir, workdir),
+    keepFrames: windowFrameBudget(
+      sincePeriod ? isoDurationToSeconds(sincePeriod) : null,
+      periodSeconds,
+    ),
+  }
+}
+
+/** Read the dataset id + pipeline definition the fetch phase wrote.
+ *  Returns null (logging a warning) when the file is absent or
+ *  malformed — the frame-cache phases treat that as "skip", never
+ *  as a run failure. */
+async function readWorkflowForFrames(
+  workdir: string,
+): Promise<{ datasetId: string; pipelineJson: string } | null> {
+  try {
+    const wf = JSON.parse(await readFile(join(workdir, 'workflow.json'), 'utf-8')) as {
+      target_dataset_id?: unknown
+      pipeline_json?: unknown
+    }
+    if (typeof wf.target_dataset_id !== 'string' || typeof wf.pipeline_json !== 'string') {
+      log('WARN: workflow.json missing target_dataset_id / pipeline_json — skipping frame cache')
+      return null
+    }
+    return { datasetId: wf.target_dataset_id, pipelineJson: wf.pipeline_json }
+  } catch (err) {
+    log(`WARN: cannot read workflow.json — skipping frame cache (${err instanceof Error ? err.message : String(err)})`)
+    return null
+  }
+}
+
+/** restore-frames: pull the dataset's cached frames into the
+ *  workdir before the Zyra container runs. Best-effort — a cache
+ *  miss or R2 error logs and returns 0 so the run continues. */
+async function phaseRestoreFrames(args: Args): Promise<number> {
+  const cfg = frameCacheConfig()
+  if (!cfg) {
+    log('frame cache disabled (R2 not configured) — skipping restore')
+    return 0
+  }
+  const wf = await readWorkflowForFrames(args.workdir)
+  if (!wf) return 0
+  const { framesDir } = deriveFrameParams(wf.pipelineJson, args.workdir)
+  try {
+    const result = await restoreFramesFromR2(cfg, wf.datasetId, framesDir, { log })
+    log(`frame cache: restored ${result.restored}, ${result.skipped} already present → ${framesDir}`)
+  } catch (err) {
+    log(`WARN: frame restore failed (continuing uncached) — ${err instanceof Error ? err.message : String(err)}`)
+  }
+  return 0
+}
+
+/** save-frames: push new frames back to the cache after compose and
+ *  prune the cache to the active window. Best-effort — failing to
+ *  cache must not fail a run that already produced a video. */
+async function phaseSaveFrames(args: Args): Promise<number> {
+  const cfg = frameCacheConfig()
+  if (!cfg) {
+    log('frame cache disabled (R2 not configured) — skipping save')
+    return 0
+  }
+  const wf = await readWorkflowForFrames(args.workdir)
+  if (!wf) return 0
+  const { framesDir, keepFrames } = deriveFrameParams(wf.pipelineJson, args.workdir)
+  try {
+    const result = await saveFramesToR2(cfg, wf.datasetId, framesDir, {
+      log,
+      keepFrames: keepFrames ?? undefined,
+    })
+    log(
+      `frame cache: ${result.uploaded} uploaded, ${result.pruned} pruned, ${result.kept} kept` +
+        (keepFrames ? ` (window ${keepFrames})` : ' (no window prune)'),
+    )
+  } catch (err) {
+    log(`WARN: frame save failed (continuing) — ${err instanceof Error ? err.message : String(err)}`)
+  }
+  return 0
+}
+
 async function phaseReportFailure(client: TerravizClient, args: Args): Promise<number> {
   const status = await client.postWorkflowRunStatus(args.workflowId, args.runId, {
     status: 'failed',
@@ -349,6 +495,12 @@ async function main(): Promise<number> {
     console.error(`error: ${parsed.error}`)
     return 1
   }
+  // The frame-cache phases talk only to R2, not the publisher API,
+  // so they don't need (and shouldn't require) the TerravizClient
+  // config to be present.
+  if (parsed.phase === 'restore-frames') return await phaseRestoreFrames(parsed)
+  if (parsed.phase === 'save-frames') return await phaseSaveFrames(parsed)
+
   const client = new TerravizClient(resolveConfig())
   try {
     switch (parsed.phase) {
