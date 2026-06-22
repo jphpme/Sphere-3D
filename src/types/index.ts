@@ -558,9 +558,10 @@ export interface DocentConfig {
   readingLevel: ReadingLevel  // default: 'general'
   visionEnabled: boolean // default: false — captures globe screenshot as context
   debugPrompt?: boolean  // default: false — log full system prompt to console
-  // --- Voice (Orbit Voice Plan, Phase 1). All optional + default
-  // off so typed chat is byte-for-byte unchanged when unused. ---
-  voiceEnabled?: boolean            // mic / STT input on/off; default false
+  // --- Voice (Orbit Voice Plan, Phase 1). All optional; auto-speak
+  // defaults off so typed chat is byte-for-byte unchanged when unused.
+  // Mic visibility is capability-gated (STT support for the active
+  // locale), not a stored toggle. ---
   voiceAutoSpeak?: boolean          // auto-read replies via TTS; default false (§8 decision 1)
   voiceProvider?: VoiceProviderPreference // default 'auto'
   voiceLang?: string                // BCP-47 override; default = active UI locale

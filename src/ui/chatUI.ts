@@ -84,6 +84,10 @@ let lastUserSendAt: number | null = null
 
 /** Active speech-recognition session, or null when not listening (ORBIT_VOICE_PLAN §1). */
 let sttSession: SttSession | null = null
+/** Release handle for the `voiceschanged` subscription (re-init safe). */
+let voicesUnsub: (() => void) | null = null
+/** Set when a send terminates listening, so the session's `onEnd` doesn't re-send. */
+let sttSuppressAutoSend = false
 
 /** TTS (auto-speak) state for the in-flight reply (ORBIT_VOICE_PLAN §1.1, §2). */
 let ttsEngine: TtsEngine | null = null
@@ -512,8 +516,11 @@ function initVoiceInput(): void {
   registerBrowserVoiceEngines()
   updateMicVisibility()
   populateVoiceOptions()
-  // System voices load asynchronously — refresh the picker when they arrive.
-  onBrowserVoicesChanged(populateVoiceOptions)
+  // System voices load asynchronously — refresh the picker when they
+  // arrive. Release any prior subscription first so a re-init (hot
+  // reload / tests) doesn't accumulate duplicate listeners.
+  voicesUnsub?.()
+  voicesUnsub = onBrowserVoicesChanged(populateVoiceOptions)
 }
 
 /** Show the mic only when an STT engine resolves for the active locale (§3 matrix). */
@@ -568,6 +575,9 @@ function toggleListening(): void {
 function startListening(): void {
   const input = document.getElementById('chat-input') as HTMLTextAreaElement | null
   if (!input || isStreaming) return
+  // Barge-in: never capture while Orbit is speaking, or the mic would
+  // transcribe its own TTS (echo / self-trigger). (§9.1)
+  stopSpeaking()
   const cfg = loadConfig()
   const lang = cfg.voiceLang || getLocale()
   const engine = resolveSttEngine(cfg.voiceProvider ?? 'auto', lang)
@@ -575,6 +585,7 @@ function startListening(): void {
     callbacks?.announce(t('chat.announce.voiceError'))
     return
   }
+  sttSuppressAutoSend = false
   let sawFinal = false
   let sttError = false
   const startedAt = Date.now()
@@ -601,6 +612,8 @@ function startListening(): void {
     },
     onEnd: () => {
       const hadFinal = sawFinal
+      const suppressed = sttSuppressAutoSend
+      sttSuppressAutoSend = false
       endListening()
       // Tier B: no transcript text — only provider/lang/duration/success.
       emit({
@@ -612,8 +625,10 @@ function startListening(): void {
         lang: langBase,
         success: hadFinal && !sttError,
       })
-      // Auto-send on a committed transcript (push-to-talk turn).
-      if (hadFinal && input.value.trim()) void handleSend()
+      // Auto-send on a committed transcript (push-to-talk turn) —
+      // unless an error was reported (could be partial/wrong) or a
+      // manual send already terminated this session.
+      if (hadFinal && !sttError && !suppressed && input.value.trim()) void handleSend()
     },
   })
 }
@@ -910,7 +925,6 @@ function readSettingsForm(): DocentConfig {
     enabled: enabledInput?.checked ?? defaults.enabled,
     visionEnabled: visionInput?.checked ?? defaults.visionEnabled,
     debugPrompt: debugInput?.checked ?? defaults.debugPrompt,
-    voiceEnabled: current.voiceEnabled,
     voiceAutoSpeak: autospeakInput?.checked ?? current.voiceAutoSpeak,
     voiceProvider: current.voiceProvider,
     voiceLang: current.voiceLang,
@@ -975,6 +989,15 @@ async function handleSettingsTest(): Promise<void> {
 async function handleSend(): Promise<void> {
   const input = document.getElementById('chat-input') as HTMLTextAreaElement | null
   if (!input || !callbacks || isStreaming) return
+
+  // Terminate any active listening first (regardless of how send was
+  // triggered) so recognition can't keep mutating the input after we
+  // read and clear it. Suppress the session's auto-send — this send
+  // already commits the current transcript.
+  if (sttSession) {
+    sttSuppressAutoSend = true
+    stopListening()
+  }
 
   const text = input.value.trim()
   if (!text) return

@@ -6,20 +6,21 @@ and text-to-speech (TTS) so Orbit can *talk back*. The existing
 typed chat experience is untouched; voice is a feature-gated,
 additive layer over the hybrid LLM + local-engine pipeline.
 
-Status: **draft for review — Phase 1 implementation underway.**
+Status: **draft for review — Phase 1 shipped (on this branch).**
 This document scopes the approach, the UI, the Cloudflare and
 client-side options, and a phase plan that lands a usable web MVP
 first and defers the expensive bits (realtime streaming, on-device
-models) behind it. Landed in this branch so far: the voice-service
+models) behind it. Landed in this branch: the voice-service
 foundation (capability detection, provider resolver, per-locale
 matrix, spoken-form projection), the browser Web Speech engines,
 the **mic (STT) input** (push-to-talk → interim transcript →
-auto-send), and **TTS auto-speak** — Orbit reads its reply
-sentence-by-sentence via `speechSynthesis`, with a Stop control and
-an "auto-speak replies" settings toggle (default off, §8). Next
-slices: the `voice_interaction` telemetry event, the remaining
-voice settings (provider / voice / rate / language), and the
-Cloudflare-edge engines (Phase 2, §7).
+auto-send), **TTS auto-speak** + the per-message **🔊 Speak**
+button (Orbit reads its reply sentence-by-sentence via
+`speechSynthesis`, with a Stop control and a default-off settings
+toggle), the **voice / rate picker** (novelty voices filtered), and
+the **`voice_interaction`** Tier B telemetry event. Next:
+**Phase 2 — Cloudflare-edge STT/TTS** (§7) plus the remaining voice
+settings (provider / recognition language).
 
 > Cross-references:
 > [`docs/DOCENT_UX_IMPROVEMENT_PLAN.md`](DOCENT_UX_IMPROVEMENT_PLAN.md)
@@ -123,8 +124,8 @@ robotically. Two things follow:
    `docentContext.ts` requests shorter, link-free, list-free prose
    and at most one dataset recommendation per turn (you can't scan
    five options by ear). This is a genuine pipeline change, not a
-   post-filter — gated on `config.voiceEnabled` so typed chat is
-   unaffected.
+   post-filter — gated on voice being active (e.g. `voiceAutoSpeak`
+   / a voice-initiated turn) so typed chat is unaffected.
 
 ### 1.2 Acting on a recommendation, hands-free
 
@@ -671,8 +672,8 @@ To keep changes "one logical change per turn" (per `CLAUDE.md`):
 2. Extend `DocentConfig` with `voice*` fields + defaults
    (auto-speak **off** by default).
 3. **Spoken-form projection** (marker/markdown/URL stripping for
-   the ear) + a voice-aware prompt variant gated on
-   `voiceEnabled` (§1.1).
+   the ear) + a voice-aware prompt variant gated on voice being
+   active (§1.1).
 4. Mic button + listening UI + interim transcript (Web Speech STT)
    → `handleSend()`; spoken-offer handling for `action` /
    `auto-load` chunks (§1.2). New scene + i18n keys.

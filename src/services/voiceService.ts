@@ -290,10 +290,14 @@ export function toSpokenForm(input: string): string {
 export function splitIntoSpokenChunks(input: string): string[] {
   const text = toSpokenForm(input)
   if (!text) return []
-  // Break after sentence-final punctuation followed by whitespace,
-  // and on hard newlines.
+  // Break after sentence-final punctuation, and on hard newlines.
+  // Lookbehind-free on purpose: `(?<=…)` is a parse-time SyntaxError
+  // on Safari 15 (a supported target), and because this module loads
+  // at startup it would break the whole app even when voice is unused.
+  // So insert a newline after `.!?` + whitespace, then split on newlines.
   return text
-    .split(/(?<=[.!?])\s+|\n+/)
+    .replace(/([.!?])\s+/g, '$1\n')
+    .split(/\n+/)
     .map(s => s.trim())
     .filter(Boolean)
 }

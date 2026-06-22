@@ -235,9 +235,8 @@ const DEFAULT_CONFIG: DocentConfig = {
   readingLevel: 'general',
   visionEnabled: false,
   debugPrompt: false,
-  // Voice defaults — off, so existing typed-chat behaviour is
-  // unchanged until a user opts in (docs/ORBIT_VOICE_PLAN.md §8).
-  voiceEnabled: false,
+  // Voice defaults — auto-speak off, so existing typed-chat behaviour
+  // is unchanged until a user opts in (docs/ORBIT_VOICE_PLAN.md §8).
   voiceAutoSpeak: false,
   voiceProvider: 'auto',
   voiceRate: 1,
