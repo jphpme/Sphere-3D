@@ -22,9 +22,7 @@ import { createVrBrowse, type VrBrowseHandle } from './vrBrowse'
 import { createVrTourControls, type VrTourControlsHandle } from './vrTourControls'
 import { createVrTourOverlay, type VrTourOverlayHandle } from './vrTourOverlay'
 import { createVrTimeLabel, type VrTimeLabelHandle } from './vrTimeLabel'
-import { createVrLegendPanel, type VrLegendPanelHandle } from './vrLegendPanel'
 import { setVrTourOverlaySink } from '../ui/tourUI'
-import { getChatVoiceState, startChatVoiceQuestion } from '../ui/chatUI'
 import { createVrInteraction, type VrInteractionHandle } from './vrInteraction'
 import { createVrLoading, type VrLoadingHandle } from './vrLoading'
 import { createVrZoomOverlay, type VrZoomOverlayHandle } from '../ui/vrZoomOverlay'
@@ -61,8 +59,6 @@ export interface VrSessionContext {
   getDatasetTexture(): VrDatasetTexture | null
   /** Dataset title for the HUD (primary panel). null/empty → "No dataset loaded". */
   getDatasetTitle(): string | null
-  /** Legend/colorbar image URL for the primary dataset, if available. */
-  getDatasetLegendUrl(): string | null
   /** Dataset id for the primary panel — used by analytics events
    * fired from inside VR (e.g. `vr_placement.layer_id`). Null when
    * no dataset is loaded. Telemetry-only: the HUD itself uses
@@ -91,14 +87,6 @@ export interface VrSessionContext {
   isPlaying(): boolean
   /** Called when the user taps play/pause in VR. Toggles the primary's video. */
   togglePlayPause(): void
-  /** Current primary video time in seconds. 0 for image/no-video datasets. */
-  getPlaybackTime(): number
-  /** Current primary video duration in seconds. 0 when unavailable. */
-  getPlaybackDuration(): number
-  /** Stop primary video playback and seek to the beginning. */
-  stopPlayback(): void
-  /** Seek primary video by normalized progress fraction, 0..1. */
-  seekPlayback(fraction: number): void
   /** Drives the HUD mute icon variant (speaker vs speaker-slash). */
   isMuted(): boolean
   /** Called when the user taps the HUD mute button. Flips `video.muted`. */
@@ -226,8 +214,6 @@ interface ActiveSession {
   tourOverlay: VrTourOverlayHandle
   /** Floating date readout above the globe for datasets with time metadata. */
   timeLabel: VrTimeLabelHandle
-  /** AR-only floating legend/colorbar panel. Null for VR mode. */
-  legendPanel: VrLegendPanelHandle | null
   /** Loading scene shown during entry; null after fade-out + dispose. */
   loading: VrLoadingHandle | null
   /** AR-only spatial placement (hit-test reticle + Place button). Null when hit-test unavailable. */
@@ -488,7 +474,6 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
   // placement reference space all key off this — keep them consistent.
   let referenceSpaceType: 'local-floor' | 'local' = 'local-floor'
   let session: XRSession
-  let referenceSpaceType: XRReferenceSpaceType = 'local-floor'
   try {
     session = await navigator.xr.requestSession(sessionMode, {
       requiredFeatures: ['local-floor'],
@@ -527,7 +512,6 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
   // Bind the session to the renderer. Three.js handles
   // makeXRCompatible + baseLayer setup internally.
   try {
-    renderer.xr.setReferenceSpaceType(referenceSpaceType)
     await renderer.xr.setSession(session as unknown as XRSession)
   } catch (err) {
     sessionTelemetry.exitReason = 'error'
@@ -625,13 +609,6 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
   // recompute from video.currentTime directly instead).
   const timeLabel = createVrTimeLabel(THREE_)
   scene.scene.add(timeLabel.mesh)
-
-  // AR-only legend/colorbar. In immersive sessions the DOM legend is
-  // not visible, so render the current dataset's legend as a small
-  // billboarded panel. VR mode keeps the scene lean and unchanged.
-  const legendPanel = isAr ? createVrLegendPanel(THREE_) : null
-  if (legendPanel) scene.scene.add(legendPanel.mesh)
-
   setVrTourOverlaySink({
     showText: (params) => tourOverlay.showText(params),
     hideText: (id) => tourOverlay.hideOverlay(id),
@@ -665,10 +642,10 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     hideAllQuestions: () => tourOverlay.hideAllQuestions(),
   })
 
-  // --- Spatial placement (AR-only) + placement ref space ---
+  // --- Spatial placement (AR-only) + local-floor ref space ---
   // Two separable capabilities:
   //
-  //   (a) placement reference space — used for resolving ANCHOR
+  //   (a) local-floor reference space — used for resolving ANCHOR
   //       poses each frame (`frame.getPose(anchor.anchorSpace,
   //       refSpace)`). An anchor restored from a persistent handle
   //       needs this even if the user never enters Place mode in
@@ -836,19 +813,14 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
       })
     }, 250)
   })
-  const initialVoiceState = getChatVoiceState()
   hud.setState({
     datasetTitle: ctx.getDatasetTitle(),
     isPlaying: ctx.isPlaying(),
     hasVideo: ctx.hasVideoDataset(),
     isMuted: ctx.isMuted(),
-    currentTime: ctx.getPlaybackTime(),
-    duration: ctx.getPlaybackDuration(),
     panelCount: ctx.getPanelCount(),
     primaryIndex: ctx.getPrimaryIndex(),
     browseOpen: browse.isVisible(),
-    voiceStatus: initialVoiceState.status,
-    voiceTranscript: initialVoiceState.transcript,
   })
 
   // XRControllerModelFactory was imported earlier (before scene
@@ -971,25 +943,19 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
       }
     },
     onHudAction: (action) => {
-      if (action.kind === 'play-pause') {
+      if (action === 'play-pause') {
         ctx.togglePlayPause()
-      } else if (action.kind === 'stop') {
-        ctx.stopPlayback()
-      } else if (action.kind === 'seek') {
-        ctx.seekPlayback(action.fraction)
-      } else if (action.kind === 'voice') {
-        startChatVoiceQuestion()
-      } else if (action.kind === 'mute') {
+      } else if (action === 'mute') {
         // Flip the primary video's muted flag. The per-frame
         // hud.setState pipes ctx.isMuted() back through so the
         // icon updates on the next redraw.
         ctx.toggleMute()
-      } else if (action.kind === 'browse') {
+      } else if (action === 'browse') {
         // Toggle the in-VR dataset browse panel. Its `isVisible`
         // feeds `hud.setState({ browseOpen })` each frame, so the
         // next render shows the button in its active-state color.
         browse.setVisible(!browse.isVisible())
-      } else if (action.kind === 'exit-vr') {
+      } else if (action === 'exit-vr') {
         // Programmatic exit — fires the 'end' event, which routes
         // through the same teardown path as headset-initiated exits.
         void session.end().catch(err =>
@@ -1110,7 +1076,6 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     tourControls,
     tourOverlay,
     timeLabel,
-    legendPanel,
     interaction,
     loading,
     placement,
@@ -1259,19 +1224,14 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
 
     // HUD reflects the latest app state every frame. setState is
     // internally debounced — it only redraws when a field changes.
-    const voiceState = getChatVoiceState()
     active.hud.setState({
       datasetTitle: ctx.getDatasetTitle(),
       isPlaying: ctx.isPlaying(),
       hasVideo: ctx.hasVideoDataset(),
       isMuted: ctx.isMuted(),
-      currentTime: ctx.getPlaybackTime(),
-      duration: ctx.getPlaybackDuration(),
       panelCount,
       primaryIndex: ctx.getPrimaryIndex(),
       browseOpen: active.browse.isVisible(),
-      voiceStatus: voiceState.status,
-      voiceTranscript: voiceState.transcript,
     })
 
     // Tour strip mirrors the engine state. Always poll; the strip's
@@ -1288,12 +1248,6 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     // out naturally — a paused video's currentTime doesn't advance.
     active.timeLabel.setText(ctx.getDatasetTimeLabel())
     active.timeLabel.update(active.camera, active.scene.globe.position)
-
-    // AR legend/colorbar. DOM overlays are invisible in immersive
-    // WebXR, so mirror the primary dataset's legend into a scene
-    // panel whenever one exists. Null hides the panel.
-    active.legendPanel?.setLegend(ctx.getDatasetLegendUrl(), ctx.getDatasetTitle())
-    active.legendPanel?.update(active.camera, active.scene.globe.position)
 
     // Borders overlay mirrors the shared view preference. 2D toggles
     // (Tools menu / tour envShowWorldBorder) write to the same
@@ -1451,10 +1405,6 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     a.tourControls.dispose()
     a.scene.scene.remove(a.timeLabel.mesh)
     a.timeLabel.dispose()
-    if (a.legendPanel) {
-      a.scene.scene.remove(a.legendPanel.mesh)
-      a.legendPanel.dispose()
-    }
     // Clear the tourUI sink first so any in-flight `hideAll*` calls
     // from the tour engine (e.g. tour cleanup fired by stopTour()
     // during exit) don't land on the about-to-be-disposed manager.

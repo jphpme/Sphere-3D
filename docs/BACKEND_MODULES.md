@@ -178,3 +178,13 @@ design rationale in the `docs/CATALOG_*` plan docs.
 | `functions/api/v1/_lib/workflow-validators.ts` | Workflow body validation — the stage/command allowlist boundary, metadata-template checks, run-status callbacks |
 | `functions/api/v1/_lib/vectorize-store.ts` | Vectorize helpers — Phase 1c |
 
+
+## Realtime/forecast DASH asset proxy
+
+Same-origin proxy for Cloudflare R2-hosted realtime/forecast DASH streams
+(`VITE_REALTIME_DASH_BASE_URL`). Used when the SPA fetches DASH assets
+through the Pages origin instead of the R2 bucket directly.
+
+| `functions/_realtimeAssetProxy.ts` | Shared helper - proxies `/realtime/*` and `/forecast/*` to the R2 origin with CORS + Range support |
+| `functions/realtime/[[path]].ts` | Route: GET /realtime/* (realtime DASH assets) |
+| `functions/forecast/[[path]].ts` | Route: GET /forecast/* (forecast DASH assets) |

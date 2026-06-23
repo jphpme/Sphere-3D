@@ -71,6 +71,7 @@
     "d3-brush": "^3.0.0",
     "d3-scale": "^4.0.2",
     "d3-selection": "^3.0.0",
+    "dashjs": "^5.2.0",
     "hls.js": "^1.4.0",
     "html2canvas": "^1.4.1",
     "jszip": "^3.10.1",

@@ -16,7 +16,7 @@ import { HLSService } from './services/hlsService'
 import { dataService, PreviewFetchError } from './services/dataService'
 import { formatDate, videoTimeToDate, dateToVideoTime, isSubDailyPeriod, getSunPosition, inferDisplayInterval } from './utils/time'
 import { logger } from './utils/logger'
-import type { AppState, VideoTextureHandle, TourFile, Dataset, GlobeRenderer } from './types'
+import type { AppState, VideoTextureHandle, TourFile, Dataset } from './types'
 
 // Extracted modules
 import { showBrowseUI, hideBrowseUI, collapseBrowseUI, notifyBrowseOpened, refreshBrowseNewSinceBadge } from './ui/browseUI'
@@ -34,7 +34,7 @@ import { updateMapControlsPosition } from './ui/mapControlsUI'
 import { initToolsMenu, syncToolsMenuState, syncToolsMenuLayout, pulseBrowseButton } from './ui/toolsMenuUI'
 import { openCreditsPanel } from './ui/creditsPanel'
 import { initChatUI, openChat, openChatSettings, notifyDatasetChanged, showChatTrigger, hideChatTrigger, closeChat, flushPendingGlobeActions } from './ui/chatUI'
-import { loadViewPreferences, saveViewPreferences, setBordersVisible, type ViewPreferences } from './utils/viewPreferences'
+import { loadViewPreferences, saveViewPreferences, type ViewPreferences } from './utils/viewPreferences'
 import { initHelpUI, setActiveDataset as setHelpActiveDataset } from './ui/helpUI'
 import { showDisclosureBannerIfNeeded } from './ui/disclosureBanner'
 import {
@@ -719,34 +719,6 @@ class InteractiveSphere {
     refreshBrowseNewSinceBadge(datasets)
   }
 
-  /**
-   * Real-time/forecast DASH layers are often sparse transparent
-   * overlays, so they need a geographic frame by default. This
-   * reuses the existing Tools -> country borders toggle so users can
-   * remove the overlay immediately.
-   */
-  private applyDatasetBorderDefault(renderer: GlobeRenderer, dataset: Dataset): void {
-    if (!dataset.defaultBordersVisible) return
-
-    const enableBorders = () => {
-      if (!renderer.toggleBoundaries) return
-      const applied = renderer.toggleBoundaries(true)
-      if (applied === false) return
-      setBordersVisible(true)
-      syncToolsMenuState({ borders: true })
-    }
-
-    if (renderer instanceof MapRenderer) {
-      const map = renderer.getMap()
-      if (map && !map.isStyleLoaded()) {
-        map.once('load', enableBorders)
-        return
-      }
-    }
-
-    enableBorders()
-  }
-
   /** Load a dataset by ID onto the globe, tearing down any previous video stream first. Uses a generation counter to safely ignore superseded loads. */
   private async loadDataset(
     datasetId: string,
@@ -894,7 +866,6 @@ class InteractiveSphere {
         const img = await loadImageDataset(dataset, targetRenderer, this.appState, this.isMobile, loaderCallbacks)
         if (gen !== this.loadGeneration) return
         if (this.panelStates[targetSlot]) this.panelStates[targetSlot].image = img
-        this.applyDatasetBorderDefault(targetRenderer, dataset)
         this.emitLayerLoaded(dataset, targetSlot, trigger, 'image', Date.now() - loadStartWall)
       } else if (dataService.isVideoDataset(dataset)) {
         // Clear any previously-cached image element for this slot —
@@ -915,9 +886,7 @@ class InteractiveSphere {
         this.storePanelVideoResult(targetSlot, result)
         this.attachPrimaryVideoSync()
         this.doStartPlaybackLoop()
-        this.applyDatasetBorderDefault(targetRenderer, dataset)
-        const layerSource = result.streamKind === 'direct' ? 'network' : result.streamKind
-        this.emitLayerLoaded(dataset, targetSlot, trigger, layerSource, Date.now() - loadStartWall)
+        this.emitLayerLoaded(dataset, targetSlot, trigger, 'hls', Date.now() - loadStartWall)
       } else {
         throw new Error(`Unsupported format: ${dataset.format}`)
       }
@@ -1071,7 +1040,6 @@ class InteractiveSphere {
         { isPrimary: isPrimarySlot },
       )
       if (this.panelStates[targetSlot]) this.panelStates[targetSlot].image = img
-      this.applyDatasetBorderDefault(targetRenderer, dataset)
       this.emitLayerLoaded(dataset, targetSlot, 'tour', 'image', Date.now() - tourLoadStartWall)
     } else if (dataService.isVideoDataset(dataset)) {
       // Clear any previously-cached image element for this slot —
@@ -1088,9 +1056,7 @@ class InteractiveSphere {
         this.attachPrimaryVideoSync()
         this.doStartPlaybackLoop()
       }
-      this.applyDatasetBorderDefault(targetRenderer, dataset)
-      const layerSource = result.streamKind === 'direct' ? 'network' : result.streamKind
-      this.emitLayerLoaded(dataset, targetSlot, 'tour', layerSource, Date.now() - tourLoadStartWall)
+      this.emitLayerLoaded(dataset, targetSlot, 'tour', 'hls', Date.now() - tourLoadStartWall)
     }
 
     this.viewports.setPanelLoading(targetSlot, false)
@@ -1924,7 +1890,6 @@ class InteractiveSphere {
       // the panel-slot version with the current primary index.
       getDatasetTexture: () => getPanelTexture(this.viewports.getPrimaryIndex()),
       getDatasetTitle: () => this.appState.currentDataset?.title ?? null,
-      getDatasetLegendUrl: () => this.appState.currentDataset?.legendLink ?? null,
       getDatasetId: () => this.appState.currentDataset?.id ?? null,
       getDatasetTimeLabel: () => {
         // Compute the label fresh from video.currentTime every call.
@@ -1977,30 +1942,6 @@ class InteractiveSphere {
       togglePlayPause: () => togglePlayPause(
         this.hlsService, this.appState, (m) => this.announce(m),
       ),
-      getPlaybackTime: () => {
-        const video = this.hlsService?.video
-        return video && Number.isFinite(video.currentTime) ? video.currentTime : 0
-      },
-      getPlaybackDuration: () => {
-        const duration = this.hlsService?.duration
-        return Number.isFinite(duration) && (duration as number) > 0 ? duration as number : 0
-      },
-      stopPlayback: () => {
-        if (!this.hlsService) return
-        this.hlsService.currentTime = 0
-        this.hlsService.pause()
-        this.appState.isPlaying = false
-        this.playback.scrubbing = true
-        this.announce('Playback stopped')
-      },
-      seekPlayback: (fraction: number) => {
-        const video = this.hlsService?.video
-        const duration = this.hlsService?.duration
-        if (!video || !Number.isFinite(duration) || (duration as number) <= 0) return
-        video.currentTime = Math.max(0, Math.min(1, fraction)) * (duration as number)
-        this.playback.scrubbing = true
-        this.emitPlaybackAction('seek')
-      },
       isMuted: () => {
         // Read directly off the primary's <video> element —
         // hlsService sets it muted by default for autoplay

@@ -98,3 +98,8 @@ screenshots-out/
 # `npm run screenshots:report`. Regenerated each run; uploaded as a CI
 # artifact / deployed, never committed. See docs/VISUAL_REPORT_PLAN.md.
 report-out/
+
+# Local env (Vite envDir at repo root). Per-developer; never committed.
+.env
+.env.local
+.env.*.local

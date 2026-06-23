@@ -1,6 +1,6 @@
 {
   "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/crates/tauri-config-schema/schema.json",
-  "productName": "Terraviz",
+  "productName": "AYNI",
   "version": "0.6.0",
   "identifier": "org.zyra-project.terraviz",
   "build": {

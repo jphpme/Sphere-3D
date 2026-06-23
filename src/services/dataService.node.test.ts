@@ -31,11 +31,14 @@ function mockNodeCatalog(datasets: unknown[], tours: unknown[] = []) {
         headers: { 'Content-Type': 'application/json' },
       })
     }
+    if (url === '/assets/realtime-dash-datasets.json') {
+      return new Response('', { status: 404 })
+    }
     throw new Error(`Unexpected fetch URL: ${url}`)
   }) as unknown as typeof fetch
 }
 
-describe('DataService — node-mode', () => {
+describe('DataService Ã¢â‚¬â€ node-mode', () => {
   beforeEach(() => {
     ;(import.meta.env as Record<string, string>).VITE_CATALOG_SOURCE = 'node'
     delete (import.meta.env as Record<string, string>).VITE_REALTIME_DASH_BASE_URL
@@ -139,7 +142,7 @@ describe('DataService — node-mode', () => {
   })
 
   it('drops tours with null tour_json_url (server could not resolve R2)', async () => {
-    // R2_PUBLIC_BASE unset on the deployment → the server
+    // R2_PUBLIC_BASE unset on the deployment Ã¢â€ â€™ the server
     // returns tour_json_url: null. A card pointing nowhere
     // would `fetch('')` on launch and confuse on the HTML
     // response. The dataService filters these out and warns;
@@ -166,7 +169,7 @@ describe('DataService — node-mode', () => {
           {
             id: '01HXBAD00000000000000000001',
             slug: 'broken',
-            title: 'Broken — no R2 URL',
+            title: 'Broken Ã¢â‚¬â€ no R2 URL',
             description: null,
             tour_json_url: null,
             thumbnail_url: null,
@@ -200,7 +203,7 @@ describe('DataService — node-mode', () => {
     }) as unknown as typeof fetch
     vi.stubGlobal('fetch', fetchStub)
     const svc = new DataService()
-    // No throw — the dataset path is intact even though tours
+    // No throw Ã¢â‚¬â€ the dataset path is intact even though tours
     // failed. Sample tours still injected.
     const datasets = await svc.fetchDatasets()
     expect(datasets.map(d => d.id)).toContain('SAMPLE_TOUR')
@@ -261,12 +264,14 @@ describe('DataService — node-mode', () => {
     const svc = new DataService()
     await svc.fetchDatasets()
     await svc.fetchDatasets()
-    // Phase 3pt/G follow-up — node mode now hits two endpoints
-    // per fetch (catalog + tours). The cache wraps the merged
-    // result so the second fetchDatasets should re-hit neither.
-    expect(fetchStub).toHaveBeenCalledTimes(2)
-    expect(fetchStub).toHaveBeenNthCalledWith(1, '/api/v1/catalog', expect.anything())
-    expect(fetchStub).toHaveBeenNthCalledWith(2, '/api/v1/tours', expect.anything())
+    // Node mode hits three endpoints per fetch (catalog + tours + the
+    // real-time DASH index). catalog + tours race via Promise.all, so
+    // assert the set of URLs + count rather than call order. The cache
+    // wraps the merged result so the second fetchDatasets re-hits none.
+    expect(fetchStub).toHaveBeenCalledTimes(3)
+    expect(fetchStub).toHaveBeenCalledWith('/api/v1/catalog', expect.anything())
+    expect(fetchStub).toHaveBeenCalledWith('/api/v1/tours', expect.anything())
+    expect(fetchStub).toHaveBeenCalledWith('/assets/realtime-dash-datasets.json', expect.anything())
   })
 
   it('preserves legacyId from the wire shape and falls back on lookup (1d/T)', async () => {

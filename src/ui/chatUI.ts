@@ -34,13 +34,6 @@ const CHAT_OPENED_KEY = 'sos-docent-seen'
 const MAX_MESSAGES = 200
 const MAX_PERSISTED_MESSAGES = 100
 
-export type ChatVoiceStatus = 'unsupported' | 'idle' | 'listening' | 'transcribing' | 'thinking' | 'speaking'
-
-export interface ChatVoiceState {
-  status: ChatVoiceStatus
-  transcript: string
-}
-
 export interface ChatCallbacks {
   onLoadDataset: (id: string) => void
   onFlyTo: (lat: number, lon: number, altitude?: number) => void
@@ -88,16 +81,6 @@ let messages: ChatMessage[] = []
 let isOpen = false
 let isStreaming = false
 let settingsOpen = false
-let mediaRecorder: MediaRecorder | null = null
-let voiceStream: MediaStream | null = null
-let voiceStopTimer: ReturnType<typeof setTimeout> | null = null
-let voiceChunks: Blob[] = []
-let isListening = false
-let voiceTranscriptBase = ''
-let voiceState: ChatVoiceState = { status: 'idle', transcript: '' }
-const voiceStateListeners = new Set<(state: ChatVoiceState) => void>()
-let responseAudio: HTMLAudioElement | null = null
-let responseAudioUrl: string | null = null
 let datasetPromptTimer: ReturnType<typeof setTimeout> | null = null
 /** Tier B dwell handle for the chat panel — non-null while the
  * panel is open. Started in openChat(), stopped in closeChat().
@@ -134,7 +117,6 @@ let pendingGlobeActions: ChatAction[] = []
 
 /** Tracks dataset load actions clicked per message (implicit positive feedback). */
 const actionClickMap = new Map<string, string[]>()
-const VOICE_MAX_RECORDING_MS = 12_000
 
 /** Phase 1f/I — held across initChatUI calls so a re-init (test
  * teardown / hot reload) releases the prior listener instead of
@@ -441,264 +423,6 @@ export function showChatTrigger(): void {
  */
 export function hideChatTrigger(): void {
   document.getElementById('chat-trigger')?.classList.remove('visible')
-}
-
-export function getChatVoiceState(): ChatVoiceState {
-  const supported = isVoiceCaptureSupported()
-  if (!supported) return { status: 'unsupported', transcript: voiceState.transcript }
-  return { ...voiceState }
-}
-
-export function subscribeChatVoiceState(listener: (state: ChatVoiceState) => void): () => void {
-  voiceStateListeners.add(listener)
-  listener(getChatVoiceState())
-  return () => voiceStateListeners.delete(listener)
-}
-
-export function startChatVoiceQuestion(): void {
-  toggleVoiceInput()
-}
-
-function setVoiceState(status: ChatVoiceStatus, transcript = voiceState.transcript): void {
-  voiceState = { status, transcript }
-  const snapshot = getChatVoiceState()
-  for (const listener of voiceStateListeners) {
-    listener(snapshot)
-  }
-}
-
-function isVoiceCaptureSupported(): boolean {
-  return typeof navigator !== 'undefined' &&
-    !!navigator.mediaDevices?.getUserMedia &&
-    typeof MediaRecorder !== 'undefined'
-}
-
-function setupVoiceControl(): void {
-  const btn = document.getElementById('chat-voice-toggle') as HTMLButtonElement | null
-  if (!btn) return
-
-  const supported = isVoiceCaptureSupported()
-  setVoiceState(supported ? 'idle' : 'unsupported', '')
-  btn.disabled = !supported
-  btn.title = supported ? 'Ask with voice' : 'Voice is not supported in this browser'
-  btn.setAttribute('aria-label', btn.title)
-  btn.addEventListener('click', toggleVoiceInput)
-  setVoiceUI(isListening)
-}
-
-function setVoiceUI(listening: boolean): void {
-  const btn = document.getElementById('chat-voice-toggle') as HTMLButtonElement | null
-  if (!btn) return
-  const supported = isVoiceCaptureSupported()
-  if (!supported) {
-    setVoiceState('unsupported')
-    btn.title = 'Voice is not supported in this browser'
-    btn.setAttribute('aria-label', btn.title)
-    return
-  }
-  btn.classList.toggle('listening', listening)
-  btn.setAttribute('aria-pressed', String(listening))
-  btn.title = listening ? 'Stop listening' : 'Ask with voice'
-  btn.setAttribute('aria-label', btn.title)
-}
-
-function toggleVoiceInput(): void {
-  if (isListening) {
-    stopVoiceRecording()
-    return
-  }
-  startVoiceInput()
-}
-
-function startVoiceInput(): void {
-  const input = document.getElementById('chat-input') as HTMLTextAreaElement | null
-  if (!isVoiceCaptureSupported() || !input || isStreaming) {
-    callbacks?.announce('Voice input is unavailable')
-    setVoiceState(isVoiceCaptureSupported() ? 'idle' : 'unsupported')
-    return
-  }
-
-  voiceTranscriptBase = input.value.trim()
-
-  navigator.mediaDevices.getUserMedia({
-    audio: {
-      echoCancellation: true,
-      noiseSuppression: true,
-      autoGainControl: true,
-    },
-  }).then(stream => {
-    voiceStream = stream
-    voiceChunks = []
-    const mimeType = selectVoiceMimeType()
-    mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined)
-    mediaRecorder.ondataavailable = (event) => {
-      if (event.data.size > 0) voiceChunks.push(event.data)
-    }
-    mediaRecorder.onerror = (event) => {
-      logger.warn('[Chat] Voice recording error:', event)
-      cleanupVoiceRecording()
-      setVoiceState('idle')
-      callbacks?.announce('Voice recording stopped')
-    }
-    mediaRecorder.onstop = () => {
-      const chunks = voiceChunks
-      const type = mediaRecorder?.mimeType || mimeType || 'audio/webm'
-      cleanupVoiceRecording()
-      void transcribeAndSendVoice(chunks, type)
-    }
-    mediaRecorder.start()
-    isListening = true
-    setVoiceUI(true)
-    setVoiceState('listening', voiceTranscriptBase)
-    voiceStopTimer = setTimeout(stopVoiceRecording, VOICE_MAX_RECORDING_MS)
-    callbacks?.announce('Listening')
-  }).catch(err => {
-    logger.warn('[Chat] Microphone capture failed:', err)
-    cleanupVoiceRecording()
-    setVoiceState('idle')
-    callbacks?.announce('Microphone access was blocked')
-  })
-}
-
-function selectVoiceMimeType(): string {
-  for (const type of ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4']) {
-    if (MediaRecorder.isTypeSupported(type)) return type
-  }
-  return ''
-}
-
-function stopVoiceRecording(): void {
-  if (!mediaRecorder || mediaRecorder.state === 'inactive') {
-    cleanupVoiceRecording()
-    return
-  }
-  mediaRecorder.stop()
-  setVoiceState('transcribing', voiceState.transcript)
-}
-
-function cleanupVoiceRecording(): void {
-  if (voiceStopTimer) {
-    clearTimeout(voiceStopTimer)
-    voiceStopTimer = null
-  }
-  isListening = false
-  setVoiceUI(false)
-  for (const track of voiceStream?.getTracks() ?? []) {
-    track.stop()
-  }
-  voiceStream = null
-  mediaRecorder = null
-}
-
-async function transcribeAndSendVoice(chunks: Blob[], type: string): Promise<void> {
-  const input = document.getElementById('chat-input') as HTMLTextAreaElement | null
-  if (!input || chunks.length === 0) {
-    setVoiceState('idle')
-    return
-  }
-
-  const audio = new Blob(chunks, { type })
-  setVoiceState('transcribing', voiceState.transcript)
-  try {
-    const res = await fetch('/api/voice/transcribe', {
-      method: 'POST',
-      headers: { 'Content-Type': audio.type || 'application/octet-stream' },
-      body: audio,
-    })
-    const data = await parseJsonResponse<{ text?: string; error?: string }>(res)
-    if (!res.ok || !data.text?.trim()) {
-      throw new Error(data.error || 'Voice transcription failed')
-    }
-    input.value = joinSpeechText(voiceTranscriptBase, data.text)
-    input.style.height = 'auto'
-    input.style.height = Math.min(input.scrollHeight, 96) + 'px'
-    setVoiceState('thinking', input.value)
-    await handleSend({ voice: true })
-  } catch (err) {
-    logger.warn('[Chat] Voice transcription failed:', err)
-    setVoiceState('idle')
-    callbacks?.announce('Voice transcription failed')
-  }
-}
-
-function joinSpeechText(base: string, addition: string): string {
-  return [base.trim(), addition.trim()].filter(Boolean).join(' ').trim()
-}
-
-async function speakResponse(text: string): Promise<void> {
-  const spokenText = toSpeechText(text)
-  if (!spokenText) {
-    setVoiceState('idle', '')
-    return
-  }
-
-  stopResponseAudio()
-  setVoiceState('speaking', '')
-
-  try {
-    const res = await fetch('/api/voice/speak', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: spokenText }),
-    })
-    if (!res.ok) {
-      const data = await parseJsonResponse<{ error?: string }>(res)
-      throw new Error(data.error || 'Speech synthesis failed')
-    }
-    const audioBlob = await res.blob()
-    responseAudioUrl = URL.createObjectURL(audioBlob)
-    responseAudio = new Audio(responseAudioUrl)
-    responseAudio.onended = () => {
-      stopResponseAudio()
-      setVoiceState('idle', '')
-    }
-    responseAudio.onerror = () => {
-      stopResponseAudio()
-      setVoiceState('idle', '')
-    }
-    await responseAudio.play()
-  } catch (err) {
-    logger.warn('[Chat] Voice response playback failed:', err)
-    stopResponseAudio()
-    setVoiceState('idle', '')
-  }
-}
-
-async function parseJsonResponse<T>(res: Response): Promise<T> {
-  const text = await res.text().catch(() => '')
-  if (!text) return {} as T
-  const contentType = res.headers.get('Content-Type') || ''
-  if (!contentType.includes('application/json') && /<html|<!doctype/i.test(text)) {
-    return { error: `Voice service returned ${res.status} ${res.statusText || 'error'}` } as T
-  }
-  try {
-    return JSON.parse(text) as T
-  } catch {
-    return { error: text.slice(0, 240) } as T
-  }
-}
-
-function stopResponseAudio(): void {
-  if (responseAudio) {
-    responseAudio.pause()
-    responseAudio.src = ''
-    responseAudio = null
-  }
-  if (responseAudioUrl) {
-    URL.revokeObjectURL(responseAudioUrl)
-    responseAudioUrl = null
-  }
-}
-
-function toSpeechText(text: string): string {
-  return text
-    .replace(/<?<(LOAD|FLY|TIME|BOUNDS|MARKER|LABELS|REGION):[^>]+>>?\n?/g, '')
-    .replace(/\[\[LOAD:[^\]]+\]\]/g, '')
-    .replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '$1')
-    .replace(/\*\*(.+?)\*\*/g, '$1')
-    .replace(/[*_`>#]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim()
 }
 
 /** Wire DOM event listeners for the chat panel: trigger, input, send, settings, vision toggle. */
@@ -1433,7 +1157,7 @@ async function handleSettingsTest(): Promise<void> {
 
 // --- Send / receive ---
 
-async function handleSend(options: { voice?: boolean } = {}): Promise<void> {
+async function handleSend(): Promise<void> {
   const input = document.getElementById('chat-input') as HTMLTextAreaElement | null
   if (!input || !callbacks || isStreaming) return
 
@@ -1724,8 +1448,6 @@ function setSendEnabled(enabled: boolean): void {
   if (btn) btn.disabled = !enabled
   const input = document.getElementById('chat-input') as HTMLTextAreaElement | null
   if (input) input.disabled = !enabled
-  const voiceBtn = document.getElementById('chat-voice-toggle') as HTMLButtonElement | null
-  if (voiceBtn) voiceBtn.disabled = !enabled || !isVoiceCaptureSupported()
 }
 
 // --- Rendering ---

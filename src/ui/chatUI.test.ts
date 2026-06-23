@@ -17,12 +17,6 @@ import {
   resetForTests as resetDegradedForTests,
 } from '../services/docentDegradedState'
 
-const originalMediaDevicesDescriptor = Object.getOwnPropertyDescriptor(navigator, 'mediaDevices')
-const originalMediaRecorderDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'MediaRecorder')
-const originalAudioDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'Audio')
-const originalCreateObjectUrlDescriptor = Object.getOwnPropertyDescriptor(URL, 'createObjectURL')
-const originalRevokeObjectUrlDescriptor = Object.getOwnPropertyDescriptor(URL, 'revokeObjectURL')
-
 vi.mock('../services/docentService', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../services/docentService')>()
   return {
@@ -65,7 +59,6 @@ function setupDOM(): void {
       <div id="chat-typing" class="hidden"></div>
       <div id="chat-vision-hint" class="chat-vision-hint"></div>
       <button id="chat-vision-toggle" class="chat-vision-btn" aria-pressed="false"></button>
-      <button id="chat-voice-toggle" class="chat-voice-btn" aria-pressed="false"></button>
       <textarea id="chat-input" rows="1"></textarea>
       <button id="chat-send"></button>
     </div>
@@ -107,11 +100,6 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks()
-  restoreProperty(navigator, 'mediaDevices', originalMediaDevicesDescriptor)
-  restoreProperty(globalThis, 'MediaRecorder', originalMediaRecorderDescriptor)
-  restoreProperty(globalThis, 'Audio', originalAudioDescriptor)
-  restoreProperty(URL, 'createObjectURL', originalCreateObjectUrlDescriptor)
-  restoreProperty(URL, 'revokeObjectURL', originalRevokeObjectUrlDescriptor)
   resetDegradedForTests()
 })
 
@@ -168,13 +156,6 @@ describe('initChatUI', () => {
   it('initializes without error', () => {
     const cb = makeCallbacks()
     expect(() => initChatUI(cb)).not.toThrow()
-  })
-
-  it('disables voice input when media capture APIs are unavailable', () => {
-    initChatUI(makeCallbacks())
-    const voiceBtn = document.getElementById('chat-voice-toggle') as HTMLButtonElement
-    expect(voiceBtn.disabled).toBe(true)
-    expect(voiceBtn.title).toContain('not supported')
   })
 
   it('renders welcome state when no messages', () => {
@@ -414,103 +395,6 @@ describe('handleSend streaming', () => {
       const msgs = getMessages()
       expect(msgs).toHaveLength(2) // user + docent
       expect(msgs[1].text).toBe('Hello world!')
-    })
-  })
-
-  it('sends a final voice transcript as a chat message and speaks the answer', async () => {
-    const { processMessage } = await import('../services/docentService')
-    const mockedProcessMessage = vi.mocked(processMessage)
-
-    mockedProcessMessage.mockImplementation(async function* () {
-      yield { type: 'delta' as const, text: 'Ocean currents move heat.' }
-      yield { type: 'done' as const, fallback: false }
-    })
-
-    let recorderInstance: any = null
-    class MockMediaRecorder {
-      static isTypeSupported = vi.fn(() => true)
-      state = 'inactive'
-      mimeType = 'audio/webm'
-      ondataavailable: ((event: { data: Blob }) => void) | null = null
-      onstop: ((event: Event) => void) | null = null
-      onerror = null
-      constructor() {
-        recorderInstance = this
-      }
-      start = vi.fn(() => { this.state = 'recording' })
-      stop = vi.fn(() => {
-        this.state = 'inactive'
-        this.ondataavailable?.({ data: new Blob(['voice'], { type: 'audio/webm' }) })
-        this.onstop?.(new Event('stop'))
-      })
-    }
-    const play = vi.fn(async () => undefined)
-    class MockAudio {
-      onended: (() => void) | null = null
-      onerror: (() => void) | null = null
-      src: string
-      constructor(src: string) {
-        this.src = src
-      }
-      play = play
-      pause = vi.fn()
-    }
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
-      if (String(input).includes('/api/voice/transcribe')) {
-        return new Response(JSON.stringify({ text: 'What are ocean currents?' }), {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' },
-        })
-      }
-      if (String(input).includes('/api/voice/speak')) {
-        return new Response(new Blob(['audio'], { type: 'audio/mpeg' }), {
-          status: 200,
-          headers: { 'Content-Type': 'audio/mpeg' },
-        })
-      }
-      return new Response('{}', { status: 404 })
-    })
-    Object.defineProperty(navigator, 'mediaDevices', {
-      value: {
-        getUserMedia: vi.fn(async () => ({
-          getTracks: () => [{ stop: vi.fn() }],
-        })),
-      },
-      configurable: true,
-    })
-    Object.defineProperty(globalThis, 'MediaRecorder', { value: MockMediaRecorder, configurable: true })
-    Object.defineProperty(globalThis, 'Audio', { value: MockAudio, configurable: true })
-    Object.defineProperty(URL, 'createObjectURL', { value: vi.fn(() => 'blob:voice-answer'), configurable: true })
-    Object.defineProperty(URL, 'revokeObjectURL', { value: vi.fn(), configurable: true })
-
-    initChatUI(makeCallbacks())
-    document.getElementById('chat-voice-toggle')?.click()
-    await vi.waitFor(() => expect(recorderInstance).toBeTruthy())
-    recorderInstance.stop()
-
-    await vi.waitFor(() => {
-      expect(fetchSpy).toHaveBeenCalledWith(
-        '/api/voice/transcribe',
-        expect.objectContaining({ method: 'POST' }),
-      )
-      expect(mockedProcessMessage).toHaveBeenCalledWith(
-        'What are ocean currents?',
-        expect.any(Array),
-        expect.any(Array),
-        null,
-        expect.any(Object),
-        null,
-        undefined,
-        undefined,
-      )
-      expect(fetchSpy).toHaveBeenCalledWith(
-        '/api/voice/speak',
-        expect.objectContaining({
-          method: 'POST',
-          body: expect.stringContaining('Ocean currents move heat.'),
-        }),
-      )
-      expect(play).toHaveBeenCalled()
     })
   })
 

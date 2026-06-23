@@ -35,11 +35,6 @@ import {
   type VrDatasetTexture,
 } from './photorealEarth'
 import { createVrBorders, type VrBordersHandle } from './vrBorders'
-import {
-  configureVrDatasetTexture,
-  createVrDatasetMaterial,
-  getVrDatasetTextureSize,
-} from './vrDatasetMaterial'
 
 export type { VrDatasetTexture } from './photorealEarth'
 
@@ -71,17 +66,12 @@ const GLOBE_RADIUS = 0.5
 
 /** Clamps on zoom so the globe never vanishes into the user's head or flies off. */
 export const MIN_GLOBE_SCALE = 0.3
-export const MAX_GLOBE_SCALE = 5
+export const MAX_GLOBE_SCALE = 2.5
 
 /** Max simultaneous globes. Quest 2 has 1-2 H.264 decoders; 4 at
  *  the 4K/8K tier will push those hard. Capped defensively; the
  *  2D viewportManager typically drives 1/2/4. */
 const MAX_PANELS = 4
-
-const AR_DATASET_BASE_FILL = {
-  color: 0x061521,
-  opacity: 1,
-} as const
 
 export interface VrSceneHandle {
   /** The Three.js scene — attach/detach objects (controllers, HUD) here. */
@@ -198,8 +188,7 @@ export function createVrScene(
 
   interface SecondaryGlobe {
     mesh: THREE.Mesh
-    baseMaterial: THREE.MeshPhongMaterial
-    activeMaterial: THREE.ShaderMaterial | null
+    material: THREE.MeshPhongMaterial
     shadow: THREE.Mesh
     shadowGeom: THREE.PlaneGeometry
     shadowMat: THREE.MeshBasicMaterial
@@ -301,7 +290,6 @@ export function createVrScene(
       map: earth.baseDiffuseTexture ?? earth.baseEarthTexture,
       specular: new THREE_.Color(0x444444),
       shininess: 30,
-      side: THREE_.DoubleSide,
     })
     const mesh = new THREE_.Mesh(
       new THREE_.SphereGeometry(GLOBE_RADIUS, 64, 64),
@@ -332,8 +320,7 @@ export function createVrScene(
 
     return {
       mesh,
-      baseMaterial: mat,
-      activeMaterial: null,
+      material: mat,
       shadow: sMesh,
       shadowGeom: sGeom,
       shadowMat: sMat,
@@ -347,9 +334,8 @@ export function createVrScene(
   /** Dispose a secondary globe's GPU resources and remove from scene. */
   function disposeSecondary(sg: SecondaryGlobe): void {
     if (sg.cancelPendingVideoListeners) sg.cancelPendingVideoListeners()
-    if (sg.activeMaterial) sg.activeMaterial.dispose()
     if (sg.activeTexture) sg.activeTexture.dispose()
-    sg.baseMaterial.dispose()
+    sg.material.dispose()
     ;(sg.mesh.geometry as THREE.BufferGeometry).dispose()
     scene.remove(sg.mesh)
     sg.shadowMat.dispose()
@@ -405,44 +391,11 @@ export function createVrScene(
   const unsubscribeDiffuse = earth.onBaseDiffuseChange(tex => {
     for (const sg of secondaries) {
       if (sg.activeKey === null) {
-        sg.baseMaterial.map = tex
-        sg.baseMaterial.needsUpdate = true
+        sg.material.map = tex
+        sg.material.needsUpdate = true
       }
     }
   })
-
-  function disposeSecondaryDatasetSurface(sg: SecondaryGlobe): void {
-    if (sg.activeMaterial) {
-      sg.activeMaterial.dispose()
-      sg.activeMaterial = null
-    }
-    if (sg.activeTexture) {
-      sg.activeTexture.dispose()
-      sg.activeTexture = null
-    }
-  }
-
-  function showSecondaryBaseMaterial(sg: SecondaryGlobe): void {
-    if (sg.mesh.material !== sg.baseMaterial) sg.mesh.material = sg.baseMaterial
-  }
-
-  function showSecondaryDatasetTexture(
-    sg: SecondaryGlobe,
-    texture: THREE.Texture,
-    source: HTMLVideoElement | HTMLImageElement,
-  ): void {
-    if (sg.activeMaterial) {
-      sg.activeMaterial.dispose()
-      sg.activeMaterial = null
-    }
-    sg.activeMaterial = createVrDatasetMaterial(THREE_, {
-      texture,
-      ...getVrDatasetTextureSize(source),
-      baseColor: transparentBackground ? AR_DATASET_BASE_FILL.color : undefined,
-      baseOpacity: transparentBackground ? AR_DATASET_BASE_FILL.opacity : undefined,
-    })
-    sg.mesh.material = sg.activeMaterial
-  }
 
   return {
     scene,
@@ -503,30 +456,35 @@ export function createVrScene(
         sg.cancelPendingVideoListeners()
         sg.cancelPendingVideoListeners = null
       }
-      disposeSecondaryDatasetSurface(sg)
+      if (sg.activeTexture) {
+        sg.activeTexture.dispose()
+        sg.activeTexture = null
+      }
 
       if (!spec) {
-        showSecondaryBaseMaterial(sg)
-        sg.baseMaterial.map = earth.baseDiffuseTexture ?? earth.baseEarthTexture
+        sg.material.map = earth.baseDiffuseTexture ?? earth.baseEarthTexture
         sg.activeKey = null
-        sg.baseMaterial.needsUpdate = true
+        sg.material.needsUpdate = true
         onReady?.()
       } else if (spec.kind === 'video') {
         sg.activeKey = spec.element
         try { spec.element.currentTime = spec.element.currentTime } catch { /* no-op */ }
         const tex = new THREE_.VideoTexture(spec.element)
-        configureVrDatasetTexture(THREE_, tex)
+        tex.colorSpace = THREE_.SRGBColorSpace
+        tex.minFilter = THREE_.LinearFilter
+        tex.magFilter = THREE_.LinearFilter
         sg.activeTexture = tex
         if (spec.element.readyState >= 2) {
-          showSecondaryDatasetTexture(sg, tex, spec.element)
+          sg.material.map = tex
+          sg.material.needsUpdate = true
           onReady?.()
         } else {
-          showSecondaryBaseMaterial(sg)
-          sg.baseMaterial.map = earth.baseDiffuseTexture ?? earth.baseEarthTexture
+          sg.material.map = earth.baseDiffuseTexture ?? earth.baseEarthTexture
           const onFrame = () => {
             sg.cancelPendingVideoListeners = null
             if (sg.activeKey !== spec.element) return
-            showSecondaryDatasetTexture(sg, tex, spec.element)
+            sg.material.map = tex
+            sg.material.needsUpdate = true
             onReady?.()
           }
           spec.element.addEventListener('seeked', onFrame, { once: true })
@@ -538,11 +496,14 @@ export function createVrScene(
         }
       } else if (spec.kind === 'image') {
         const tex = new THREE_.Texture(spec.element)
-        configureVrDatasetTexture(THREE_, tex)
+        tex.colorSpace = THREE_.SRGBColorSpace
+        tex.minFilter = THREE_.LinearFilter
+        tex.magFilter = THREE_.LinearFilter
         tex.needsUpdate = true
         sg.activeTexture = tex
-        showSecondaryDatasetTexture(sg, tex, spec.element)
+        sg.material.map = tex
         sg.activeKey = spec.element
+        sg.material.needsUpdate = true
         onReady?.()
       }
     },
