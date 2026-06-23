@@ -2,8 +2,18 @@
  * Device capability detection for adaptive performance tuning.
  */
 
-/** True when the viewport is narrow (≤768px) or the device supports touch input. */
+import { EARTH_ASSET_BASE } from '../config/endpoints'
+
+/**
+ * True when the viewport is narrow (≤768px) or the device supports
+ * touch input. Returns `false` in non-browser contexts (SSR, tests
+ * loaded without jsdom, build-time tooling) so callers that import
+ * this module at top level — e.g. `earthTileLayer.ts` reads it both
+ * via `getCloudTextureUrl()` and the atmosphere step-tier pick —
+ * don't blow up before any code runs.
+ */
 export function isMobile(): boolean {
+  if (typeof window === 'undefined' || typeof navigator === 'undefined') return false
   return (
     window.innerWidth <= 768 || navigator.maxTouchPoints > 0
   )
@@ -51,7 +61,9 @@ export function getCloudTextureUrl(): string {
  * sparse and PNG compresses alpha well; the mobile pick is more
  * about GPU memory than download.
  */
-const BORDERS_TEXTURE_BASE = 'https://d3sik7mbbzunjo.cloudfront.net/terraviz/basemaps'
+// Same basemap host as the diffuse / lights / normal tiers; resolved
+// from `VITE_EARTH_ASSET_BASE` (see src/config/endpoints.ts).
+const BORDERS_TEXTURE_BASE = EARTH_ASSET_BASE
 export function getBordersTextureUrl(): string {
   return isMobile()
     ? `${BORDERS_TEXTURE_BASE}/country-borders-black-4096.png`

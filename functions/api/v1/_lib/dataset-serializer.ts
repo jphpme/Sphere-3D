@@ -36,6 +36,11 @@ export interface WireDataset {
   thumbnailLink?: string
   legendLink?: string
   closedCaptionLink?: string
+  /** Color-ramp image used by interactive probing — populated
+   * verbatim from the catalog's `color_table_ref`. Distinct from
+   * `legendLink` in ~2 of 14 overlap cases. Optional; omitted when
+   * the row carries no value. */
+  colorTableLink?: string
   websiteLink?: string
   startTime?: string
   endTime?: string
@@ -80,6 +85,34 @@ export interface WireDataset {
    * created by hand. Phase 1d/T.
    */
   legacyId?: string
+  /** Probing metadata recovered from the SOS snapshot — pixel
+   * coords on the color table image mapped to data values. Wire
+   * type is the parsed JSON object (not the raw string D1 stores).
+   * Phase 3b. */
+  probingInfo?: unknown
+  /** Geographic bounding box (NSWE in degrees) for the dataset's
+   * spatial extent. Phase 3d promoted from the legacy
+   * `bounding_variables` JSON column to typed columns. Omitted
+   * when any `bbox_*` column is NULL (a partial bbox can't drive
+   * the SPA's regional projection — better to drop than to emit
+   * half a box). Note: a row with all four corners populated to
+   * `{n:90, s:-90, w:-180, e:180}` is still emitted — the
+   * presence of `boundingBox` doesn't encode "regional vs
+   * global"; the SPA can short-circuit at render time if it
+   * sees a worldwide box. */
+  boundingBox?: { n: number; s: number; w: number; e: number }
+  /** Celestial body the dataset visualises. Omitted (== Earth)
+   * for the common case. Non-Earth values cue the SPA's Phase 3e
+   * base-texture swap. */
+  celestialBody?: string
+  /** Radius of the celestial body in miles, when non-Earth.
+   * Paired with `celestialBody`. */
+  radiusMi?: number
+  /** Globe longitude rotation reference in degrees (0 = prime
+   * meridian centered). Omitted when 0 (the default). */
+  lonOrigin?: number
+  /** Image Y-axis flip flag. Omitted when false. */
+  isFlippedInY?: boolean
   /**
    * For `tour/json` rows: the resolved URL the SPA's tour engine
    * fetches the tour document from, bypassing the manifest endpoint
@@ -91,6 +124,45 @@ export interface WireDataset {
    * `dataLink` and 415 — the new shape is additive and opt-in.
    */
   tourJsonUrl?: string
+  /**
+   * Image-sequence frame surface — populated only when the row was
+   * transcoded from an image-sequence upload (Phase 3pg/A). The
+   * envelope is the minimum any consumer needs to enumerate or
+   * address individual frames:
+   *
+   *   - `count` is the post-transcode frame count.
+   *   - `urlTemplate` is the public per-frame URL with a literal
+   *     `{index}` token consumers substitute with the zero-padded
+   *     5-digit frame number. The extension is baked into the
+   *     template so the consumer doesn't need a separate field.
+   *   - `framesDigest` (optional) is the SHA-256 of the canonical
+   *     source-filenames blob — the same hash the publisher signed
+   *     off on during ingest. A consumer that wants a cache-
+   *     invalidation signal can compare templates instead; the
+   *     per-upload prefix in `urlTemplate` changes on every re-
+   *     upload, so the two carry the same "is this the same source
+   *     set" answer.
+   *
+   * Time origin and step live on the parent `WireDataset`
+   * (`startTime` + `period`); consumers compute frame N's
+   * timestamp as `startTime + period × index`. Display naming
+   * (`{slug}_{timestamp}.{ext}` for time-series, `{slug}_frame_{NNNNN}.{ext}`
+   * for pure-sequence rows) is server-rendered by the `/frames`
+   * endpoint Phase 3pg/B ships — clients that want it can apply
+   * the same rule locally without an extra round-trip.
+   */
+  frames?: WireDatasetFrames
+}
+
+/**
+ * Image-sequence frame envelope on `WireDataset` (Phase 3pg/A).
+ * See the field comment on `WireDataset.frames` for the rationale
+ * behind each member.
+ */
+export interface WireDatasetFrames {
+  count: number
+  urlTemplate: string
+  framesDigest?: string
 }
 
 /**
@@ -105,8 +177,94 @@ export interface WireDataset {
  */
 export type DataRefResolver = (dataRef: string) => string | null
 
+/**
+ * Resolves an `r2:<key>` auxiliary-asset reference (the post-3b
+ * shape on `thumbnail_ref` / `legend_ref` / `caption_ref` /
+ * `color_table_ref` columns) to a publicly-readable URL. Bare
+ * `https://` values pass through unchanged so pre-migration
+ * rows on NOAA CloudFront still serialize correctly.
+ *
+ * The callback shape lets the serializer stay env-agnostic — the
+ * route handler binds it once via `resolveAssetRef` from
+ * `r2-public-url.ts`. When omitted, the serializer falls back
+ * to verbatim passthrough (useful in tests that don't care
+ * about R2 resolution); production routes must always pass one
+ * or the SPA receives unrenderable `r2:` strings.
+ */
+export type AssetRefResolver = (ref: string | null | undefined) => string | null
+
+/**
+ * Pluggable callback that returns the public per-frame URL template
+ * for an image-sequence upload (Phase 3pg/A). Takes the row's
+ * `frame_source_filenames_ref` (the canonical ULID-pair container)
+ * and the row's `frame_extension`, returns a URL with a literal
+ * `{index}` token consumers substitute with the zero-padded 5-digit
+ * frame number. Lives outside the serializer for the same reason
+ * `DataRefResolver` does — keeps the serializer free of env
+ * bindings; call sites close over what they have on hand. Returns
+ * null when R2 public-base resolution falls through, mirroring
+ * `AssetRefResolver`'s shape.
+ */
+export type FramesUrlTemplateResolver = (
+  frameSourceFilenamesRef: string,
+  frameExtension: string,
+) => string | null
+
 function nonNull<T>(v: T | null | undefined): T | undefined {
   return v == null ? undefined : v
+}
+
+/** Like `nonNull` but also drops empty / whitespace-only strings.
+ * Used by Phase 3d's `celestial_body` so a legacy row with
+ * `celestial_body = ''` doesn't surface as `celestialBody: ""`
+ * on the wire — preserves the "omitted == Earth" convention. */
+function nonBlank(v: string | null | undefined): string | undefined {
+  if (v == null) return undefined
+  const trimmed = v.trim()
+  return trimmed.length === 0 ? undefined : trimmed
+}
+
+/** Apply an optional asset-ref resolver, falling back to
+ * verbatim passthrough when none is provided. */
+function resolveAsset(
+  ref: string | null | undefined,
+  resolver: AssetRefResolver | undefined,
+): string | undefined {
+  if (!ref) return undefined
+  if (!resolver) return ref
+  return nonNull(resolver(ref))
+}
+
+/**
+ * Parse a JSON-stringified text column into its object form for
+ * the wire. Empty / null / unparseable values become `undefined`
+ * so the field is omitted from the serialized row. Used for
+ * Phase 3b's `probing_info` — validated on write, so a parse
+ * failure here only happens if the row was edited out-of-band.
+ */
+function parseJsonField(v: string | null | undefined): unknown {
+  if (v == null || v.length === 0) return undefined
+  try {
+    return JSON.parse(v) as unknown
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Assemble the wire-side `boundingBox` field from the four
+ * `bbox_*` columns, or return undefined if any corner is missing.
+ * A partial bbox can't drive the SPA's Phase 3e regional
+ * projection — better to omit than to send half a box.
+ */
+function assembleBoundingBox(
+  row: DatasetRow,
+): { n: number; s: number; w: number; e: number } | undefined {
+  const { bbox_n, bbox_s, bbox_w, bbox_e } = row
+  if (bbox_n == null || bbox_s == null || bbox_w == null || bbox_e == null) {
+    return undefined
+  }
+  return { n: bbox_n, s: bbox_s, w: bbox_w, e: bbox_e }
 }
 
 /**
@@ -142,7 +300,19 @@ export function serializeDataset(
   decoration: DecorationRows,
   identity: NodeIdentityRow,
   resolveDataRef?: DataRefResolver,
+  resolveAssetRef?: AssetRefResolver,
+  resolveFramesUrlTemplate?: FramesUrlTemplateResolver,
 ): WireDataset {
+  // Auxiliary asset URLs may be either:
+  //   - bare https:// (pre-Phase-3b: NOAA CloudFront), or
+  //   - `r2:<key>` (post-Phase-3b migration: R2-hosted under
+  //     datasets/<id>/<asset>.<ext> — and post-Phase-3c, also
+  //     `r2:tours/<id>/tour.json` for migrated tour files).
+  // The SPA renders these as <img src=...> / <track src=...>
+  // and fetches `runTourOnLoad` as JSON; neither can resolve a
+  // `r2:` scheme. The resolver flips r2: to a publicly-readable
+  // URL via R2_PUBLIC_BASE. Bare URLs pass through unchanged.
+  // See r2-public-url.ts:resolveAssetRef.
   const wire: WireDataset = {
     id: row.id,
     slug: row.slug,
@@ -151,16 +321,17 @@ export function serializeDataset(
     dataLink: manifestLink(identity.base_url, row.id),
     organization: nonNull(row.organization),
     abstractTxt: nonNull(row.abstract),
-    thumbnailLink: nonNull(row.thumbnail_ref),
-    legendLink: nonNull(row.legend_ref),
-    closedCaptionLink: nonNull(row.caption_ref),
+    thumbnailLink: resolveAsset(row.thumbnail_ref, resolveAssetRef),
+    legendLink: resolveAsset(row.legend_ref, resolveAssetRef),
+    closedCaptionLink: resolveAsset(row.caption_ref, resolveAssetRef),
+    colorTableLink: resolveAsset(row.color_table_ref, resolveAssetRef),
     websiteLink: nonNull(row.website_link),
     startTime: nonNull(row.start_time),
     endTime: nonNull(row.end_time),
     period: nonNull(row.period),
     weight: row.weight,
     isHidden: row.is_hidden === 1 ? true : undefined,
-    runTourOnLoad: nonNull(row.run_tour_on_load),
+    runTourOnLoad: resolveAsset(row.run_tour_on_load, resolveAssetRef),
     tags: decoration.tags.length ? decoration.tags : undefined,
 
     originNode: row.origin_node,
@@ -181,6 +352,30 @@ export function serializeDataset(
     updatedAt: row.updated_at,
     publishedAt: nonNull(row.published_at),
     legacyId: nonNull(row.legacy_id),
+    // `probing_info` is JSON-stringified text in D1. Parsing here
+    // keeps the wire-side shape friendly for consumers; a malformed
+    // string is dropped silently (returned as undefined) rather
+    // than 500-ing the read endpoint. Phase 3b's write-side
+    // validator (validateJsonStringField) only checks JSON
+    // parseability + the 4096-char cap — NOT the object's
+    // field-level shape.
+    probingInfo: parseJsonField(row.probing_info),
+    // Phase 3d typed metadata. boundingBox surfaces only when all
+    // four corners are non-null (a partial bbox is meaningless to
+    // any consumer). celestialBody / radiusMi / lonOrigin /
+    // isFlippedInY surface only when populated — empty / default
+    // values are dropped so the wire stays terse for the common
+    // (Earth, global, prime-meridian, no-flip) case.
+    boundingBox: assembleBoundingBox(row),
+    // celestial_body: empty / whitespace-only strings collapse
+    // to undefined alongside true NULLs, so a legacy row that
+    // sneaked through with `celestial_body = ''` doesn't surface
+    // as `celestialBody: ""` (which would conflict with the
+    // "omitted == Earth" convention the SPA expects).
+    celestialBody: nonBlank(row.celestial_body),
+    radiusMi: row.radius_mi != null ? row.radius_mi : undefined,
+    lonOrigin: row.lon_origin != null ? row.lon_origin : undefined,
+    isFlippedInY: row.is_flipped_in_y === 1 ? true : undefined,
   }
 
   // Tour rows carry a fetchable JSON URL alongside the manifest
@@ -192,6 +387,46 @@ export function serializeDataset(
   if (row.format === 'tour/json' && resolveDataRef) {
     const tourUrl = resolveDataRef(row.data_ref)
     if (tourUrl) wire.tourJsonUrl = tourUrl
+  }
+
+  // Image-sequence frame envelope. Phase 3pg/A — populated only
+  // when:
+  //   - `frame_count` is non-null (transcode landed, so the frame
+  //     surface is consistent with the active `data_ref`);
+  //   - `frame_extension` and `frame_source_filenames_ref` are
+  //     also populated (clearTranscoding swaps them atomically with
+  //     `data_ref` — any drift would indicate a hand-edited row);
+  //   - the resolver is supplied AND returns a non-null template
+  //     (no `R2_PUBLIC_BASE` binding → no frames surface yet, same
+  //     fail-quiet shape `resolveAssetRefStrict` uses for the
+  //     thumbnail / legend fields).
+  //
+  // The `source_digest` column carries the SHA-256 of the
+  // canonical source-filenames blob for frames uploads (the
+  // publisher-signed hash that the runner verifies during
+  // download). Surfacing it as `framesDigest` lets consumers
+  // cache the enumeration and notice re-uploads — though the
+  // template-comparison shortcut is usually enough since the
+  // per-upload prefix in `urlTemplate` also changes on every
+  // re-upload.
+  if (
+    row.frame_count != null &&
+    row.frame_extension != null &&
+    row.frame_source_filenames_ref != null &&
+    resolveFramesUrlTemplate
+  ) {
+    const urlTemplate = resolveFramesUrlTemplate(
+      row.frame_source_filenames_ref,
+      row.frame_extension,
+    )
+    if (urlTemplate) {
+      const frames: WireDatasetFrames = {
+        count: row.frame_count,
+        urlTemplate,
+      }
+      if (row.source_digest) frames.framesDigest = row.source_digest
+      wire.frames = frames
+    }
   }
 
   // Enriched fields go under `enriched` to mirror the existing

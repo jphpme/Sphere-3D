@@ -168,7 +168,70 @@ jobs:
 
       - run: npm ci
 
-      - name: Build and release
+      # The next two `tauri-action` invocations are mutually
+      # exclusive on whether the macOS Developer ID cert is in repo
+      # secrets. The reason for this `cert_check` indirection:
+      # GitHub Actions does NOT allow the `secrets` context inside
+      # a step-level `if:` expression (it surfaces as `Unrecognized
+      # named-value: 'secrets'` and rejects the whole workflow
+      # file). The workaround is to read the secret via `env:`
+      # (which does support `secrets`), reduce it to a boolean, and
+      # emit that as a step output — step outputs ARE allowed in
+      # `if:`. Underscore (not hyphen) in the step id to avoid
+      # ambiguity with GHA's `-` subtraction operator in dot-access
+      # expressions.
+      - name: Detect Developer ID cert presence
+        id: cert_check
+        env:
+          HAS_CERT: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE_BASE64 != '' }}
+        shell: bash
+        run: echo "has_cert=$HAS_CERT" >> "$GITHUB_OUTPUT"
+
+      # macOS + Developer ID cert in repo secrets → notarized build.
+      # Tauri's bundler reads APPLE_CERTIFICATE via Rust's
+      # `std::env::var_os`, which returns `Some("")` for an empty-
+      # string env var — so passing `APPLE_CERTIFICATE: ''` still
+      # engages `security import` and fails with `SecKeychainItem
+      # Import: One or more parameters passed to a function were
+      # not valid`. The only way to get the bundler to skip signing
+      # is to *not pass* the env var at all, which means splitting
+      # into two mutually exclusive steps rather than gating values
+      # inside one. See crates/tauri-bundler/src/bundle/macos/sign.rs
+      # in the tauri repo for the predicate.
+      #
+      # Note: this is a *Developer ID Application* certificate — a
+      # different cert type from the *Apple Distribution* cert used
+      # for the iOS App Store build (APPLE_CERTIFICATE_BASE64,
+      # see docs/MOBILE_APP_PLAN.md §Distribution). The team ID and
+      # Apple ID are shared across both; the certs and their
+      # passwords are not.
+      - name: Build and release (signed, macOS with Developer ID)
+        if: runner.os == 'macOS' && steps.cert_check.outputs.has_cert == 'true'
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          tauriScript: npx tauri
+          releaseId: ${{ needs.create-release.outputs.release_id }}
+          prerelease: false
+          includeUpdaterJson: true
+          updaterJsonPreferNsis: true
+
+      # Linux, Windows, and macOS-without-cert: no APPLE_* env vars
+      # passed, so tauri-bundler's signing path stays dormant. macOS
+      # users still hit Gatekeeper's "damaged" dialog until #100
+      # lands the cert; docs/MACOS_INSTALL.md walks them through the
+      # bypass.
+      - name: Build and release (unsigned)
+        if: "!(runner.os == 'macOS' && steps.cert_check.outputs.has_cert == 'true')"
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

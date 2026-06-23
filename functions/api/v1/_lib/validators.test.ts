@@ -155,7 +155,7 @@ describe('validateDraftCreate', () => {
 
   it('rejects an over-long legacy_id', () => {
     const errs = validateDraftCreate({
-      title: 'X',
+      title: 'Color table row',
       format: 'video/mp4',
       legacy_id: 'L'.repeat(101),
     })
@@ -168,10 +168,189 @@ describe('validateDraftCreate', () => {
     // failed at the SQLite UNIQUE-index level — opaque to the CLI.
     // Validator-level rejection keeps the mutation layer's
     // truthy-check honest.
-    const empty = validateDraftCreate({ title: 'X', format: 'video/mp4', legacy_id: '' })
+    const empty = validateDraftCreate({ title: 'Color table row', format: 'video/mp4', legacy_id: '' })
     expect(empty.some(e => e.field === 'legacy_id' && e.code === 'too_short')).toBe(true)
-    const ws = validateDraftCreate({ title: 'X', format: 'video/mp4', legacy_id: '   ' })
+    const ws = validateDraftCreate({ title: 'Color table row', format: 'video/mp4', legacy_id: '   ' })
     expect(ws.some(e => e.field === 'legacy_id' && e.code === 'too_short')).toBe(true)
+  })
+
+  it('accepts color_table_ref and bounds it at 1024 chars (3b/A)', () => {
+    expect(
+      validateDraftCreate({
+        title: 'Color table row',
+        format: 'video/mp4',
+        color_table_ref: 'https://example.org/color.png',
+      }),
+    ).toEqual([])
+    const errs = validateDraftCreate({
+      title: 'Color table row',
+      format: 'video/mp4',
+      color_table_ref: 'x'.repeat(2000),
+    })
+    expect(errs.some(e => e.field === 'color_table_ref' && e.code === 'too_long')).toBe(true)
+  })
+
+  it('accepts well-formed JSON probing_info (3b/A) + typed bounding_box (3d/A)', () => {
+    // probing_info still persists as JSON-stringified text (the
+    // structured-rendering work is deferred — caller does the
+    // stringify). bounding_box is the Phase 3d typed replacement
+    // for the legacy `bounding_variables` JSON string.
+    const probing = JSON.stringify({
+      units: 'psu',
+      minVal: 20,
+      maxVal: 38,
+      minPos: { x: 45, y: 99, XUnits: 'Pixels', YUnits: 'Pixels' },
+      maxPos: { x: 277, y: 99, XUnits: 'Pixels', YUnits: 'Pixels' },
+    })
+    expect(
+      validateDraftCreate({
+        title: 'Color table row',
+        format: 'video/mp4',
+        probing_info: probing,
+        bounding_box: { n: 52.621, s: 21.1381, w: -134.099, e: -60.9016 },
+      }),
+    ).toEqual([])
+  })
+
+  it('rejects malformed-JSON probing_info', () => {
+    // Catch operator hand-edits or unstringified raw objects before
+    // they hit D1 — the serializer parses these on read and
+    // otherwise would silently drop them.
+    expect(
+      validateDraftCreate({
+        title: 'Color table row',
+        format: 'video/mp4',
+        probing_info: 'not json {',
+      }).some(e => e.field === 'probing_info' && e.code === 'invalid_json'),
+    ).toBe(true)
+  })
+
+  it('caps probing_info length at 4096 chars', () => {
+    // Length-cap belt-and-braces — even valid JSON shouldn't bloat
+    // the row. The real-world payloads are <300 chars; the cap is
+    // generous.
+    const oversize = JSON.stringify({ blob: 'x'.repeat(5000) })
+    expect(
+      validateDraftCreate({
+        title: 'Color table row',
+        format: 'video/mp4',
+        probing_info: oversize,
+      }).some(e => e.field === 'probing_info' && e.code === 'too_long'),
+    ).toBe(true)
+  })
+
+  it('rejects out-of-range bounding_box corners (3d/A)', () => {
+    // Latitude (n, s) must be in [-90, 90]; longitude (w, e) in
+    // [-180, 180]. Each violation pinpoints the specific sub-field
+    // so the publisher API's 400 response is actionable.
+    const errs = validateDraftCreate({
+      title: 'Bad bbox',
+      format: 'video/mp4',
+      bounding_box: { n: 100, s: -91, w: -200, e: 999 },
+    })
+    expect(errs.some(e => e.field === 'bounding_box.n' && e.code === 'invalid_value')).toBe(true)
+    expect(errs.some(e => e.field === 'bounding_box.s' && e.code === 'invalid_value')).toBe(true)
+    expect(errs.some(e => e.field === 'bounding_box.w' && e.code === 'invalid_value')).toBe(true)
+    expect(errs.some(e => e.field === 'bounding_box.e' && e.code === 'invalid_value')).toBe(true)
+  })
+
+  it('rejects bounding_box where n < s (flipped latitude box)', () => {
+    const errs = validateDraftCreate({
+      title: 'Flipped bbox',
+      format: 'video/mp4',
+      bounding_box: { n: -10, s: 10, w: -10, e: 10 },
+    })
+    expect(errs.some(e => e.field === 'bounding_box' && e.code === 'invalid_value')).toBe(true)
+  })
+
+  it('accepts antimeridian-crossing bounding_box (w > e is valid for Pacific boxes)', () => {
+    // Boxes that wrap the antimeridian have w > e on purpose —
+    // e.g. a Pacific window from w=170 to e=-170. The validator
+    // must not reject this; the SPA's projection handles the wrap.
+    expect(
+      validateDraftCreate({
+        title: 'Pacific bbox',
+        format: 'video/mp4',
+        bounding_box: { n: 50, s: -50, w: 170, e: -170 },
+      }),
+    ).toEqual([])
+  })
+
+  it('rejects non-finite bounding_box corners', () => {
+    const errs = validateDraftCreate({
+      title: 'NaN bbox',
+      format: 'video/mp4',
+      bounding_box: { n: NaN, s: 0, w: 0, e: 10 } as unknown as { n: number; s: number; w: number; e: number },
+    })
+    expect(errs.some(e => e.field === 'bounding_box.n' && e.code === 'invalid_type')).toBe(true)
+  })
+
+  it('validates 3d non-Earth metadata (celestial_body / radius_mi / lon_origin / is_flipped_in_y)', () => {
+    // Happy path — all four populated with realistic values.
+    expect(
+      validateDraftCreate({
+        title: 'Mars dataset',
+        format: 'image/png',
+        celestial_body: 'Mars',
+        radius_mi: 2106.1,
+        lon_origin: 180,
+        is_flipped_in_y: true,
+      }),
+    ).toEqual([])
+
+    // celestial_body too long (>64 chars)
+    expect(
+      validateDraftCreate({
+        title: 'Long body',
+        format: 'image/png',
+        celestial_body: 'x'.repeat(65),
+      }).some(e => e.field === 'celestial_body' && e.code === 'too_long'),
+    ).toBe(true)
+
+    // radius_mi non-positive
+    expect(
+      validateDraftCreate({
+        title: 'Bad radius',
+        format: 'image/png',
+        radius_mi: -1,
+      }).some(e => e.field === 'radius_mi' && e.code === 'invalid_value'),
+    ).toBe(true)
+
+    // radius_mi non-finite
+    expect(
+      validateDraftCreate({
+        title: 'Inf radius',
+        format: 'image/png',
+        radius_mi: Infinity as unknown as number,
+      }).some(e => e.field === 'radius_mi' && e.code === 'invalid_type'),
+    ).toBe(true)
+
+    // lon_origin out of range
+    expect(
+      validateDraftCreate({
+        title: 'Bad lon',
+        format: 'image/png',
+        lon_origin: 200,
+      }).some(e => e.field === 'lon_origin' && e.code === 'invalid_value'),
+    ).toBe(true)
+
+    // is_flipped_in_y wrong type
+    expect(
+      validateDraftCreate({
+        title: 'Bad flip',
+        format: 'image/png',
+        is_flipped_in_y: 'yes' as unknown as boolean,
+      }).some(e => e.field === 'is_flipped_in_y' && e.code === 'invalid_type'),
+    ).toBe(true)
+
+    // is_flipped_in_y null is accepted (clears the column on UPDATE)
+    expect(
+      validateDraftCreate({
+        title: 'Clear flip',
+        format: 'image/png',
+        is_flipped_in_y: null,
+      }),
+    ).toEqual([])
   })
 })
 

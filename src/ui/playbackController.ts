@@ -7,6 +7,9 @@
 import type { HLSService } from '../services/hlsService'
 import type { AppState, Dataset } from '../types'
 import { logger } from '../utils/logger'
+import { proxyCaptionUrl } from '../utils/captionProxy'
+import { t } from '../i18n'
+import { reportError } from '../analytics'
 
 // --- Playback constants ---
 const LOOP_RESTART_DELAY_MS = 2000
@@ -121,7 +124,7 @@ export function togglePlayPause(
     appState.isPlaying = false
   }
   updatePlayButton(hlsService.paused)
-  announce(hlsService.paused ? 'Playback paused' : 'Playback started')
+  announce(t(hlsService.paused ? 'playback.announce.paused' : 'playback.announce.started'))
 }
 
 /**
@@ -177,7 +180,7 @@ export function rewind(
   hlsService.pause()
   appState.isPlaying = false
   updatePlayButton(true)
-  announce('Playback paused')
+  announce(t('playback.announce.paused'))
   state.scrubbing = true
 }
 
@@ -195,7 +198,7 @@ export function fastForward(
     hlsService.pause()
     appState.isPlaying = false
     updatePlayButton(true)
-    announce('Playback paused')
+    announce(t('playback.announce.paused'))
     state.scrubbing = true
   }
 }
@@ -216,7 +219,7 @@ export function stepFrame(
     hlsService.pause()
     appState.isPlaying = false
     updatePlayButton(true)
-    announce('Playback paused')
+    announce(t('playback.announce.paused'))
   }
 
   let step: number
@@ -252,7 +255,7 @@ export function updatePlayButton(paused: boolean): void {
   const playBtn = document.getElementById('play-btn')
   if (playBtn) {
     playBtn.textContent = paused ? '\u25B6\uFE0E' : '\u23F8\uFE0E'
-    playBtn.setAttribute('aria-label', paused ? 'Play' : 'Pause')
+    playBtn.setAttribute('aria-label', t(paused ? 'playback.play.aria' : 'playback.pause.aria'))
   }
 }
 
@@ -282,9 +285,7 @@ export async function loadCaptions(
   state: PlaybackState,
 ): Promise<void> {
   try {
-    const fetchUrl = captionUrl.includes('sos.noaa.gov')
-      ? `https://video-proxy.zyra-project.org/captions?url=${encodeURIComponent(captionUrl)}`
-      : captionUrl
+    const fetchUrl = proxyCaptionUrl(captionUrl)
 
     const response = await fetch(fetchUrl)
     if (!response.ok) throw new Error(`HTTP ${response.status}`)
@@ -296,7 +297,11 @@ export async function loadCaptions(
       return
     }
 
-    const track = video.addTextTrack('captions', 'Closed Captions', 'en')
+    // Third arg is the LANGUAGE OF THE CAPTIONS themselves (BCP-47),
+    // not the UI language — SOS captions are English regardless of the
+    // viewer's locale, so this stays 'en'. Only the human-readable
+    // label routes through t().
+    const track = video.addTextTrack('captions', t('playback.captions.label'), 'en')
     track.mode = 'hidden'
     for (const cue of cues) {
       track.addCue(new VTTCue(cue.start, cue.end, cue.text))
@@ -322,7 +327,14 @@ export async function loadCaptions(
 
     logger.info(`[App] Loaded ${cues.length} caption cues`)
   } catch (error) {
+    // Surface the failure to telemetry (Tier A) so we can measure
+    // how often the Vimeo caption proxy fails — silent today, was
+    // indistinguishable from "this dataset has no captions". The
+    // info panel's "Captions available" badge remains visible on
+    // failure so the user still knows captions exist for this row.
+    // See `docs/WEB_CATALOG_FEATURES_PLAN.md` §5.2.
     logger.warn('[App] Failed to load captions:', error)
+    reportError('caption', error)
   }
 }
 
@@ -355,6 +367,54 @@ function parseSRTTime(t: string): number {
 // --- Time seeking ---
 
 /**
+ * Validate a setTime request without performing the seek. Used by
+ * the chat panel to surface failures inline the moment a set-time
+ * action streams in (instead of waiting for the deferred execution
+ * after a load click). Same set of failure conditions as
+ * {@link seekToDate}, side-effect-free — the success path doesn't
+ * touch `video.currentTime` or pause playback. Reuses the same
+ * translated error keys so the inline-on-stream copy and the
+ * post-execution announce stay consistent.
+ */
+export function checkSeekToDate(
+  isoDate: string,
+  hlsService: HLSService | null,
+  appState: AppState,
+): { ok: true } | { ok: false; message: string } {
+  if (!hlsService) {
+    return { ok: false, message: t('playback.error.noVideoDataset') }
+  }
+  const video = hlsService.getVideo()
+  if (!video || !video.duration) {
+    return { ok: false, message: t('playback.error.videoNotReady') }
+  }
+  const dataset = appState.currentDataset
+  if (!dataset?.startTime || !dataset?.endTime) {
+    return { ok: false, message: t('playback.error.noTimeRange') }
+  }
+  const targetDate = new Date(isoDate)
+  if (isNaN(targetDate.getTime())) {
+    return { ok: false, message: t('playback.error.invalidDate') }
+  }
+  const start = new Date(dataset.startTime).getTime()
+  const end = new Date(dataset.endTime).getTime()
+  const totalMs = end - start
+  if (totalMs <= 0) {
+    return { ok: false, message: t('playback.error.invalidTimeRange') }
+  }
+  const targetMs = targetDate.getTime()
+  if (targetMs < start || targetMs > end) {
+    const startStr = dataset.startTime!.split('T')[0]
+    const endStr = dataset.endTime!.split('T')[0]
+    return {
+      ok: false,
+      message: t('playback.error.dateOutsideRange', { date: isoDate, start: startStr, end: endStr }),
+    }
+  }
+  return { ok: true }
+}
+
+/**
  * Seek a video dataset to a specific date within its time range.
  * Returns a result indicating success/failure with a human-readable message.
  */
@@ -365,29 +425,29 @@ export function seekToDate(
   state: PlaybackState,
 ): { success: boolean; message: string } {
   if (!hlsService) {
-    return { success: false, message: 'No video dataset loaded' }
+    return { success: false, message: t('playback.error.noVideoDataset') }
   }
 
   const video = hlsService.getVideo()
   if (!video || !video.duration) {
-    return { success: false, message: 'Video not ready' }
+    return { success: false, message: t('playback.error.videoNotReady') }
   }
 
   const dataset = appState.currentDataset
   if (!dataset?.startTime || !dataset?.endTime) {
-    return { success: false, message: 'Dataset has no time range' }
+    return { success: false, message: t('playback.error.noTimeRange') }
   }
 
   const targetDate = new Date(isoDate)
   if (isNaN(targetDate.getTime())) {
-    return { success: false, message: 'Invalid date format' }
+    return { success: false, message: t('playback.error.invalidDate') }
   }
 
   const start = new Date(dataset.startTime).getTime()
   const end = new Date(dataset.endTime).getTime()
   const totalMs = end - start
   if (totalMs <= 0) {
-    return { success: false, message: 'Dataset has invalid time range' }
+    return { success: false, message: t('playback.error.invalidTimeRange') }
   }
 
   // Check if date falls outside the dataset's time range
@@ -397,7 +457,7 @@ export function seekToDate(
     const endStr = dataset.endTime!.split('T')[0]
     return {
       success: false,
-      message: `Date ${isoDate} is outside this dataset's range (${startStr} to ${endStr})`,
+      message: t('playback.error.dateOutsideRange', { date: isoDate, start: startStr, end: endStr }),
     }
   }
 
@@ -413,7 +473,7 @@ export function seekToDate(
     updatePlayButton(true)
   }
 
-  return { success: true, message: `Seeking to ${isoDate}` }
+  return { success: true, message: t('playback.seekingTo', { date: isoDate }) }
 }
 
 // --- Info panel positioning ---

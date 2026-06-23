@@ -459,6 +459,133 @@ describe('processMessage — pre-search injection (1d/AC)', () => {
     expect(userMessageContent).not.toContain('[RELEVANT DATASETS')
   })
 
+  it('injects [AVAILABLE TOURS] when the catalog has tour-format rows', async () => {
+    // Phase 3pt/G follow-up — tours aren't indexed by Vectorize
+    // (which backs `search_datasets` / `[RELEVANT DATASETS]`), so
+    // a parallel client-side injection surfaces them every turn
+    // the LLM is engaged. Without this the LLM only finds tours
+    // via the `search_catalog` last-ditch fallback, which the
+    // system prompt explicitly de-prioritises.
+    const { streamChat } = await import('./llmProvider')
+    const mockedStream = vi.mocked(streamChat)
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async input => {
+      const url = typeof input === 'string' ? input : input.toString()
+      if (url.includes('/api/v1/search')) {
+        return new Response(JSON.stringify({ datasets: [] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      return new Response('not found', { status: 404 })
+    })
+
+    let userMessageContent = ''
+    mockedStream.mockImplementation(async function* (msgs) {
+      const userMsg = msgs.find(m => m.role === 'user')
+      if (userMsg) {
+        userMessageContent =
+          typeof userMsg.content === 'string'
+            ? userMsg.content
+            : JSON.stringify(userMsg.content)
+      }
+      yield { type: 'delta' as const, text: 'Reply.' }
+      yield { type: 'done' as const }
+    })
+
+    const datasetsWithTour: Dataset[] = [
+      ...datasets,
+      {
+        id: '01HXPUBTOUR000000000000001',
+        title: 'Hurricane Tour',
+        format: 'tour/json',
+        dataLink: 'https://r2.example.com/tours/01HX/published/01HY.json',
+        tourJsonUrl: 'https://r2.example.com/tours/01HX/published/01HY.json',
+        abstractTxt: 'A guided look at hurricane formation.',
+        tags: ['Tours'],
+      },
+    ]
+
+    const config: DocentConfig = {
+      apiUrl: 'http://localhost:11434/v1',
+      apiKey: '',
+      model: 'test',
+      enabled: true,
+      readingLevel: 'general',
+      visionEnabled: false,
+    }
+
+    const chunks: DocentStreamChunk[] = []
+    for await (const chunk of processMessage(
+      'show me something interesting',
+      [],
+      datasetsWithTour,
+      null,
+      config,
+    )) {
+      chunks.push(chunk)
+    }
+
+    expect(userMessageContent).toContain('[AVAILABLE TOURS')
+    expect(userMessageContent).toContain('01HXPUBTOUR000000000000001')
+    expect(userMessageContent).toContain('Hurricane Tour')
+    expect(userMessageContent).toContain('A guided look at hurricane formation.')
+  })
+
+  it('omits [AVAILABLE TOURS] when there are no tour-format rows', async () => {
+    const { streamChat } = await import('./llmProvider')
+    const mockedStream = vi.mocked(streamChat)
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async input => {
+      const url = typeof input === 'string' ? input : input.toString()
+      if (url.includes('/api/v1/search')) {
+        return new Response(JSON.stringify({ datasets: [] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      return new Response('not found', { status: 404 })
+    })
+
+    let userMessageContent = ''
+    mockedStream.mockImplementation(async function* (msgs) {
+      const userMsg = msgs.find(m => m.role === 'user')
+      if (userMsg) {
+        userMessageContent =
+          typeof userMsg.content === 'string'
+            ? userMsg.content
+            : JSON.stringify(userMsg.content)
+      }
+      yield { type: 'delta' as const, text: 'Reply.' }
+      yield { type: 'done' as const }
+    })
+
+    const datasetsNoTour = datasets.filter(d => d.format !== 'tour/json')
+    expect(datasetsNoTour.length).toBeGreaterThan(0) // sanity
+
+    const config: DocentConfig = {
+      apiUrl: 'http://localhost:11434/v1',
+      apiKey: '',
+      model: 'test',
+      enabled: true,
+      readingLevel: 'general',
+      visionEnabled: false,
+    }
+
+    const chunks: DocentStreamChunk[] = []
+    for await (const chunk of processMessage(
+      'show me something',
+      [],
+      datasetsNoTour,
+      null,
+      config,
+    )) {
+      chunks.push(chunk)
+    }
+
+    expect(userMessageContent).not.toContain('[AVAILABLE TOURS')
+  })
+
   it('1f/O — short-circuits to local engine when pre-search returns degraded', async () => {
     // The brief promised "the docent transparently routes through
     // the local-engine fallback" when search degrades. Pre-1f/O the
@@ -691,7 +818,11 @@ describe('processMessage — LLM dataset ID validation', () => {
 
 describe('validateAndCleanText', () => {
   it('keeps valid <<LOAD:ID>> markers intact', () => {
-    const text = 'Try this: <<LOAD:TEST_001>>'
+    // Prose must mention the catalog title so reconcileMarkerProse
+    // doesn't inject its "Loads: …" confirmation line. The marker
+    // itself is what this test pins as untouched; the surrounding
+    // mention keeps the rest of the text identical.
+    const text = 'Try Sea Surface Temperature: <<LOAD:TEST_001>>'
     const { cleanedText, validIds, invalidIds } = validateAndCleanText(text, datasets)
     expect(cleanedText).toBe(text)
     expect(validIds.has('TEST_001')).toBe(true)
@@ -841,6 +972,99 @@ describe('validateAndCleanText', () => {
     // the chat UI's [[LOAD:...]] round-trip stays consistent.
     expect(cleanedText).toContain('<<LOAD:01KQFFCEE4Q7NQGJNFB0Z042MC>>')
     expect(cleanedText).not.toContain('INTERNAL_SOS_768')
+  })
+
+  // -------------------------------------------------------------
+  // Title-mismatch reconciliation (item (c) follow-up)
+  //
+  // Mid-tier LLMs frequently emit prose claiming a topical title
+  // ("Hurricane Season") right before a marker that resolves to
+  // an unrelated dataset ("Air Traffic"). reconcileMarkerProse
+  // strips quote-bracketed and bold-line title claims that don't
+  // match the actual catalog title, and injects a "→ Loads: …"
+  // confirmation line when the preceding prose doesn't mention
+  // the actual title at all.
+  // -------------------------------------------------------------
+
+  it('strips a quote-bracketed title-claim that does not match the marker\'s catalog title', () => {
+    const ds = [makeDataset({ id: 'AIR_001', title: 'Air Traffic' })]
+    const text = "I recommend loading the 'Hurricane Season' dataset.\n<<LOAD:AIR_001>>"
+    const { cleanedText } = validateAndCleanText(text, ds)
+    expect(cleanedText).not.toContain('Hurricane Season')
+    expect(cleanedText).toContain('<<LOAD:AIR_001>>')
+    // Loads: line is injected because the actual title also wasn't
+    // mentioned anywhere in the preceding window.
+    expect(cleanedText).toContain('Air Traffic')
+  })
+
+  it('strips a bold-line title-claim immediately before the marker when it does not match', () => {
+    const ds = [makeDataset({ id: 'AIR_001', title: 'Air Traffic' })]
+    const text = 'Here you go.\n**Hurricane Tracks**\n<<LOAD:AIR_001>>'
+    const { cleanedText } = validateAndCleanText(text, ds)
+    expect(cleanedText).not.toContain('Hurricane Tracks')
+    expect(cleanedText).toContain('<<LOAD:AIR_001>>')
+  })
+
+  it('keeps the prose intact when the LLM mentions the actual catalog title', () => {
+    const ds = [makeDataset({ id: 'SST_001', title: 'Sea Surface Temperature' })]
+    const text = "Here's the Sea Surface Temperature dataset.\n<<LOAD:SST_001>>"
+    const { cleanedText } = validateAndCleanText(text, ds)
+    // No mismatch → no strip, no inject. Output is identical.
+    expect(cleanedText).toBe(text)
+  })
+
+  it('injects a Loads: line when prose mentions no title at all', () => {
+    const ds = [makeDataset({ id: 'SST_001', title: 'Sea Surface Temperature' })]
+    const text = 'Take a look:\n<<LOAD:SST_001>>'
+    const { cleanedText } = validateAndCleanText(text, ds)
+    expect(cleanedText).toContain('Loads:')
+    expect(cleanedText).toContain('Sea Surface Temperature')
+    expect(cleanedText).toContain('<<LOAD:SST_001>>')
+  })
+
+  it('treats substring overlap as a match (catalog title contains the LLM claim)', () => {
+    // "Air Traffic" claim against "Air Traffic Flow Visualisation"
+    // — same dataset, just a shorter form. Don't strip, don't inject.
+    const ds = [makeDataset({ id: 'AIR_001', title: 'Air Traffic Flow Visualisation' })]
+    const text = "Loading the 'Air Traffic' dataset.\n<<LOAD:AIR_001>>"
+    const { cleanedText } = validateAndCleanText(text, ds)
+    expect(cleanedText).toContain("'Air Traffic'")
+  })
+
+  it('does not strip a matching bold title (well-behaved LLM)', () => {
+    const ds = [makeDataset({ id: 'SST_001', title: 'Sea Surface Temperature' })]
+    const text = '**Sea Surface Temperature**\n<<LOAD:SST_001>>'
+    const { cleanedText } = validateAndCleanText(text, ds)
+    expect(cleanedText).toContain('**Sea Surface Temperature**')
+  })
+
+  it('reconciles per marker — earlier markers are not re-reconciled by later ones', () => {
+    // Window slicing per match: claims about one marker should not
+    // bleed into the strip pass for a sibling marker downstream.
+    const ds = [
+      makeDataset({ id: 'A_001', title: 'Air Traffic' }),
+      makeDataset({ id: 'S_001', title: 'Shipping Routes' }),
+    ]
+    const text = "the 'Hurricane' dataset.\n<<LOAD:A_001>>\n\nthe 'Hurricane' dataset.\n<<LOAD:S_001>>"
+    const { cleanedText } = validateAndCleanText(text, ds)
+    // Both Hurricane claims stripped — they mismatch their respective markers.
+    expect(cleanedText).not.toContain("'Hurricane'")
+    // Loads: lines injected for both since the actual titles never
+    // appeared in their preceding windows.
+    expect(cleanedText).toContain('Air Traffic')
+    expect(cleanedText).toContain('Shipping Routes')
+  })
+
+  it('leaves invalid markers untouched in reconciliation (handled by earlier strip pass)', () => {
+    const ds = [makeDataset({ id: 'TEST_001' })]
+    const text = "the 'Hurricane' dataset.\n<<LOAD:HALLUCINATED_999>>"
+    const { cleanedText, invalidIds } = validateAndCleanText(text, ds)
+    // The marker itself gets stripped by the invalid-id pass; the
+    // claim phrase stays because there's no marker-resolved title
+    // to compare it against.
+    expect(invalidIds.has('HALLUCINATED_999')).toBe(true)
+    expect(cleanedText).not.toContain('HALLUCINATED_999')
+    expect(cleanedText).toContain("'Hurricane'")
   })
 
   it('resolves bare INTERNAL_* mentions in prose via legacyId fallback (1d/U)', () => {
@@ -1022,8 +1246,12 @@ describe('processMessage — rewrite chunk for hallucinated IDs', () => {
     const { streamChat } = await import('./llmProvider')
     const mockedStream = vi.mocked(streamChat)
 
+    // Prose mentions the dataset's actual title — that suppresses
+    // both the strip-mismatched-claim path and the
+    // inject-Loads-line path inside reconcileMarkerProse, so a
+    // well-behaved LLM round-trip yields no rewrite chunk.
     mockedStream.mockImplementation(async function* () {
-      yield { type: 'delta' as const, text: 'Here is a great dataset: <<LOAD:TEST_001>>' }
+      yield { type: 'delta' as const, text: 'Here is Sea Surface Temperature: <<LOAD:TEST_001>>' }
       yield { type: 'done' as const }
     })
 
@@ -1577,6 +1805,84 @@ describe('validateAndCleanText — Phase 5 markers', () => {
     expect(cleanedText).not.toContain('FLY')
     expect(cleanedText).not.toContain('MARKER')
     expect(cleanedText).not.toContain('REGION')
+  })
+
+  describe('<<LOAD_FRAME:...>> markers (3pg/C)', () => {
+    const sequenceDataset = makeDataset({
+      id: 'SEQ_001',
+      title: 'Daily SST Anomaly',
+      slug: 'ssta',
+      startTime: '2026-05-16T00:00:00.000Z',
+      period: 'PT1H',
+      frames: {
+        count: 24,
+        urlTemplate: 'https://assets.test/uploads/SEQ_001/01HYUP/frames/{index}.png',
+      },
+    })
+
+    it('extracts a load-frame globe action for a sequence dataset with ISO query', () => {
+      const text = '<<LOAD_FRAME:SEQ_001:2026-05-16T03:00:00Z>>'
+      const { globeActions, cleanedText } = validateAndCleanText(text, [sequenceDataset])
+      const frameAction = globeActions.find(g => g.type === 'load-frame')
+      expect(frameAction).toBeDefined()
+      expect(frameAction).toMatchObject({
+        type: 'load-frame',
+        datasetId: 'SEQ_001',
+        datasetTitle: 'Daily SST Anomaly',
+        frameQuery: '2026-05-16T03:00:00Z',
+        displayName: 'ssta_20260516T030000Z.png',
+      })
+      expect(cleanedText).not.toContain('LOAD_FRAME')
+    })
+
+    it('extracts load-frame for `latest` / `index=N` / bare integer', () => {
+      const text =
+        '<<LOAD_FRAME:SEQ_001:latest>>\n<<LOAD_FRAME:SEQ_001:index=3>>\n<<LOAD_FRAME:SEQ_001:7>>'
+      const { globeActions } = validateAndCleanText(text, [sequenceDataset])
+      const frames = globeActions.filter(g => g.type === 'load-frame')
+      expect(frames).toHaveLength(3)
+    })
+
+    it('matches the dataset id case-insensitively and via legacyId', () => {
+      // Small LLMs occasionally lowercase ULIDs or echo the
+      // legacy SOS id instead of the canonical one. Phase 3pg/C
+      // review — Copilot discussion_r3277040995.
+      const legacyDataset = makeDataset({
+        ...sequenceDataset,
+        id: 'SEQ_002',
+        legacyId: 'INTERNAL_SOS_42',
+      })
+      const text =
+        '<<LOAD_FRAME:seq_002:first>>\n<<LOAD_FRAME:internal_sos_42:latest>>'
+      const { globeActions } = validateAndCleanText(text, [legacyDataset])
+      const frames = globeActions.filter(g => g.type === 'load-frame')
+      expect(frames).toHaveLength(2)
+      // Both should resolve to the same dataset.
+      for (const f of frames) {
+        if (f.type === 'load-frame') expect(f.datasetId).toBe('SEQ_002')
+      }
+    })
+
+    it('silently drops markers for unknown / non-sequence datasets', () => {
+      const text =
+        '<<LOAD_FRAME:UNKNOWN:latest>>\n<<LOAD_FRAME:TEST_001:latest>>'
+      const { globeActions, cleanedText } = validateAndCleanText(text, datasets)
+      expect(globeActions.filter(g => g.type === 'load-frame')).toHaveLength(0)
+      // Strip step removes the literal markers from display anyway.
+      expect(cleanedText).not.toContain('LOAD_FRAME')
+    })
+
+    it('drops the marker but leaves valid <<LOAD:ID>> markers intact when mixed', () => {
+      const text = 'Try this: <<LOAD:TEST_001>>\nOr just this frame: <<LOAD_FRAME:SEQ_001:first>>'
+      const { validIds, globeActions, cleanedText } = validateAndCleanText(text, [
+        ...datasets,
+        sequenceDataset,
+      ])
+      expect(validIds.has('TEST_001')).toBe(true)
+      expect(globeActions.some(g => g.type === 'load-frame')).toBe(true)
+      expect(cleanedText).toContain('<<LOAD:TEST_001>>')
+      expect(cleanedText).not.toContain('LOAD_FRAME')
+    })
   })
 })
 

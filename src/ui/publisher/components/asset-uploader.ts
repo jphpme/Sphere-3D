@@ -1,0 +1,1992 @@
+/**
+ * Asset uploader component for the publisher portal — Phase 3pd.
+ *
+ * Replaces the 3pc/F-fix2 manual data_ref text input with a
+ * guided three-stage flow that mirrors the asset_uploads pipeline:
+ *
+ *   1. /asset       — POST with the file's SHA-256 + size; server
+ *                     mints a short-lived R2 presigned PUT URL.
+ *   2. presigned    — PUT the file bytes directly to R2. XHR drives
+ *                     this so the publisher gets upload-progress
+ *                     events (fetch's body upload doesn't surface
+ *                     them).
+ *   3. /complete    — POST to verify the digest server-side and
+ *                     either write `data_ref` immediately (images)
+ *                     or fire a repository_dispatch + stamp
+ *                     `transcoding=1` (video).
+ *
+ * Stage names + states are surfaced through an inline status
+ * line + `<progress>` element so the publisher sees what's
+ * happening at every step. Failures map to per-stage error
+ * messages with the underlying API code (404 / 409 / 503 / etc.)
+ * exposed in a disclosure for the operator-debugging cases the
+ * 3pc error-card pattern established.
+ *
+ * The component takes a `currentDataRef` initial value (from
+ * the existing row in edit mode) and renders it as a read-only
+ * monospace display above the picker — the publisher sees what
+ * the row currently points at without losing the picker. Once
+ * an upload lands, the new ref (image case) or the
+ * transcoding state (video case) is handed to the parent form
+ * via `onUploaded`.
+ */
+
+import { t, type MessageKey } from '../../../i18n'
+import { MAX_IMAGE_SEQUENCE_FRAMES as MAX_FRAMES } from '../../../types/image-sequence-constants'
+import {
+  generateGlobeThumbnail,
+  loadImageFromBlob,
+  type GlobeThumbnailOptions,
+  type GlobeThumbnailSource,
+} from '../../../services/globeThumbnail'
+import type { DatasetOverlayOptions } from '../../../types'
+import {
+  clearWarmupFlag,
+  handleSessionError,
+  publisherSend,
+  type PublisherSendResult,
+} from '../api'
+import { ROUTE_CHANGE_START_EVENT } from '../router'
+
+/** Result of a finished upload. `mode='direct'` means data_ref
+ *  is set on the row already; `mode='transcoding'` means a
+ *  video transcode is in flight. The parent's responsibility
+ *  on a transcoding outcome is just to re-render so its UI
+ *  surface (the dataset form's manual data_ref input / Save
+ *  button, the detail page's lifecycle controls) reflects the
+ *  new state. Live status polling happens on the detail page
+ *  (3pd/D, `startTranscodePolling` in
+ *  `src/ui/publisher/pages/dataset-detail.ts`); the edit page
+ *  does not poll, so an editor mid-transcode sees the
+ *  read-only notice until they navigate away or reload. */
+export type AssetUploadOutcome =
+  | { mode: 'direct'; dataRef: string }
+  | { mode: 'transcoding' }
+  /** An auxiliary asset (thumbnail / legend) finished uploading.
+   *  These never transcode and don't touch `data_ref` — the server
+   *  stamped the matching `*_ref` column, and `ref` is its new
+   *  value. The parent form mirrors it into the manual ref input +
+   *  form state so a subsequent Save persists it. */
+  | { mode: 'aux'; kind: AuxAssetKind; ref: string }
+
+/** Asset kinds this uploader can drive. `data` is the primary
+ *  asset (video / image / tour). `thumbnail` / `legend` are the
+ *  auxiliary images surfaced on the browse card + info panel.
+ *  Caption (VTT) + sphere_thumbnail (auto-generated) are not
+ *  publisher-uploaded through this component. */
+export type AuxAssetKind = 'thumbnail' | 'legend'
+export type UploaderKind = 'data' | AuxAssetKind
+
+/** Mimes accepted for an auxiliary image upload — mirrors the
+ *  server's `MIME_ALLOWLIST` entries for `thumbnail` / `legend` in
+ *  `functions/api/v1/_lib/asset-uploads.ts`. Worth duplicating
+ *  client-side so the picker rejects the file before any network
+ *  call. */
+const AUX_IMAGE_MIMES: ReadonlySet<string> = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/webp',
+])
+
+/**
+ * A loaded video the publisher can scrub to pick a frame for the
+ * globe thumbnail. Backs the video path of "Generate from this
+ * dataset's data" — the dataset's data *is* a 2:1 equirectangular
+ * video, so any frame is a valid globe source.
+ */
+export interface VideoScrubHandle {
+  /** A visible `<video controls>` with the stream attached; mounted
+   *  into the scrub UI so the publisher seeks with native controls. */
+  video: HTMLVideoElement
+  /** Draw the currently-shown frame onto a 2:1 canvas usable as a
+   *  `generateGlobeThumbnail` source. */
+  capture: () => HTMLCanvasElement
+  /** Tear down the HLS instance + remove the video element.
+   *  Idempotent. */
+  dispose: () => void
+}
+
+/**
+ * Default video-scrub loader — lazy-imports the shared `HLSService`
+ * (so hls.js stays out of the portal bundle until a publisher
+ * actually grabs a video frame) and attaches the stream to a
+ * controls-enabled, CORS-anonymous `<video>`. The same crossOrigin
+ * setup the globe's video textures use, so reading a frame off the
+ * canvas is taint-free.
+ */
+async function defaultLoadVideoScrub(url: string): Promise<VideoScrubHandle> {
+  const { HLSService } = await import('../../../services/hlsService')
+  const video = document.createElement('video')
+  video.crossOrigin = 'anonymous'
+  video.controls = true
+  video.muted = true
+  video.playsInline = true
+  video.preload = 'auto'
+  video.className = 'publisher-asset-uploader-generate-video'
+  const svc = new HLSService()
+  try {
+    await svc.loadStream(url, video)
+  } catch (err) {
+    // On a load failure the handle (and its `dispose`) is never
+    // returned, so tear the HLS instance + element down here rather
+    // than leaking a live loader. PR #208 Copilot review.
+    try {
+      svc.destroy()
+    } catch {
+      /* already torn down */
+    }
+    video.remove()
+    throw err
+  }
+  let disposed = false
+  return {
+    video,
+    capture: () => {
+      const canvas = document.createElement('canvas')
+      canvas.width = video.videoWidth || 2
+      canvas.height = video.videoHeight || 1
+      const ctx = canvas.getContext('2d')
+      if (ctx) ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
+      return canvas
+    },
+    dispose: () => {
+      if (disposed) return
+      disposed = true
+      // `svc.destroy()` only owns the HLS instance here (we passed our
+      // own video, so the service's internal video ref is null); we
+      // remove the element ourselves.
+      try {
+        svc.destroy()
+      } catch {
+        /* already torn down */
+      }
+      video.remove()
+    },
+  }
+}
+
+export interface AssetUploaderOptions {
+  /** Dataset id this uploader writes to. Required — the asset
+   *  endpoints are scoped to the row. */
+  datasetId: string
+  /** Which asset slot this uploader writes. Defaults to `'data'`
+   *  (the primary asset). `'thumbnail'` / `'legend'` drive the
+   *  auxiliary-image upload path: image-only mime gate, no
+   *  format coupling, no transcode/frames affordances, and an
+   *  `aux`-mode outcome that carries the new `*_ref`. */
+  kind?: UploaderKind
+  /** Dataset's declared `format` (`video/mp4`, `image/png`, etc.).
+   *  Used to pre-validate the picked file before any network call
+   *  and to constrain the `accept` attribute on the input. Ignored
+   *  for `thumbnail` / `legend` uploads, which always accept the
+   *  image mimes regardless of the dataset's primary format. */
+  format: string
+  /** Current `data_ref` from the existing row in edit mode, if
+   *  any. Surfaced read-only above the picker so the publisher
+   *  sees what they'd be replacing. */
+  currentDataRef?: string | null
+  /** Fired when the upload finishes successfully. */
+  onUploaded: (outcome: AssetUploadOutcome) => void
+  /** Fired when the publisher's draft hasn't been saved yet (the
+   *  asset endpoints require an existing dataset id). The parent
+   *  form is expected to surface a "Save draft first" notice. */
+  onMissingDataset?: () => void
+  /** Injected fetch — defaults to `globalThis.fetch`. */
+  fetchFn?: typeof fetch
+  /** Injected XHR factory — tests pass a stub that emits
+   *  progress events without actual network IO. */
+  xhrFactory?: () => XMLHttpRequest
+  /** Injected SHA-256 — tests pass a deterministic hash so
+   *  fixture digests round-trip without computing. */
+  hashFn?: (file: File) => Promise<string>
+  /** Injected sleep used by the API helpers' retry loops. */
+  sleep?: (ms: number) => Promise<void>
+  /** Navigation for the session-expired flow. */
+  navigate?: (url: string) => void
+  /** A fetchable URL for the dataset's own data frame (an
+   *  equirectangular image). When provided on a `thumbnail`
+   *  uploader, enables the one-click "Generate from this dataset's
+   *  data" affordance — the publisher gets a globe thumbnail with
+   *  zero extra uploads. Hidden when null/absent (e.g. the data is
+   *  a video or an unresolvable ref). Thumbnail kind only. */
+  dataAssetUrl?: string | null
+  /** The dataset's render hints (bbox / lonOrigin / flip / celestial
+   *  body). Applied when generating from the dataset's *own* data
+   *  (the one-click button / a captured video frame) so the
+   *  thumbnail matches the live globe. Not applied to a hand-picked
+   *  frame, whose projection is unknown. */
+  dataAssetOverlay?: DatasetOverlayOptions | null
+  /** Test seam — renders a 2:1 source to a globe thumbnail Blob at
+   *  the given longitude/latitude. Defaults to the real WebGL
+   *  `generateGlobeThumbnail`, which can't run under happy-dom. */
+  generateThumbnail?: (
+    source: GlobeThumbnailSource,
+    options?: GlobeThumbnailOptions,
+  ) => Promise<Blob>
+  /** Test seam — decodes a Blob into an image. Defaults to
+   *  `loadImageFromBlob`. */
+  decodeImage?: (blob: Blob) => Promise<HTMLImageElement>
+  /** Test seam — fetches the data-frame URL as a Blob for the
+   *  auto-from-data path (image datasets). Defaults to
+   *  `fetch().blob()`. */
+  fetchImageBlob?: (url: string) => Promise<Blob>
+  /** Test seam — loads a video URL into a scrubable handle for the
+   *  video auto-from-data path. Defaults to an HLS.js-backed loader;
+   *  injected in tests since hls.js / video decode can't run under
+   *  happy-dom. */
+  loadVideoScrub?: (url: string) => Promise<VideoScrubHandle>
+}
+
+interface AssetInitResponse {
+  upload_id: string
+  kind: UploaderKind
+  target: 'r2'
+  r2: { method: 'PUT'; url: string; headers: Record<string, string>; key: string }
+  expires_at: string
+  mock: boolean
+}
+
+interface AssetCompleteResponse {
+  /** The full updated dataset row. `data_ref` flips for `data`
+   *  uploads; `thumbnail_ref` / `legend_ref` flip for the matching
+   *  auxiliary upload. All optional so one shape covers every
+   *  kind. */
+  dataset: {
+    data_ref?: string
+    thumbnail_ref?: string | null
+    legend_ref?: string | null
+  }
+  transcoding?: boolean
+}
+
+type Stage =
+  | 'idle'
+  | 'hashing'
+  | 'minting'
+  | 'uploading'
+  | 'completing'
+  | 'done-direct'
+  | 'done-transcoding'
+  | 'error'
+
+interface StageState {
+  stage: Stage
+  /** 0..1 fraction shown in the progress bar. */
+  progress: number
+  /** Operator-facing key for the inline status line. */
+  statusKey: MessageKey
+  /** Raw API kind for the error card disclosure. */
+  errorKind?: PublisherSendResult<unknown> extends infer T
+    ? T extends { ok: false; kind: infer K }
+      ? K
+      : never
+    : never
+  /** Free-text detail attached to the error disclosure. */
+  errorDetail?: string
+}
+
+const INITIAL: StageState = {
+  stage: 'idle',
+  progress: 0,
+  statusKey: 'publisher.assetUploader.status.idle',
+}
+
+/** Globe-thumbnail generator sub-flow (thumbnail uploader only).
+ *  `idle` → (`scrubbing`, video only) → `rendering` → `preview` (a
+ *  generated capture awaiting the publisher's confirm) → back to
+ *  `idle` once uploaded, or `error`. The decoded source, current
+ *  rotation, generated File, and its object-URL preview live here so
+ *  the publisher can rotate to a desired area of focus (re-rendering
+ *  from the same source) before confirming. */
+type GenStage = 'idle' | 'scrubbing' | 'rendering' | 'preview' | 'error'
+
+interface GenState {
+  stage: GenStage
+  /** The decoded 2:1 source, kept so rotation re-renders don't
+   *  re-decode / re-fetch. An image, or a frame captured from the
+   *  dataset's own video. */
+  source?: GlobeThumbnailSource
+  /** Active video-scrub handle during the `scrubbing` stage (video
+   *  datasets) — the publisher seeks it, then captures a frame. */
+  scrub?: VideoScrubHandle
+  /** The dataset's render hints to apply to this render — set when
+   *  the source is the dataset's own data, undefined for a
+   *  hand-picked frame. */
+  overlay?: DatasetOverlayOptions
+  /** Current longitude spin in degrees (-180..180). */
+  lon: number
+  /** Current latitude tilt in degrees (-90..90). */
+  lat: number
+  /** Object URL of the generated preview image (revoked on
+   *  re-render / discard / upload). */
+  previewUrl?: string
+  /** The generated capture, ready to hand to `run()`. */
+  file?: File
+  errorDetail?: string
+}
+
+const INITIAL_GEN: GenState = { stage: 'idle', lon: 0, lat: 0 }
+
+const STAGE_STATUS_KEY: Record<Stage, MessageKey> = {
+  idle: 'publisher.assetUploader.status.idle',
+  hashing: 'publisher.assetUploader.status.hashing',
+  minting: 'publisher.assetUploader.status.minting',
+  uploading: 'publisher.assetUploader.status.uploading',
+  completing: 'publisher.assetUploader.status.completing',
+  'done-direct': 'publisher.assetUploader.status.doneDirect',
+  'done-transcoding': 'publisher.assetUploader.status.doneTranscoding',
+  error: 'publisher.assetUploader.status.error',
+}
+
+/** Tab discriminator on a video dataset's uploader. The tab strip
+ *  is mounted only when `options.format === 'video/mp4'` since
+ *  image-sequence input is video-only by design. */
+type UploaderTab = 'video' | 'frames'
+
+/** Per-frame mime allowlist mirrors `validateImageSequenceInit`
+ *  on the publisher API. Worth duplicating client-side so the
+ *  picker rejects the file before any network call. */
+const FRAME_MIME_ALLOWLIST: ReadonlySet<string> = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/webp',
+])
+
+/** Frame-count cap is the single source of truth from
+ *  `cli/lib/image-sequence-constants.ts` (imported at the top of
+ *  this file). The hash budget + JSON-response-size discussion
+ *  lives in `docs/CATALOG_IMAGE_SEQUENCE_PLAN.md` §Open Q4.
+ *  Phase 3pf-review/F — Copilot discussion_r3263124306. */
+
+/** Aggregate-size cap mirrors `SIZE_IMAGE_SEQUENCE_TOTAL` on the
+ *  publisher API (10 GB). Enforced client-side as well as
+ *  server-side so a publisher who drags in tens of GB of high-res
+ *  PNGs gets a fail-fast rejection before the ~100 s in-browser
+ *  hash budget burns. The two values must agree — if a future
+ *  change raises the server cap, raise this constant too. */
+const MAX_TOTAL_BYTES = 10 * 1024 * 1024 * 1024
+
+/** Bounded concurrency for the per-frame PUT pool. 5 matches the
+ *  Phase 3pf plan recommendation — high enough that R2's edge
+ *  parallelises the writes, low enough that a typical residential
+ *  uplink doesn't get saturated by HTTP/1.1 connection limits or
+ *  the browser's per-host socket cap. */
+const FRAME_UPLOAD_CONCURRENCY = 5
+
+/** Stage labels for the frame-sequence flow. Distinct from `Stage`
+ *  because the frame stages carry an N/M counter for "hashing 47/240"
+ *  / "uploading 47/240" status lines. */
+type FramesStage =
+  | 'idle'
+  | 'picked'
+  | 'hashing'
+  | 'minting'
+  | 'uploading'
+  | 'completing'
+  | 'done-transcoding'
+  | 'error'
+
+interface FramesState {
+  stage: FramesStage
+  /** Picked + lexicographically-sorted files. Cleared on retry. */
+  files: File[]
+  /** Resolved per-frame MIME (`image/png` / `image/jpeg` /
+   *  `image/webp`). Computed once in `handleFramesPicked` from
+   *  the first file's `type` (or filename fallback) and asserted
+   *  to match every subsequent file — so the run path uses a
+   *  verified value rather than re-deriving on a potentially
+   *  empty array. */
+  mime: string
+  /** 1-based progress counter for `hashing` / `uploading` stages. */
+  current: number
+  /** Aggregate progress fraction 0..1 for the visible `<progress>`. */
+  progress: number
+  errorDetail?: string
+}
+
+const INITIAL_FRAMES: FramesState = {
+  stage: 'idle',
+  files: [],
+  mime: '',
+  current: 0,
+  progress: 0,
+}
+
+/** Chunk size for incremental hashing — 8 MB. Large enough that
+ *  per-chunk overhead is negligible, small enough that 4K video
+ *  uploads don't blow the tab's memory budget. */
+const HASH_CHUNK_BYTES = 8 * 1024 * 1024
+
+/**
+ * SHA-256 of a File via streaming chunks. The browser-native
+ * `crypto.subtle.digest` only operates on a complete
+ * `BufferSource` (no incremental API), so an `arrayBuffer()`
+ * over a 4K MP4 would load the whole file into memory before
+ * hashing — risky for >1 GB clips. Instead we slice the file
+ * into `HASH_CHUNK_BYTES` chunks and feed each chunk into an
+ * incremental SHA-256 from `@noble/hashes`. Fix for PR #112
+ * Copilot #2.
+ *
+ * Returns the `sha256:<hex>` form the publisher API expects.
+ */
+export async function hashFileSha256(file: File): Promise<string> {
+  // Dynamic import keeps `@noble/hashes` out of the main SPA
+  // bundle — only loaded when the publisher actually opens the
+  // uploader. ~10 KB tax on the portal lazy chunk.
+  const { sha256 } = await import('@noble/hashes/sha2.js')
+  const { bytesToHex } = await import('@noble/hashes/utils.js')
+  const hasher = sha256.create()
+  for (let offset = 0; offset < file.size; offset += HASH_CHUNK_BYTES) {
+    const slice = file.slice(offset, offset + HASH_CHUNK_BYTES)
+    const buf = await slice.arrayBuffer()
+    hasher.update(new Uint8Array(buf))
+    // The local `buf` + `slice` go out of scope on the next
+    // iteration, letting the GC reclaim each chunk before we
+    // read the next one. Peak memory ≈ HASH_CHUNK_BYTES + the
+    // hasher's small internal state.
+  }
+  return `sha256:${bytesToHex(hasher.digest())}`
+}
+
+/**
+ * Render the uploader into a fresh element and return it. The
+ * caller appends this to the form card. Idempotent — calling
+ * again creates a new instance; the old one is GC-eligible once
+ * detached.
+ */
+export function renderAssetUploader(options: AssetUploaderOptions): HTMLElement {
+  const root = document.createElement('div')
+  root.className = 'publisher-asset-uploader'
+
+  const kind: UploaderKind = options.kind ?? 'data'
+
+  let state: StageState = INITIAL
+  let framesState: FramesState = INITIAL_FRAMES
+  // Globe-thumbnail generator state — only used on a `thumbnail`
+  // uploader. Independent of the main upload `state`: the publisher
+  // generates + previews a globe capture here (rotating to a desired
+  // area of focus), then "Use this thumbnail" feeds the generated
+  // File into the same `run()` upload path the file picker uses.
+  let genState: GenState = INITIAL_GEN
+  // Monotonic token so a slower rotation re-render can't overwrite a
+  // newer one — the publisher dragging a slider fires renders faster
+  // than they resolve.
+  let genRenderSeq = 0
+  // The currently-loaded video scrub handle, tracked outside genState
+  // so it's torn down (HLS instance + element) on capture, cancel, or
+  // route navigation — a streaming HLS left running would leak
+  // bandwidth + memory.
+  let activeScrub: VideoScrubHandle | null = null
+  // Monotonic token bumped whenever a scrub is cleared — lets an
+  // in-flight `loadVideoScrub()` detect it was cancelled (route
+  // change / new load) while awaiting and dispose its handle instead
+  // of re-attaching a stale HLS instance + listener. PR #208 Copilot
+  // review.
+  let scrubLoadSeq = 0
+  function clearScrub(): void {
+    scrubLoadSeq++
+    if (activeScrub) {
+      activeScrub.dispose()
+      activeScrub = null
+    }
+    window.removeEventListener(ROUTE_CHANGE_START_EVENT, clearScrub)
+  }
+  // True while a render is in flight (initial generate or a rotation
+  // re-render). Folded into the generator's `busy` so "Use this
+  // thumbnail" can't upload a stale capture mid-re-render and a late
+  // render can't repaint after the publisher has moved on. PR #208
+  // Copilot review.
+  let genRendering = false
+  // Tab strip is only mounted for the primary `data` asset of a
+  // video-format dataset — that's where image-sequence input is
+  // meaningful (the catalog encodes every frames upload to a video
+  // HLS bundle). Image / tour datasets and the auxiliary
+  // thumbnail / legend uploaders see the single-file picker.
+  let activeTab: UploaderTab = 'video'
+  const tabsEnabled = kind === 'data' && options.format === 'video/mp4'
+
+  // Stable ids used to wire the tab buttons to their tabpanel via
+  // ARIA. Per-instance unique enough that two uploaders mounted
+  // on the same page (vanishingly rare but cheap to protect
+  // against) don't collide. Phase 3pf-review/F — Copilot
+  // discussion_r3263124279.
+  // Per-instance random suffix shared across every id this
+  // uploader emits — the tab buttons, the tabpanels, and the
+  // two file inputs. Two uploaders on the same page is
+  // vanishingly rare on the dataset edit form but cheap to
+  // guard against: duplicate `<label for=...>` associations
+  // resolve to whichever input is first in the DOM, and screen
+  // readers announce the wrong control. Phase 3pf-review/G —
+  // Copilot discussion_r3263466409.
+  const ID_SUFFIX = Math.random().toString(36).slice(2, 8)
+  const TAB_VIDEO_ID = `dataset-asset-tab-video-${ID_SUFFIX}`
+  const TAB_FRAMES_ID = `dataset-asset-tab-frames-${ID_SUFFIX}`
+  const PANEL_VIDEO_ID = `${TAB_VIDEO_ID}-panel`
+  const PANEL_FRAMES_ID = `${TAB_FRAMES_ID}-panel`
+  const FILE_INPUT_ID = `dataset-asset-file-${ID_SUFFIX}`
+  const FRAMES_INPUT_ID = `dataset-asset-frames-${ID_SUFFIX}`
+  const GENERATE_INPUT_ID = `dataset-asset-generate-${ID_SUFFIX}`
+
+  function paint(): void {
+    const frag = document.createDocumentFragment()
+    if (tabsEnabled) {
+      frag.appendChild(buildTabStrip())
+    }
+    if (tabsEnabled && activeTab === 'frames') {
+      const panel = buildFramesBody(framesState)
+      // Wrap in a tabpanel-roled container so the panel announces
+      // its tab parentage to screen readers.
+      const wrapper = document.createElement('div')
+      wrapper.id = PANEL_FRAMES_ID
+      wrapper.setAttribute('role', 'tabpanel')
+      wrapper.setAttribute('aria-labelledby', TAB_FRAMES_ID)
+      wrapper.appendChild(panel)
+      frag.appendChild(wrapper)
+    } else if (tabsEnabled) {
+      const panel = buildBody(state)
+      const wrapper = document.createElement('div')
+      wrapper.id = PANEL_VIDEO_ID
+      wrapper.setAttribute('role', 'tabpanel')
+      wrapper.setAttribute('aria-labelledby', TAB_VIDEO_ID)
+      wrapper.appendChild(panel)
+      frag.appendChild(wrapper)
+    } else {
+      frag.appendChild(buildBody(state))
+    }
+    root.replaceChildren(frag)
+  }
+
+  function buildTabStrip(): HTMLElement {
+    const strip = document.createElement('div')
+    strip.className = 'publisher-asset-uploader-tabs'
+    strip.setAttribute('role', 'tablist')
+    for (const tab of ['video', 'frames'] as UploaderTab[]) {
+      const btn = document.createElement('button')
+      btn.type = 'button'
+      btn.id = tab === 'video' ? TAB_VIDEO_ID : TAB_FRAMES_ID
+      btn.className =
+        'publisher-asset-uploader-tab' +
+        (activeTab === tab ? ' publisher-asset-uploader-tab-active' : '')
+      btn.setAttribute('role', 'tab')
+      btn.setAttribute('aria-selected', activeTab === tab ? 'true' : 'false')
+      btn.setAttribute(
+        'aria-controls',
+        tab === 'video' ? PANEL_VIDEO_ID : PANEL_FRAMES_ID,
+      )
+      btn.textContent = t(
+        tab === 'video'
+          ? 'publisher.assetUploader.tab.video'
+          : 'publisher.assetUploader.tab.frames',
+      )
+      // Disable tab switching once an upload is in flight on
+      // either side — flipping mid-upload would either lose the
+      // in-flight state (frames → video) or risk firing a
+      // duplicate dispatch (video → frames mid-transcode).
+      const lockedSingle =
+        state.stage !== 'idle' && state.stage !== 'error' && state.stage !== 'done-direct'
+      const lockedFrames =
+        framesState.stage !== 'idle' &&
+        framesState.stage !== 'picked' &&
+        framesState.stage !== 'error'
+      btn.disabled = lockedSingle || lockedFrames
+      btn.addEventListener('click', () => {
+        if (activeTab === tab) return
+        activeTab = tab
+        paint()
+      })
+      strip.appendChild(btn)
+    }
+    return strip
+  }
+
+  function buildBody(s: StageState): DocumentFragment {
+    const frag = document.createDocumentFragment()
+
+    // Current ref line — only when edit mode with an existing
+    // ref, and only when no upload is in flight (the in-flight
+    // status replaces this line). The publisher sees what
+    // they're about to replace.
+    if (options.currentDataRef && s.stage === 'idle') {
+      const current = document.createElement('p')
+      current.className = 'publisher-asset-uploader-current'
+      const label = document.createElement('span')
+      label.className = 'publisher-asset-uploader-current-label'
+      label.textContent = t('publisher.assetUploader.current')
+      const value = document.createElement('span')
+      value.className = 'publisher-asset-uploader-current-value publisher-field-value-mono'
+      value.textContent = options.currentDataRef
+      current.appendChild(label)
+      current.appendChild(value)
+      frag.appendChild(current)
+    }
+
+    // File picker. The label is mounted alongside the input
+    // (and explicitly bound via `for` / `id`) so screen readers
+    // announce "Pick a file, file picker" rather than leaving
+    // the input unlabeled. Fix for PR #112 Copilot #4.
+    const inputRow = document.createElement('div')
+    inputRow.className = 'publisher-asset-uploader-input-row'
+
+    const inputId = FILE_INPUT_ID
+    const label = document.createElement('label')
+    label.className = 'publisher-asset-uploader-label'
+    label.setAttribute('for', inputId)
+    label.textContent = t('publisher.assetUploader.pickFile')
+    inputRow.appendChild(label)
+
+    const input = document.createElement('input')
+    input.type = 'file'
+    input.id = inputId
+    input.className = 'publisher-asset-uploader-input'
+    // Auxiliary (thumbnail / legend) uploads always accept the
+    // image mimes regardless of the dataset's primary format; the
+    // `data` uploader narrows to the dataset's declared format.
+    input.accept =
+      kind === 'data'
+        ? acceptForFormat(options.format)
+        : 'image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp'
+    // Re-enable only when the uploader is idle, in an error
+    // state the publisher can retry from, or done with a
+    // direct (non-transcode) finalisation. `done-transcoding`
+    // keeps the picker disabled — starting a second upload
+    // while the first transcode is still in flight would fire
+    // an overlapping dispatch, and the /asset/.../complete
+    // route's `transcoding_in_progress` guard (migration 0012,
+    // 3pd-followup/C) would refuse it anyway. Cleaner to
+    // disable here.
+    input.disabled =
+      s.stage !== 'idle' &&
+      s.stage !== 'error' &&
+      s.stage !== 'done-direct'
+    input.addEventListener('change', () => {
+      const file = input.files?.[0]
+      if (!file) return
+      void run(file)
+    })
+    inputRow.appendChild(input)
+
+    frag.appendChild(inputRow)
+
+    // Status line + progress.
+    const status = document.createElement('p')
+    status.className = `publisher-asset-uploader-status publisher-asset-uploader-status-${s.stage}`
+    status.setAttribute('role', 'status')
+    status.textContent = t(s.statusKey)
+    frag.appendChild(status)
+
+    if (s.stage !== 'idle' && s.stage !== 'error' && !s.stage.startsWith('done-')) {
+      const bar = document.createElement('progress')
+      bar.className = 'publisher-asset-uploader-progress'
+      bar.max = 1
+      bar.value = s.progress
+      frag.appendChild(bar)
+    }
+
+    if (s.stage === 'error' && s.errorDetail) {
+      const det = document.createElement('details')
+      det.className = 'publisher-asset-uploader-error-details'
+      const summary = document.createElement('summary')
+      summary.textContent = t('publisher.assetUploader.errorDetails')
+      det.appendChild(summary)
+      const pre = document.createElement('pre')
+      pre.textContent = s.errorDetail
+      det.appendChild(pre)
+      frag.appendChild(det)
+    }
+
+    // Globe-thumbnail generator — thumbnail uploader only. Lets a
+    // publisher turn a flat 2:1 data frame (or the dataset's own
+    // data) into a wrapped-on-a-globe capture without making the
+    // render themselves.
+    if (kind === 'thumbnail') {
+      frag.appendChild(buildGenerateSection(genState))
+    }
+
+    return frag
+  }
+
+  /**
+   * The "Generate a globe thumbnail" block. Offers two sources — a
+   * one-click "from this dataset's data" (when a usable data-frame
+   * URL was supplied) and a manual 2:1 frame picker — then renders a
+   * preview the publisher confirms before it's uploaded through the
+   * normal `run()` path.
+   */
+  function buildGenerateSection(g: GenState): HTMLElement {
+    const section = document.createElement('div')
+    section.className = 'publisher-asset-uploader-generate'
+
+    const heading = document.createElement('p')
+    heading.className = 'publisher-asset-uploader-generate-heading'
+    heading.textContent = t('publisher.assetUploader.generate.heading')
+    section.appendChild(heading)
+
+    const help = document.createElement('p')
+    help.className = 'publisher-asset-uploader-generate-help'
+    help.textContent = t('publisher.assetUploader.generate.help')
+    section.appendChild(help)
+
+    // Busy whenever the generator is rendering OR the main uploader
+    // has an upload in flight — generator actions ("Generate…",
+    // "Use this thumbnail") must be inert during a hash/mint/PUT/
+    // complete cycle so a publisher can't kick off a second,
+    // overlapping `/asset` upload that stomps the in-flight state.
+    // Mirrors the main file picker's own disabled rule. PR #208
+    // Copilot review.
+    const uploadInFlight =
+      state.stage !== 'idle' && state.stage !== 'error' && state.stage !== 'done-direct'
+    const busy = g.stage === 'rendering' || g.stage === 'scrubbing' || uploadInFlight || genRendering
+
+    const controls = document.createElement('div')
+    controls.className = 'publisher-asset-uploader-generate-controls'
+
+    // One-click from the dataset's own data frame, when resolvable.
+    if (options.dataAssetUrl) {
+      const fromData = document.createElement('button')
+      fromData.type = 'button'
+      fromData.className = 'publisher-button publisher-button-secondary'
+      fromData.textContent = t('publisher.assetUploader.generate.fromData')
+      fromData.disabled = busy
+      fromData.addEventListener('click', () => {
+        const url = options.dataAssetUrl as string
+        // Video datasets scrub a frame out of their own stream;
+        // images fetch + wrap the data frame directly.
+        if (options.format === 'video/mp4') void runScrubFromData(url)
+        else void runGenerateFromData(url)
+      })
+      controls.appendChild(fromData)
+    }
+
+    // Manual 2:1 frame picker. The file input is visually hidden
+    // inside the button-styled label (same pattern the rest of the
+    // portal uses for file affordances).
+    const frameLabel = document.createElement('label')
+    frameLabel.className =
+      'publisher-button publisher-button-secondary publisher-asset-uploader-generate-pick'
+    frameLabel.setAttribute('for', GENERATE_INPUT_ID)
+    frameLabel.textContent = t('publisher.assetUploader.generate.fromFrame')
+    const frameInput = document.createElement('input')
+    frameInput.type = 'file'
+    frameInput.id = GENERATE_INPUT_ID
+    frameInput.className = 'publisher-asset-uploader-generate-input'
+    frameInput.accept = 'image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp'
+    frameInput.disabled = busy
+    frameInput.addEventListener('change', () => {
+      const file = frameInput.files?.[0]
+      if (!file) return
+      void runGenerateFromFile(file)
+    })
+    frameLabel.appendChild(frameInput)
+    controls.appendChild(frameLabel)
+
+    section.appendChild(controls)
+
+    if (g.stage === 'rendering') {
+      const status = document.createElement('p')
+      status.className = 'publisher-asset-uploader-status'
+      status.setAttribute('role', 'status')
+      status.textContent = t('publisher.assetUploader.generate.rendering')
+      section.appendChild(status)
+    }
+
+    // Video scrub stage — load the dataset's stream, let the
+    // publisher seek with native controls, then capture a frame.
+    if (g.stage === 'scrubbing') {
+      if (!g.scrub) {
+        const status = document.createElement('p')
+        status.className = 'publisher-asset-uploader-status'
+        status.setAttribute('role', 'status')
+        status.textContent = t('publisher.assetUploader.generate.videoLoading')
+        section.appendChild(status)
+      } else {
+        const hint = document.createElement('p')
+        hint.className = 'publisher-asset-uploader-generate-help'
+        hint.textContent = t('publisher.assetUploader.generate.scrubHint')
+        section.appendChild(hint)
+
+        // Mount the live <video controls>; it carries its own state
+        // (current frame, buffering) across re-appends.
+        section.appendChild(g.scrub.video)
+
+        const actions = document.createElement('div')
+        actions.className = 'publisher-asset-uploader-generate-actions'
+
+        const capture = document.createElement('button')
+        capture.type = 'button'
+        capture.className = 'publisher-button publisher-button-primary'
+        capture.textContent = t('publisher.assetUploader.generate.capture')
+        capture.addEventListener('click', () => {
+          const handle = g.scrub
+          if (!handle) return
+          // `drawImage(video)` can throw if the frame isn't decodable
+          // yet (videoWidth=0 → InvalidStateError). Catch it, tear the
+          // stream down, and surface a generator error rather than
+          // letting it bubble out and strand a live HLS stream. PR
+          // #208 Copilot review.
+          let canvas: HTMLCanvasElement
+          try {
+            canvas = handle.capture()
+          } catch (err) {
+            clearScrub()
+            genState = {
+              ...INITIAL_GEN,
+              stage: 'error',
+              errorDetail: err instanceof Error ? err.message : String(err),
+            }
+            paint()
+            return
+          }
+          // Grab the frame, then tear the stream down (disposes the
+          // handle, removes the listener, bumps the load token).
+          clearScrub()
+          // The captured frame IS the dataset's data — apply its
+          // render hints so the thumbnail matches the live globe.
+          genState = {
+            ...INITIAL_GEN,
+            stage: 'rendering',
+            source: canvas,
+            overlay: options.dataAssetOverlay ?? undefined,
+          }
+          paint()
+          void renderPreview()
+        })
+        actions.appendChild(capture)
+
+        const cancel = document.createElement('button')
+        cancel.type = 'button'
+        cancel.className = 'publisher-button publisher-button-secondary'
+        cancel.textContent = t('publisher.assetUploader.generate.cancel')
+        cancel.addEventListener('click', () => {
+          clearScrub()
+          genState = INITIAL_GEN
+          paint()
+        })
+        actions.appendChild(cancel)
+
+        section.appendChild(actions)
+      }
+    }
+
+    if (g.stage === 'preview' && g.previewUrl) {
+      const preview = document.createElement('img')
+      preview.className = 'publisher-asset-uploader-generate-preview'
+      preview.src = g.previewUrl
+      preview.alt = t('publisher.assetUploader.generate.previewAlt')
+      section.appendChild(preview)
+
+      // Rotation controls — bring a desired area of focus to the
+      // centre of the capture. Each slider re-renders from the kept
+      // source on release (`change`), with a live degree readout on
+      // `input`; re-rendering on every pixel of drag would spin up a
+      // fresh WebGL context per frame.
+      const rotateHint = document.createElement('p')
+      rotateHint.className = 'publisher-asset-uploader-generate-help'
+      rotateHint.textContent = t('publisher.assetUploader.generate.rotateHint')
+      section.appendChild(rotateHint)
+
+      section.appendChild(
+        buildRotationSlider({
+          axis: 'lon',
+          labelKey: 'publisher.assetUploader.generate.longitude',
+          min: -180,
+          max: 180,
+          value: g.lon,
+        }),
+      )
+      section.appendChild(
+        buildRotationSlider({
+          axis: 'lat',
+          labelKey: 'publisher.assetUploader.generate.latitude',
+          min: -90,
+          max: 90,
+          value: g.lat,
+        }),
+      )
+
+      const actions = document.createElement('div')
+      actions.className = 'publisher-asset-uploader-generate-actions'
+
+      const use = document.createElement('button')
+      use.type = 'button'
+      use.className = 'publisher-button publisher-button-primary'
+      use.textContent = t('publisher.assetUploader.generate.use')
+      // Inert while an upload is in flight — clicking it would start a
+      // second concurrent `run(file)` over the same row. PR #208
+      // Copilot review.
+      use.disabled = busy
+      use.addEventListener('click', () => {
+        // Belt-and-suspenders: even if a stale click lands, no-op
+        // while busy.
+        if (busy) return
+        const file = g.file
+        if (!file) return
+        // Hand off to the shared upload path. Clear the preview
+        // first so the generator block collapses while the upload
+        // status takes over.
+        if (g.previewUrl) URL.revokeObjectURL(g.previewUrl)
+        genState = INITIAL_GEN
+        void run(file)
+      })
+      actions.appendChild(use)
+
+      const discard = document.createElement('button')
+      discard.type = 'button'
+      discard.className = 'publisher-button publisher-button-secondary'
+      discard.textContent = t('publisher.assetUploader.generate.discard')
+      // Disabled (and no-op) while a rotation re-render is in flight —
+      // otherwise an in-flight render could resolve after the discard
+      // and repaint the preview, undoing it. PR #208 Copilot review.
+      discard.disabled = busy
+      discard.addEventListener('click', () => {
+        if (busy) return
+        if (g.previewUrl) URL.revokeObjectURL(g.previewUrl)
+        genState = INITIAL_GEN
+        paint()
+      })
+      actions.appendChild(discard)
+
+      section.appendChild(actions)
+    }
+
+    if (g.stage === 'error') {
+      const err = document.createElement('p')
+      err.className = 'publisher-asset-uploader-status publisher-asset-uploader-status-error'
+      err.setAttribute('role', 'alert')
+      err.textContent = g.errorDetail ?? t('publisher.assetUploader.generate.error')
+      section.appendChild(err)
+    }
+
+    return section
+  }
+
+  /** A labelled rotation slider with a live degree readout. Updates
+   *  `genState` on drag (`input`) and re-renders the preview on
+   *  release (`change`) — re-rendering per drag frame would spin up
+   *  a fresh WebGL context each move. */
+  function buildRotationSlider(o: {
+    axis: 'lon' | 'lat'
+    labelKey: MessageKey
+    min: number
+    max: number
+    value: number
+  }): HTMLElement {
+    const sliderId = `${GENERATE_INPUT_ID}-${o.axis}`
+    const row = document.createElement('div')
+    row.className = 'publisher-asset-uploader-generate-rotate'
+
+    const label = document.createElement('label')
+    label.className = 'publisher-asset-uploader-generate-rotate-label'
+    label.htmlFor = sliderId
+    label.textContent = t(o.labelKey)
+    row.appendChild(label)
+
+    const slider = document.createElement('input')
+    slider.type = 'range'
+    slider.id = sliderId
+    slider.className = 'publisher-asset-uploader-generate-rotate-input'
+    slider.min = String(o.min)
+    slider.max = String(o.max)
+    slider.step = '1'
+    slider.value = String(o.value)
+    row.appendChild(slider)
+
+    const readout = document.createElement('span')
+    readout.className = 'publisher-asset-uploader-generate-rotate-readout'
+    readout.textContent = t('publisher.assetUploader.generate.degrees', {
+      value: String(o.value),
+    })
+    row.appendChild(readout)
+
+    slider.addEventListener('input', () => {
+      const v = Number(slider.value)
+      if (o.axis === 'lon') genState.lon = v
+      else genState.lat = v
+      readout.textContent = t('publisher.assetUploader.generate.degrees', {
+        value: String(v),
+      })
+    })
+    slider.addEventListener('change', () => {
+      void renderPreview()
+    })
+    return row
+  }
+
+  /** Render (or re-render) the preview from the source currently in
+   *  `genState`, at its current longitude/latitude. Stale renders
+   *  (superseded by a newer rotation) are dropped via `genRenderSeq`
+   *  so a slow render can't clobber a newer preview. The previous
+   *  preview stays visible until the new one lands, so rotating
+   *  doesn't flash an empty frame.
+   *
+   *  Self-handles render failures (WebGL context loss, encode error)
+   *  by moving to the generator's error state — every caller (the
+   *  rotation slider's fire-and-forget `change`, the file/data
+   *  entrypoints) is therefore safe and can't produce an unhandled
+   *  rejection. PR #208 Copilot review. */
+  async function renderPreview(): Promise<void> {
+    const source = genState.source
+    if (!source) return
+    const seq = ++genRenderSeq
+    // Mark busy + repaint so the action buttons (Use this thumbnail,
+    // Generate…) disable for the duration — the rotation sliders stay
+    // live so the publisher can keep adjusting. The current preview
+    // stays visible (no empty flash). PR #208 Copilot review.
+    genRendering = true
+    paint()
+    const generate = options.generateThumbnail ?? generateGlobeThumbnail
+    try {
+      const blob = await generate(source, {
+        lonOrigin: genState.lon,
+        latOrigin: genState.lat,
+        overlay: genState.overlay,
+      })
+      // A newer rotation started while this one was rendering — drop
+      // this result so the latest one wins. The newer render owns
+      // `genRendering` and will clear it when it settles.
+      if (seq !== genRenderSeq) return
+      genRendering = false
+      const previewUrl = URL.createObjectURL(blob)
+      // WebP is the generator's default output; name + type line up
+      // with the aux image mime gate in `run()`.
+      const file = new File([blob], 'globe-thumbnail.webp', {
+        type: blob.type || 'image/webp',
+      })
+      if (genState.previewUrl) URL.revokeObjectURL(genState.previewUrl)
+      genState = { ...genState, stage: 'preview', previewUrl, file }
+      paint()
+    } catch (err) {
+      // Drop a stale failure superseded by a newer rotation.
+      if (seq !== genRenderSeq) return
+      genRendering = false
+      if (genState.previewUrl) URL.revokeObjectURL(genState.previewUrl)
+      genState = {
+        ...INITIAL_GEN,
+        stage: 'error',
+        errorDetail: err instanceof Error ? err.message : String(err),
+      }
+      paint()
+    }
+  }
+
+  async function runGenerateFromFile(file: File): Promise<void> {
+    const decode = options.decodeImage ?? loadImageFromBlob
+    if (genState.previewUrl) URL.revokeObjectURL(genState.previewUrl)
+    genState = { ...INITIAL_GEN, stage: 'rendering' }
+    paint()
+    try {
+      const img = await decode(file)
+      genState = { ...genState, source: img }
+      await renderPreview()
+    } catch (err) {
+      genState = {
+        ...INITIAL_GEN,
+        stage: 'error',
+        errorDetail: err instanceof Error ? err.message : String(err),
+      }
+      paint()
+    }
+  }
+
+  async function runGenerateFromData(url: string): Promise<void> {
+    const decode = options.decodeImage ?? loadImageFromBlob
+    const fetchBlob =
+      options.fetchImageBlob ??
+      (async (u: string): Promise<Blob> => {
+        const res = await (options.fetchFn ?? globalThis.fetch)(u)
+        if (!res.ok) throw new Error(`Data frame fetch failed (${res.status}).`)
+        return res.blob()
+      })
+    if (genState.previewUrl) URL.revokeObjectURL(genState.previewUrl)
+    genState = { ...INITIAL_GEN, stage: 'rendering' }
+    paint()
+    try {
+      const blob = await fetchBlob(url)
+      const img = await decode(blob)
+      // This IS the dataset's own data — apply its render hints so the
+      // thumbnail matches the live globe.
+      genState = { ...genState, source: img, overlay: options.dataAssetOverlay ?? undefined }
+      await renderPreview()
+    } catch (err) {
+      genState = {
+        ...INITIAL_GEN,
+        stage: 'error',
+        errorDetail: err instanceof Error ? err.message : String(err),
+      }
+      paint()
+    }
+  }
+
+  /** Video path of "Generate from this dataset's data": load the
+   *  dataset's stream into a scrubable handle, then let the publisher
+   *  seek + capture a frame (handled by the `scrubbing`-stage UI). */
+  async function runScrubFromData(url: string): Promise<void> {
+    clearScrub()
+    // Capture the load token AFTER clearScrub bumped it; a later
+    // clearScrub (route change / new load) will bump it again, which
+    // is how we detect this load was cancelled while awaiting.
+    const seq = scrubLoadSeq
+    if (genState.previewUrl) URL.revokeObjectURL(genState.previewUrl)
+    genState = { ...INITIAL_GEN, stage: 'scrubbing' }
+    paint()
+    // Attach the teardown listener BEFORE the await so a route change
+    // during the (possibly slow) HLS load still fires clearScrub and
+    // invalidates this load.
+    window.addEventListener(ROUTE_CHANGE_START_EVENT, clearScrub)
+    const load = options.loadVideoScrub ?? defaultLoadVideoScrub
+    try {
+      const handle = await load(url)
+      if (seq !== scrubLoadSeq) {
+        // Cancelled (route change / a newer load) while loading — drop
+        // this handle instead of re-attaching a stale HLS instance.
+        handle.dispose()
+        return
+      }
+      activeScrub = handle
+      genState = { ...genState, scrub: handle }
+      paint()
+    } catch (err) {
+      // Ignore a stale failure from a cancelled load.
+      if (seq !== scrubLoadSeq) return
+      window.removeEventListener(ROUTE_CHANGE_START_EVENT, clearScrub)
+      genState = {
+        ...INITIAL_GEN,
+        stage: 'error',
+        errorDetail: err instanceof Error ? err.message : String(err),
+      }
+      paint()
+    }
+  }
+
+  function buildFramesBody(s: FramesState): DocumentFragment {
+    const frag = document.createDocumentFragment()
+
+    if (options.currentDataRef && s.stage === 'idle') {
+      const current = document.createElement('p')
+      current.className = 'publisher-asset-uploader-current'
+      const label = document.createElement('span')
+      label.className = 'publisher-asset-uploader-current-label'
+      label.textContent = t('publisher.assetUploader.current')
+      const value = document.createElement('span')
+      value.className = 'publisher-asset-uploader-current-value publisher-field-value-mono'
+      value.textContent = options.currentDataRef
+      current.appendChild(label)
+      current.appendChild(value)
+      frag.appendChild(current)
+    }
+
+    // Multi-file picker — `multiple` lets the publisher select
+    // many frames at once via their OS file picker (Shift-click
+    // or Cmd/Ctrl-click). It does NOT enable folder picking;
+    // that requires the non-standard `webkitdirectory` attribute,
+    // which is uneven across browsers (notably mobile Safari) so
+    // we rely on multi-select instead. Same disabled-while-busy
+    // rule as the single-file picker.
+    const inputRow = document.createElement('div')
+    inputRow.className = 'publisher-asset-uploader-input-row'
+    const inputId = FRAMES_INPUT_ID
+    const label = document.createElement('label')
+    label.className = 'publisher-asset-uploader-label'
+    label.setAttribute('for', inputId)
+    label.textContent = t('publisher.assetUploader.frames.pickFiles')
+    inputRow.appendChild(label)
+
+    const input = document.createElement('input')
+    input.type = 'file'
+    input.id = inputId
+    input.multiple = true
+    input.className = 'publisher-asset-uploader-input'
+    input.accept = [...FRAME_MIME_ALLOWLIST].join(',') + ',.png,.jpg,.jpeg,.webp'
+    input.disabled =
+      s.stage !== 'idle' && s.stage !== 'picked' && s.stage !== 'error'
+    input.addEventListener('change', () => {
+      const picked = Array.from(input.files ?? [])
+      if (picked.length === 0) return
+      handleFramesPicked(picked)
+    })
+    inputRow.appendChild(input)
+    frag.appendChild(inputRow)
+
+    if (s.stage === 'picked' && s.files.length > 0) {
+      // Summary line — frame count + total size. Per the Phase 3pf
+      // plan, the thumbnail strip + manual-order textarea + display-
+      // naming preview are deferred to a follow-up; v1 ships the
+      // count + size as the minimum useful affordance.
+      const total = s.files.reduce((sum, f) => sum + f.size, 0)
+      const summary = document.createElement('p')
+      summary.className = 'publisher-asset-uploader-frames-summary'
+      summary.textContent = t('publisher.assetUploader.frames.frameCount', {
+        count: String(s.files.length),
+        size: formatBytes(total),
+      })
+      frag.appendChild(summary)
+
+      const startBtn = document.createElement('button')
+      startBtn.type = 'button'
+      startBtn.className = 'publisher-button publisher-button-primary'
+      startBtn.textContent = t('publisher.assetUploader.frames.startUpload', {
+        count: String(s.files.length),
+      })
+      startBtn.addEventListener('click', () => {
+        void runFrameSequence(s.files)
+      })
+      frag.appendChild(startBtn)
+    }
+
+    // Stage-specific status line.
+    if (s.stage !== 'idle' && s.stage !== 'picked') {
+      const status = document.createElement('p')
+      status.className = `publisher-asset-uploader-status publisher-asset-uploader-status-${s.stage}`
+      status.setAttribute('role', 'status')
+      status.textContent = framesStatusText(s)
+      frag.appendChild(status)
+    }
+
+    if (
+      s.stage === 'hashing' ||
+      s.stage === 'minting' ||
+      s.stage === 'uploading' ||
+      s.stage === 'completing'
+    ) {
+      const bar = document.createElement('progress')
+      bar.className = 'publisher-asset-uploader-progress'
+      bar.max = 1
+      bar.value = s.progress
+      frag.appendChild(bar)
+    }
+
+    if (s.stage === 'error' && s.errorDetail) {
+      const det = document.createElement('details')
+      det.className = 'publisher-asset-uploader-error-details'
+      const summary = document.createElement('summary')
+      summary.textContent = t('publisher.assetUploader.errorDetails')
+      det.appendChild(summary)
+      const pre = document.createElement('pre')
+      pre.textContent = s.errorDetail
+      det.appendChild(pre)
+      frag.appendChild(det)
+    }
+
+    return frag
+  }
+
+  function framesStatusText(s: FramesState): string {
+    if (s.stage === 'hashing') {
+      return t('publisher.assetUploader.frames.hashingProgress', {
+        current: String(s.current),
+        total: String(s.files.length),
+      })
+    }
+    if (s.stage === 'uploading') {
+      return t('publisher.assetUploader.frames.uploadingProgress', {
+        current: String(s.current),
+        total: String(s.files.length),
+      })
+    }
+    if (s.stage === 'minting') return t('publisher.assetUploader.status.minting')
+    if (s.stage === 'completing') return t('publisher.assetUploader.status.completing')
+    if (s.stage === 'done-transcoding')
+      return t('publisher.assetUploader.status.doneTranscoding')
+    if (s.stage === 'error') return t('publisher.assetUploader.status.error')
+    return ''
+  }
+
+  /**
+   * Validate the picked file list (count + uniform mime), sort
+   * lexicographically by filename, and move into the `picked`
+   * stage so the publisher sees the count + a "Start upload"
+   * button before any network call.
+   */
+  function handleFramesPicked(picked: File[]): void {
+    if (picked.length > MAX_FRAMES) {
+      framesState = {
+        ...INITIAL_FRAMES,
+        stage: 'error',
+        errorDetail: t('publisher.assetUploader.frames.tooMany', {
+          actual: String(picked.length),
+          max: String(MAX_FRAMES),
+        }),
+      }
+      paint()
+      return
+    }
+    // No `picked.length < 1` branch here — the caller (the input
+    // `change` listener) silently returns on an empty selection
+    // (e.g. when the publisher clicks Cancel in the file picker),
+    // so `handleFramesPicked` is only ever invoked with at least
+    // one file. Phase 3pf-review/G — Copilot
+    // discussion_r3263466451 flagged the prior dead `picked.length
+    // < 1` error branch.
+    // Enforce uniform mime — ffmpeg's image-sequence demuxer
+    // expects one extension across the sequence, and the
+    // server-side `validateImageSequenceInit` rejects mixed mimes
+    // anyway. Failing fast here saves the 30+ second hash budget.
+    let firstMime = ''
+    for (const f of picked) {
+      const mime = f.type || mimeFromFilename(f.name)
+      if (!FRAME_MIME_ALLOWLIST.has(mime)) {
+        framesState = {
+          ...INITIAL_FRAMES,
+          stage: 'error',
+          errorDetail: t('publisher.assetUploader.frames.unsupportedMime', {
+            actual: mime || 'unknown',
+          }),
+        }
+        paint()
+        return
+      }
+      if (!firstMime) firstMime = mime
+      else if (mime !== firstMime) {
+        framesState = {
+          ...INITIAL_FRAMES,
+          stage: 'error',
+          errorDetail: t('publisher.assetUploader.frames.mixedMime', {
+            actual: mime,
+            expected: firstMime,
+          }),
+        }
+        paint()
+        return
+      }
+    }
+    // Aggregate-size cap mirrors the server's
+    // `SIZE_IMAGE_SEQUENCE_TOTAL` (10 GB) so a publisher who picks
+    // tens of GB of high-res PNGs fails fast rather than waiting
+    // out the in-browser hash budget before the server rejects.
+    const totalBytes = picked.reduce((sum, f) => sum + f.size, 0)
+    if (totalBytes > MAX_TOTAL_BYTES) {
+      framesState = {
+        ...INITIAL_FRAMES,
+        stage: 'error',
+        errorDetail: t('publisher.assetUploader.frames.totalSizeExceeded', {
+          actual: formatBytes(totalBytes),
+          max: formatBytes(MAX_TOTAL_BYTES),
+        }),
+      }
+      paint()
+      return
+    }
+    // Lexicographic sort by filename. Deterministic encode order
+    // for the typical `frame_00001.png … frame_99999.png` shape;
+    // the manual-order textarea is a deferred follow-up for
+    // publishers whose filenames don't naturally sort.
+    const sorted = [...picked].sort((a, b) => a.name.localeCompare(b.name))
+    framesState = {
+      ...INITIAL_FRAMES,
+      stage: 'picked',
+      files: sorted,
+      mime: firstMime,
+    }
+    paint()
+  }
+
+  /**
+   * Drive the multi-frame upload: hash every frame, build the
+   * canonical source-filenames JSON, POST /asset for the
+   * presigned-URL bundle, parallel-bounded PUT every frame plus
+   * the source-filenames blob, then POST /complete. Outcome is
+   * always `transcoding` mode — frame-source uploads land at the
+   * same /transcode-complete callback the MP4 path uses.
+   */
+  async function runFrameSequence(files: File[]): Promise<void> {
+    if (!options.datasetId) {
+      options.onMissingDataset?.()
+      return
+    }
+    const total = files.length
+    try {
+      // 1. Hash every frame. Serial to keep the in-browser memory
+      //    budget bounded (~8 MB peak per `hashFileSha256` call).
+      framesState = {
+        ...framesState,
+        stage: 'hashing',
+        current: 0,
+        progress: 0,
+      }
+      paint()
+      const frameDigests: Array<{ filename: string; digest: string; size: number }> = []
+      for (let i = 0; i < files.length; i++) {
+        const f = files[i]
+        const digest = await (options.hashFn ?? hashFileSha256)(f)
+        frameDigests.push({ filename: f.name, digest, size: f.size })
+        framesState = {
+          ...framesState,
+          current: i + 1,
+          progress: (i + 1) / total / 2, // hashing is ~half the perceived wait
+        }
+        paint()
+      }
+
+      // 2. Build canonical source-filenames JSON. Stable order +
+      //    minimal whitespace so server-side hash agrees with the
+      //    client hash bit-for-bit. The shape is documented at
+      //    `docs/CATALOG_IMAGE_SEQUENCE_PLAN.md` §"Frames as data".
+      //    Each entry carries the per-frame `digest` so the GHA
+      //    runner can re-hash every downloaded frame and compare —
+      //    without the digest in the canonical JSON, the per-frame
+      //    SHA-256 work we just did in the browser would be wasted
+      //    (the runner would have no claim to verify against).
+      //    The runner's `verifySourceFilenamesBlob` re-hashes the
+      //    whole JSON to confirm the manifest itself is untampered;
+      //    `downloadFrames` then verifies each frame against its
+      //    declared digest. Phase 3pf-review/D — Copilot
+      //    discussion_r3263124234.
+      const sourceFilenames = frameDigests.map((f, index) => ({
+        index,
+        filename: f.filename,
+        digest: f.digest,
+      }))
+      const sourceFilenamesJson = JSON.stringify(sourceFilenames)
+      const sourceFilenamesDigest = await sha256OfString(sourceFilenamesJson)
+
+      // 3. Mint presigned PUTs.
+      framesState = { ...framesState, stage: 'minting', progress: 0.5 }
+      paint()
+      const totalSize = frameDigests.reduce((sum, f) => sum + f.size, 0)
+      const initResult = await publisherSend<ImageSequenceInitResponse>(
+        `/api/v1/publish/datasets/${encodeURIComponent(options.datasetId)}/asset`,
+        {
+          kind: 'data',
+          // Use the mime resolved + asserted-uniform during
+          // handleFramesPicked, not a re-derivation from
+          // files[0].type — by here we already know every file's
+          // mime matches and is in the allowlist. (The prior
+          // fallback to `'image/png'` could mask an invariant
+          // violation by sending a wrong mime to the server.)
+          mime: framesState.mime,
+          frames: frameDigests,
+          size: totalSize,
+          source_filenames_digest: sourceFilenamesDigest,
+        },
+        { fetchFn: options.fetchFn, sleep: options.sleep },
+      )
+      if (!initResult.ok) {
+        return failFrames('mint', initResult)
+      }
+      clearWarmupFlag()
+      const init = initResult.data
+
+      // 4. PUT every frame + the source-filenames blob.
+      //    Parallel-bounded so the browser doesn't open more
+      //    concurrent connections than the per-host cap.
+      if (!init.mock) {
+        framesState = {
+          ...framesState,
+          stage: 'uploading',
+          current: 0,
+          progress: 0.5,
+        }
+        paint()
+        const uploadJobs: Array<() => Promise<void>> = []
+        for (let i = 0; i < init.frames.length; i++) {
+          const mint = init.frames[i]
+          const file = files[i]
+          uploadJobs.push(async () => {
+            await putWithProgress(
+              { method: mint.method, url: mint.url, headers: mint.headers },
+              file,
+              () => {
+                /* per-frame progress isn't shown — N progress bars
+                   would be unusable; the aggregate counter ticks
+                   on completion only. */
+              },
+              options.xhrFactory,
+            )
+            // Stage-guard: a sibling worker may have failed and
+            // transitioned `framesState` into `'error'` while this
+            // PUT was mid-flight (`runBoundedQueue`'s
+            // first-failure-wins only stops workers BETWEEN
+            // iterations; the await above can still resolve after
+            // the error transition). Mutating `current` / `progress`
+            // on top of the error state would surface as a stale
+            // counter overwriting the error banner, so skip the
+            // update unless the stage is still 'uploading'.
+            if (framesState.stage !== 'uploading') return
+            framesState = {
+              ...framesState,
+              current: framesState.current + 1,
+              progress: 0.5 + (framesState.current + 1) / total / 2,
+            }
+            paint()
+          })
+        }
+        await runBoundedQueue(uploadJobs, FRAME_UPLOAD_CONCURRENCY)
+        // PUT the source-filenames blob alongside. JSON body, so
+        // we don't bother with XHR-progress — it's <1 MB and
+        // completes in one round-trip on a typical uplink.
+        // Honour `options.fetchFn` (defaults to globalThis.fetch)
+        // so tests can capture the request without touching the
+        // network, mirroring how `publisherSend` resolves its
+        // fetch implementation.
+        //
+        // Retry on transient failure: if this PUT fails after
+        // every frame has already landed, the publisher is in a
+        // strictly worse spot than a frame failure — the frames
+        // are sitting in R2, the asset_uploads row is still
+        // `'pending'`, and re-picking files mints a fresh
+        // upload_id leaving the prior frames orphaned. Two
+        // retries with short backoffs absorb a network blip;
+        // beyond that we surface the error and the publisher's
+        // recovery is re-pick (the orphan-frames cost is bounded
+        // by the per-upload R2 prefix's lifecycle policy).
+        //
+        // Backoff sequence: 200 ms, 400 ms, 1500 ms — the longer
+        // final backoff was added in 3pf-review/G (Copilot
+        // discussion_r3263466526) because the failure mode here
+        // is asymmetrically expensive (all N frames already in
+        // R2, only the small JSON sidecar left to land), so an
+        // extra second of patience before giving up beats a
+        // forced re-pick + re-hash + re-upload of the whole
+        // batch.
+        const blob = new Blob([sourceFilenamesJson], { type: 'application/json' })
+        const blobFetch = options.fetchFn ?? globalThis.fetch
+        const blobSleep = options.sleep ?? ((ms: number) => new Promise<void>(r => setTimeout(r, ms)))
+        const BLOB_BACKOFFS_MS = [200, 400, 1500]
+        let blobErr: Error | null = null
+        for (let attempt = 0; attempt < BLOB_BACKOFFS_MS.length + 1; attempt++) {
+          blobErr = null
+          try {
+            const blobRes = await blobFetch(init.source_filenames.url, {
+              method: init.source_filenames.method,
+              headers: init.source_filenames.headers,
+              body: blob,
+            })
+            if (blobRes.ok) {
+              blobErr = null
+              break
+            }
+            blobErr = new Error(`source-filenames PUT returned ${blobRes.status}`)
+          } catch (err) {
+            blobErr = err instanceof Error ? err : new Error(String(err))
+          }
+          if (attempt < BLOB_BACKOFFS_MS.length) {
+            await blobSleep(BLOB_BACKOFFS_MS[attempt])
+          }
+        }
+        if (blobErr) throw blobErr
+      }
+
+      // 5. Finalize.
+      framesState = { ...framesState, stage: 'completing', progress: 1 }
+      paint()
+      const completeResult = await publisherSend<AssetCompleteResponse>(
+        `/api/v1/publish/datasets/${encodeURIComponent(options.datasetId)}/asset/${init.upload_id}/complete`,
+        {},
+        { fetchFn: options.fetchFn, sleep: options.sleep },
+      )
+      if (!completeResult.ok) {
+        return failFrames('complete', completeResult)
+      }
+      framesState = { ...framesState, stage: 'done-transcoding', progress: 1 }
+      paint()
+      // Frame-source completion always lands in transcoding mode —
+      // the dispatch fires alongside the stamp.
+      options.onUploaded({ mode: 'transcoding' })
+    } catch (err) {
+      framesState = {
+        ...framesState,
+        stage: 'error',
+        errorDetail: err instanceof Error ? err.message : String(err),
+      }
+      paint()
+    }
+  }
+
+  function failFrames<T>(
+    stage: 'mint' | 'complete',
+    result: PublisherSendResult<T>,
+  ): void {
+    if (result.ok) return
+    if (result.kind === 'session') {
+      const outcome = handleSessionError({ navigate: options.navigate })
+      // Always clear progress state on a session error — even if
+      // the handler triggered a redirect/navigate, the UI may
+      // briefly stay mounted while the new page loads, and the
+      // prior `'minting' / 'uploading' / 'completing'` stage text
+      // would otherwise display indefinitely if for any reason
+      // the navigation didn't unmount the component. The
+      // `'show-error'` branch surfaces the typed
+      // `sessionExpired` message; the redirect branch falls back
+      // to a neutral error so the publisher sees something
+      // meaningful while they wait. Phase 3pf-review/G — Copilot
+      // discussion_r3263466461.
+      framesState = {
+        ...framesState,
+        stage: 'error',
+        errorDetail:
+          outcome === 'show-error'
+            ? t('publisher.assetUploader.sessionExpired')
+            : t('publisher.assetUploader.status.error'),
+      }
+      paint()
+      return
+    }
+    let detail: string
+    if (result.kind === 'validation') {
+      detail = result.errors.map(e => `${e.field}: ${e.message}`).join('; ')
+    } else if (result.kind === 'server') {
+      detail = `${stage}: HTTP ${result.status ?? '?'} ${result.body ?? ''}`
+    } else {
+      detail = `${stage}: ${result.kind}`
+    }
+    framesState = { ...framesState, stage: 'error', errorDetail: detail }
+    paint()
+  }
+
+  async function run(file: File): Promise<void> {
+    if (!options.datasetId) {
+      options.onMissingDataset?.()
+      return
+    }
+    // Browsers sometimes report `File.type === ''` for files
+    // dragged from certain OS file managers, or for ext-only
+    // matches. Fall back to deriving the MIME from the filename
+    // extension before checking — otherwise valid uploads
+    // fail at the client gate before the server can speak.
+    // Fix for PR #112 Copilot #3.
+    //
+    // `image/jpg` → `image/jpeg` normalization: a few legacy
+    // browsers / OS file managers stamp `image/jpg` on JPEG
+    // files. `mimeAcceptedForFormat` recognises both as
+    // matching a JPEG-format dataset, but the server's
+    // /asset init allowlist only accepts the canonical
+    // `image/jpeg`. Without normalisation here the client
+    // gate passes and the server then 400s at mint time —
+    // confusing dead-end UX. Normalise to the canonical form
+    // before either the gate check or the request body so
+    // both halves agree. PR #112 followup.
+    const rawMime = file.type || mimeFromFilename(file.name)
+    const effectiveMime = rawMime === 'image/jpg' ? 'image/jpeg' : rawMime
+    // `data` uploads must match the dataset's declared format;
+    // auxiliary (thumbnail / legend) uploads just have to be one of
+    // the supported image mimes.
+    const mimeOk =
+      kind === 'data'
+        ? mimeAcceptedForFormat(effectiveMime, options.format)
+        : AUX_IMAGE_MIMES.has(effectiveMime)
+    if (!mimeOk) {
+      state = {
+        ...INITIAL,
+        stage: 'error',
+        statusKey: 'publisher.assetUploader.status.error',
+        errorDetail:
+          kind === 'data'
+            ? t('publisher.assetUploader.mimeMismatch', {
+                actual: effectiveMime || 'unknown',
+                expected: options.format,
+              })
+            : t('publisher.assetUploader.mimeNotImage', {
+                actual: effectiveMime || 'unknown',
+              }),
+      }
+      paint()
+      return
+    }
+
+    try {
+      // 1. Hash.
+      state = { ...state, stage: 'hashing', progress: 0, statusKey: STAGE_STATUS_KEY.hashing }
+      paint()
+      const digest = await (options.hashFn ?? hashFileSha256)(file)
+
+      // 2. Mint presigned PUT.
+      state = { ...state, stage: 'minting', statusKey: STAGE_STATUS_KEY.minting }
+      paint()
+      const initResult = await publisherSend<AssetInitResponse>(
+        `/api/v1/publish/datasets/${encodeURIComponent(options.datasetId)}/asset`,
+        {
+          kind,
+          mime: effectiveMime,
+          size: file.size,
+          content_digest: digest,
+        },
+        { fetchFn: options.fetchFn, sleep: options.sleep },
+      )
+      if (!initResult.ok) {
+        return fail('mint', initResult)
+      }
+      clearWarmupFlag()
+      const init = initResult.data
+
+      // 3. PUT to R2 via XHR (for upload-progress events).
+      if (!init.mock) {
+        state = { ...state, stage: 'uploading', progress: 0, statusKey: STAGE_STATUS_KEY.uploading }
+        paint()
+        await putWithProgress(init.r2, file, fraction => {
+          state = { ...state, progress: fraction }
+          paint()
+        }, options.xhrFactory)
+      }
+
+      // 4. Finalize.
+      state = {
+        ...state,
+        stage: 'completing',
+        progress: 1,
+        statusKey: STAGE_STATUS_KEY.completing,
+      }
+      paint()
+      const completeResult = await publisherSend<AssetCompleteResponse>(
+        `/api/v1/publish/datasets/${encodeURIComponent(options.datasetId)}/asset/${init.upload_id}/complete`,
+        {},
+        { fetchFn: options.fetchFn, sleep: options.sleep },
+      )
+      if (!completeResult.ok) {
+        return fail('complete', completeResult)
+      }
+
+      // 5. Wire the outcome up to the parent.
+      const isTranscoding = completeResult.data.transcoding === true
+      if (isTranscoding) {
+        state = {
+          ...state,
+          stage: 'done-transcoding',
+          progress: 1,
+          statusKey: STAGE_STATUS_KEY['done-transcoding'],
+        }
+        paint()
+        options.onUploaded({ mode: 'transcoding' })
+      } else {
+        // Non-transcoding completion: the server has stamped the
+        // relevant `*_ref` (`data_ref` for a direct image upload,
+        // `thumbnail_ref` / `legend_ref` for an aux upload) on the
+        // row and echoes the updated dataset back. A missing value
+        // here means the response shape is wrong or the row didn't
+        // actually update — treat it as a failure rather than
+        // reporting success with an empty ref. An empty ref would
+        // later be dropped by the form's save (silently losing the
+        // upload the publisher just did) or, worse, used to
+        // overwrite an existing ref. PR #207 Copilot review.
+        const ref =
+          kind === 'data'
+            ? completeResult.data.dataset.data_ref
+            : kind === 'thumbnail'
+              ? completeResult.data.dataset.thumbnail_ref
+              : completeResult.data.dataset.legend_ref
+        if (!ref) {
+          state = {
+            ...state,
+            stage: 'error',
+            statusKey: STAGE_STATUS_KEY.error,
+            errorDetail: t('publisher.assetUploader.completeMissingRef'),
+          }
+          paint()
+          return
+        }
+        state = {
+          ...state,
+          stage: 'done-direct',
+          progress: 1,
+          statusKey: STAGE_STATUS_KEY['done-direct'],
+        }
+        paint()
+        if (kind === 'data') {
+          options.onUploaded({ mode: 'direct', dataRef: ref })
+        } else {
+          // Aux upload — hand the new ref back so the parent form
+          // mirrors it into its manual input + state.
+          options.onUploaded({ mode: 'aux', kind, ref })
+        }
+      }
+    } catch (err) {
+      state = {
+        ...state,
+        stage: 'error',
+        statusKey: STAGE_STATUS_KEY.error,
+        errorDetail: err instanceof Error ? err.message : String(err),
+      }
+      paint()
+    }
+  }
+
+  function fail<T>(stage: 'mint' | 'complete', result: PublisherSendResult<T>): void {
+    if (result.ok) return
+    if (result.kind === 'session') {
+      if (handleSessionError({ navigate: options.navigate }) === 'show-error') {
+        state = {
+          ...state,
+          stage: 'error',
+          statusKey: STAGE_STATUS_KEY.error,
+          errorDetail: t('publisher.assetUploader.sessionExpired'),
+        }
+        paint()
+      }
+      return
+    }
+    let detail: string
+    if (result.kind === 'validation') {
+      detail = result.errors.map(e => `${e.field}: ${e.message}`).join('; ')
+    } else if (result.kind === 'server') {
+      detail = `${stage}: HTTP ${result.status ?? '?'} ${result.body ?? ''}`
+    } else {
+      detail = `${stage}: ${result.kind}`
+    }
+    state = { ...state, stage: 'error', statusKey: STAGE_STATUS_KEY.error, errorDetail: detail }
+    paint()
+  }
+
+  paint()
+  return root
+}
+
+/**
+ * Map the dataset's declared format to a sensible `accept`
+ * attribute on the file input so the file picker pre-filters
+ * what the publisher sees. Always permissive enough that the
+ * mime-mismatch check in `run()` is the authoritative gate; the
+ * `accept` attribute is hint-only.
+ */
+function acceptForFormat(format: string): string {
+  switch (format) {
+    case 'video/mp4':
+      return 'video/mp4,.mp4'
+    case 'image/png':
+      return 'image/png,.png'
+    case 'image/jpeg':
+      return 'image/jpeg,.jpg,.jpeg'
+    case 'image/webp':
+      return 'image/webp,.webp'
+    case 'tour/json':
+      return 'application/json,.json'
+    default:
+      return ''
+  }
+}
+
+function mimeAcceptedForFormat(mime: string, format: string): boolean {
+  if (mime === format) return true
+  if (format === 'tour/json' && mime === 'application/json') return true
+  // Some browsers report `image/jpeg` as `image/jpg` historically.
+  if (format === 'image/jpeg' && mime === 'image/jpg') return true
+  return false
+}
+
+/**
+ * Derive a MIME type from a filename when `File.type` is empty
+ * (some browsers report empty MIME for files dragged from
+ * certain OS-side file pickers). Conservative: only the four
+ * shapes the publisher form accepts. Anything unknown returns
+ * empty string so the mime-mismatch gate catches it cleanly.
+ */
+function mimeFromFilename(name: string): string {
+  const lower = name.toLowerCase()
+  if (lower.endsWith('.mp4')) return 'video/mp4'
+  if (lower.endsWith('.png')) return 'image/png'
+  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg'
+  if (lower.endsWith('.webp')) return 'image/webp'
+  if (lower.endsWith('.json')) return 'application/json'
+  return ''
+}
+
+/**
+ * PUT a file to a presigned URL via XHR so the publisher gets
+ * upload-progress events. fetch() doesn't surface request-body
+ * progress, so this stays on XHR even though the rest of the
+ * portal uses fetch.
+ */
+/** Wire shape of the publisher API's image-sequence /asset
+ *  response (Phase 3pf). Mirrors the type returned by the
+ *  route handler in `functions/api/v1/publish/datasets/[id]/asset.ts`. */
+interface ImageSequenceInitResponse {
+  upload_id: string
+  kind: 'data'
+  target: 'r2'
+  frames: Array<{
+    filename: string
+    index: number
+    method: 'PUT'
+    url: string
+    headers: Record<string, string>
+    key: string
+  }>
+  source_filenames: {
+    method: 'PUT'
+    url: string
+    headers: Record<string, string>
+    key: string
+  }
+  expires_at: string
+  mock: boolean
+}
+
+/** SHA-256 of a JS string (UTF-8 bytes). Returns `sha256:<hex>`
+ *  to match the publisher API's claimed-digest format. Used for
+ *  the canonical source-filenames JSON the publisher PUTs as a
+ *  sibling of the frames; the GHA runner re-verifies. */
+async function sha256OfString(s: string): Promise<string> {
+  const bytes = new TextEncoder().encode(s)
+  const buf = await crypto.subtle.digest('SHA-256', bytes)
+  const hex = Array.from(new Uint8Array(buf))
+    .map(b => b.toString(16).padStart(2, '0'))
+    .join('')
+  return `sha256:${hex}`
+}
+
+/** Format bytes for the frame-summary line. Same shape as the
+ *  publisher API's `formatBytes` in `asset-uploads.ts` so the
+ *  client and server agree on cap-message wording. */
+function formatBytes(n: number): string {
+  if (n >= 1024 * 1024 * 1024) return `${(n / (1024 * 1024 * 1024)).toFixed(1)} GB`
+  if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(0)} MB`
+  if (n >= 1024) return `${(n / 1024).toFixed(0)} KB`
+  return `${n} B`
+}
+
+/** Run a list of async jobs through a bounded-concurrency pool.
+ *  The worker functions are invoked in order but resolve in
+ *  whatever order the network returns. First-failure aborts the
+ *  remaining workers — same pattern the runner-side
+ *  `downloadFrames` uses. */
+async function runBoundedQueue(
+  jobs: Array<() => Promise<void>>,
+  concurrency: number,
+): Promise<void> {
+  let cursor = 0
+  let firstError: Error | null = null
+  async function worker(): Promise<void> {
+    while (firstError === null) {
+      const i = cursor++
+      if (i >= jobs.length) return
+      try {
+        await jobs[i]()
+      } catch (err) {
+        if (firstError === null) {
+          firstError = err instanceof Error ? err : new Error(String(err))
+        }
+        return
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: concurrency }, () => worker()))
+  if (firstError) throw firstError
+}
+
+function putWithProgress(
+  r2: { method: 'PUT'; url: string; headers: Record<string, string> },
+  file: File,
+  onProgress: (fraction: number) => void,
+  xhrFactory?: () => XMLHttpRequest,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const xhr = (xhrFactory ?? (() => new XMLHttpRequest()))()
+    xhr.open(r2.method, r2.url)
+    for (const [k, v] of Object.entries(r2.headers)) {
+      xhr.setRequestHeader(k, v)
+    }
+    xhr.upload.addEventListener('progress', event => {
+      if (event.lengthComputable) {
+        onProgress(event.loaded / event.total)
+      }
+    })
+    xhr.addEventListener('load', () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        onProgress(1)
+        resolve()
+      } else {
+        reject(new Error(`R2 PUT returned ${xhr.status}: ${xhr.responseText || 'no body'}`))
+      }
+    })
+    xhr.addEventListener('error', () => reject(new Error('R2 PUT failed: network error')))
+    xhr.addEventListener('abort', () => reject(new Error('R2 PUT aborted')))
+    xhr.send(file)
+  })
+}

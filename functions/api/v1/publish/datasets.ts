@@ -16,12 +16,14 @@
 
 import type { CatalogEnv } from '../_lib/env'
 import type { PublisherData } from './_middleware'
+import { writeDatasetAudit } from '../_lib/audit-store'
 import { getNodeIdentity } from '../_lib/catalog-store'
 import {
   createDataset,
   listDatasetsForPublisher,
   type ListOptions,
 } from '../_lib/dataset-mutations'
+import { resolveHttpAssetUrl } from '../_lib/r2-public-url'
 
 const CONTENT_TYPE = 'application/json; charset=utf-8'
 
@@ -66,7 +68,13 @@ export const onRequestGet: PagesFunction<CatalogEnv> = async context => {
     publisher,
     options,
   )
-  return new Response(JSON.stringify({ datasets, next_cursor }), {
+  // Resolve each row's `thumbnail_ref` to a public URL so the list
+  // table can render a thumbnail cell (null when none / unresolvable).
+  const withThumbnails = datasets.map(d => ({
+    ...d,
+    thumbnail_url: resolveHttpAssetUrl(context.env, d.thumbnail_ref),
+  }))
+  return new Response(JSON.stringify({ datasets: withThumbnails, next_cursor }), {
     status: 200,
     headers: { 'Content-Type': CONTENT_TYPE, 'Cache-Control': 'private, no-store' },
   })
@@ -99,6 +107,17 @@ export const onRequestPost: PagesFunction<CatalogEnv> = async context => {
   }
   const result = await createDataset(context.env, publisher, body as Record<string, unknown>)
   if (!result.ok) return validationFailure(result.errors, result.status)
+  await writeDatasetAudit(
+    context.env.CATALOG_DB!,
+    publisher,
+    'dataset.create',
+    result.dataset.id,
+    {
+      slug: result.dataset.slug,
+      format: result.dataset.format,
+      visibility: result.dataset.visibility,
+    },
+  )
   return new Response(JSON.stringify({ dataset: result.dataset }), {
     status: 201,
     headers: { 'Content-Type': CONTENT_TYPE, Location: `/api/v1/publish/datasets/${result.dataset.id}` },

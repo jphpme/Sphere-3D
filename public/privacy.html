@@ -437,9 +437,9 @@ footer.site-footer {
       <h2>6. Where the data goes</h2>
       <p>Everything we store runs on <strong>Cloudflare</strong>:</p>
       <ul>
-      <li><strong>Analytics events</strong>: Cloudflare Workers Analytics Engine (90-day
-      hot retention) and Cloudflare R2 object storage (long-term, Iceberg
-      format) for research analysis</li>
+      <li><strong>Analytics events</strong>: Cloudflare Workers Analytics Engine (30–90 day
+      hot retention) and Cloudflare R2 object storage (long-term archive)
+      plus Cloudflare D1 aggregate tables for product analytics</li>
       <li><strong>Feedback submissions and Orbit ratings</strong>: Cloudflare D1 (a
       managed SQLite database)</li>
       <li><strong>Crash reports</strong>: Cloudflare D1, in a separate table from feedback</li>
@@ -469,6 +469,13 @@ footer.site-footer {
       <li>On desktop, any offline datasets you download (kept in the app&#39;s
       local data folder until you delete them)</li>
       <li>Your telemetry mode preference</li>
+      <li><strong>Visit memory</strong> — the datasets you&#39;ve opened, and roughly how
+      long you spent reading each one. This powers the &quot;Continue
+      exploring&quot; row and the &quot;new since your last visit&quot; badge in the
+      catalog. It is stored only in your browser (localStorage) and is
+      <strong>never sent to our servers</strong>. You can wipe it any time with
+      <strong>Tools → Privacy → Clear visit history</strong>, and clearing site data
+      removes it too.</li>
       </ul>
       <hr>
       <h2>7. How we use the data</h2>

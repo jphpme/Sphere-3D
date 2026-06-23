@@ -27,6 +27,8 @@ import { setVrTourOverlaySink } from '../ui/tourUI'
 import { getChatVoiceState, startChatVoiceQuestion } from '../ui/chatUI'
 import { createVrInteraction, type VrInteractionHandle } from './vrInteraction'
 import { createVrLoading, type VrLoadingHandle } from './vrLoading'
+import { createVrZoomOverlay, type VrZoomOverlayHandle } from '../ui/vrZoomOverlay'
+import { MAX_GLOBE_SCALE, MIN_GLOBE_SCALE } from './vrScene'
 import { createVrPlacement, liftedPlacementPosition, type VrPlacementHandle } from './vrPlacement'
 import {
   clearPersistedAnchorHandle,
@@ -37,19 +39,11 @@ import { getBordersVisible, getGazeFollowOverlays } from '../utils/viewPreferenc
 import { logger } from '../utils/logger'
 import { emit, emitCameraSettled } from '../analytics'
 import type { VrExitReason } from '../types'
-
-/** Coarse device classifier for `vr_session_started.device_class`.
- * Substring match on the UA — only the bucket leaves this function;
- * the raw UA is never emitted. Order matters: more-specific
- * variants come first so `Quest Pro` doesn't fall through to the
- * generic `Quest` branch. */
-function classifyXrDevice(ua: string): string {
-  if (/Quest\s*Pro/i.test(ua)) return 'quest-pro'
-  if (/Quest/i.test(ua)) return 'quest'
-  if (/Vision/i.test(ua)) return 'vision-pro'
-  if (/Windows|Mac OS X|Macintosh|X11|Linux/i.test(ua)) return 'pcvr'
-  return 'unknown'
-}
+import {
+  classifyXrDevice,
+  getInputArchetype,
+  type VrInputArchetype,
+} from '../utils/vrCapability'
 
 /**
  * Contract the hosting app must provide. Pull-based: the session
@@ -218,6 +212,11 @@ interface ActiveSession {
   camera: THREE.PerspectiveCamera
   scene: VrSceneHandle
   hud: VrHudHandle
+  /** Teardown hook for the DOM zoom slider — removes the
+   *  `inputsourceschange` listener and disposes the overlay if one
+   *  is currently mounted. Idempotent. Always present (a no-op for
+   *  controller-only sessions that never mount the overlay). */
+  disposeZoomOverlay: () => void
   interaction: VrInteractionHandle
   /** In-VR dataset browse panel. */
   browse: VrBrowseHandle
@@ -416,10 +415,18 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     sessionStartedAtWall: number
     frames: number
     exitReason: VrExitReason
+    /** Coarse input archetype the device is using. Resolves lazily —
+     * screen-tap (handheld AR) sessions report zero input sources
+     * until the first tap, so this starts as `'unknown'` and is
+     * updated by the `inputsourceschange` listener wired below.
+     * Consumed by future PRs to gate alternative UX (DOM zoom
+     * slider, HUD exit button) for non-controller devices. */
+    inputClass: VrInputArchetype
   } = {
     sessionStartedAtWall: 0,
     frames: 0,
     exitReason: 'user',
+    inputClass: 'unknown',
   }
 
   const THREE_ = await loadThree()
@@ -474,6 +481,12 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     // UX. Optional because not all UAs implement anchors yet.
     optionalFeatures.push('anchors')
   }
+  // Reference-space contract for the rest of the session. `local-floor`
+  // gives the globe a stable Y above the user's actual floor; `local`
+  // anchors at the head pose at session start with no floor offset.
+  // The session-features list, the default GLOBE_POSITION, and the
+  // placement reference space all key off this — keep them consistent.
+  let referenceSpaceType: 'local-floor' | 'local' = 'local-floor'
   let session: XRSession
   let referenceSpaceType: XRReferenceSpaceType = 'local-floor'
   try {
@@ -482,22 +495,32 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
       ...(optionalFeatures.length > 0 ? { optionalFeatures } : {}),
     })
   } catch (err) {
-    if (!isAr) {
+    // Only retry on a feature-unsupported failure (HoloLens 2 Edge in
+    // early builds, certain WebXR polyfills). Permission denial,
+    // transient hardware errors, and any other failure mode propagate
+    // as-is — re-prompting the user a second time would be both
+    // annoying and confusing, and would mask the original error. The
+    // narrowed retry also keeps `vr_session_started.entry_load_ms`
+    // honest on the user-denial path (otherwise a deny → retry →
+    // deny would double the latency).
+    const isFeatureUnsupported =
+      err instanceof DOMException && err.name === 'NotSupportedError'
+    if (!isFeatureUnsupported) {
       canvas.remove()
       renderer.dispose()
       throw err instanceof Error ? err : new Error(String(err))
     }
-
-    logger.debug('[VR] AR local-floor session request failed; retrying with local reference space:', err)
-    referenceSpaceType = 'local'
+    logger.debug('[VR] local-floor unavailable, retrying with local:', err)
     try {
       session = await navigator.xr.requestSession(sessionMode, {
+        requiredFeatures: ['local'],
         ...(optionalFeatures.length > 0 ? { optionalFeatures } : {}),
       })
-    } catch (fallbackErr) {
+      referenceSpaceType = 'local'
+    } catch (retryErr) {
       canvas.remove()
       renderer.dispose()
-      throw fallbackErr instanceof Error ? fallbackErr : new Error(String(fallbackErr))
+      throw retryErr instanceof Error ? retryErr : new Error(String(retryErr))
     }
   }
 
@@ -526,10 +549,32 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     mode,
     device_class: classifyXrDevice(
       typeof navigator !== 'undefined' ? navigator.userAgent : '',
+      mode,
     ),
     entry_load_ms: Math.max(0, sessionTelemetry.sessionStartedAtWall - entryStartedAtWall),
     layer_id: ctx.getDatasetId() ?? '',
   })
+
+  // Resolve the input archetype lazily. Handheld-AR sessions (Android
+  // + ARCore) report zero input sources at session start — a
+  // transient `screen` source only appears on the user's first tap —
+  // so an at-start snapshot would always read `'unknown'` and the
+  // dependent UX (DOM zoom slider, HUD exit button) would never
+  // mount. Re-resolving on every `inputsourceschange` lets the
+  // archetype settle as inputs come and go (controllers wake on
+  // pickup, hand-tracking toggles in/out on Quest, transient pointers
+  // fire per pinch on Vision Pro).
+  const updateInputClass = (): void => {
+    const next = getInputArchetype(session)
+    if (next !== sessionTelemetry.inputClass) {
+      logger.debug(
+        `[VR] inputClass: ${sessionTelemetry.inputClass} -> ${next}`,
+      )
+      sessionTelemetry.inputClass = next
+    }
+  }
+  updateInputClass()
+  session.addEventListener('inputsourceschange', updateInputClass)
 
   // Lazy-load the controller-model addon alongside Three.js. The
   // factory fetches per-controller glTF models from a CDN at runtime
@@ -550,7 +595,7 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
   // --- Build the scene ---
   // AR mode → transparent background so the passthrough camera feed
   // shows behind everything we render.
-  const scene = createVrScene(THREE_, isAr)
+  const scene = createVrScene(THREE_, isAr, referenceSpaceType)
   const hud = createVrHud(THREE_)
   scene.scene.add(hud.mesh)
 
@@ -642,16 +687,13 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
   let placementRefSpace: XRReferenceSpace | null = null
   if (isAr) {
     try {
+      // Use the same reference space the session was actually
+      // granted. Requesting `local-floor` here when the session was
+      // granted only `local` would fail every time on the fallback
+      // path and leave anchor restoration silently broken.
       placementRefSpace = await session.requestReferenceSpace(referenceSpaceType)
     } catch (err) {
       logger.debug(`[VR] ${referenceSpaceType} reference space unavailable:`, err)
-      if (referenceSpaceType !== 'local') {
-        try {
-          placementRefSpace = await session.requestReferenceSpace('local')
-        } catch (fallbackErr) {
-          logger.debug('[VR] local reference space unavailable:', fallbackErr)
-        }
-      }
     }
 
     if ('requestHitTestSource' in session) {
@@ -1024,12 +1066,46 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     },
   })
 
+  // --- Phase 1 phone-AR zoom slider ---
+  // Mount the DOM zoom overlay reactively when `inputClass` resolves
+  // to `screen`. Controller sessions never see it (their thumbstick
+  // already does this job); transient-pointer devices get widened in
+  // Phase 2 PR 4. The listener runs the sync now (in case inputClass
+  // resolved during the slow Three.js + setSession path above) and
+  // on every subsequent inputsourceschange.
+  let zoomOverlay: VrZoomOverlayHandle | null = null
+  const syncZoomOverlay = (): void => {
+    const wantOverlay = sessionTelemetry.inputClass === 'screen'
+    if (wantOverlay && !zoomOverlay) {
+      zoomOverlay = createVrZoomOverlay({
+        onZoom: (raw) => {
+          const clamped = Math.max(MIN_GLOBE_SCALE, Math.min(MAX_GLOBE_SCALE, raw))
+          scene.globe.scale.setScalar(clamped)
+        },
+        initialScale: scene.globe.scale.x,
+        minScale: MIN_GLOBE_SCALE,
+        maxScale: MAX_GLOBE_SCALE,
+      })
+      zoomOverlay.mount(document.body)
+    } else if (!wantOverlay && zoomOverlay) {
+      zoomOverlay.dispose()
+      zoomOverlay = null
+    }
+  }
+  syncZoomOverlay()
+  session.addEventListener('inputsourceschange', syncZoomOverlay)
+
   active = {
     session,
     renderer,
     camera,
     scene,
     hud,
+    disposeZoomOverlay: () => {
+      session.removeEventListener('inputsourceschange', syncZoomOverlay)
+      zoomOverlay?.dispose()
+      zoomOverlay = null
+    },
     browse,
     tourControls,
     tourOverlay,
@@ -1368,6 +1444,7 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     // onFlyTo handler).
     cancelFlyTo()
     a.interaction.dispose()
+    a.disposeZoomOverlay()
     a.hud.dispose()
     a.browse.dispose()
     a.scene.scene.remove(a.tourControls.mesh)

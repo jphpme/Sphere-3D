@@ -23,24 +23,82 @@
 import type { CustomLayerInterface } from 'maplibre-gl'
 import type { Map as MaplibreMap } from 'maplibre-gl'
 import { getSunPosition } from '../utils/time'
+import {
+  getShaderSettings,
+  onShaderSettingsChange,
+} from './shaderSettingsService'
 import { logger } from '../utils/logger'
-import { getCloudTextureUrl } from '../utils/deviceCapability'
+import { getCloudTextureUrl, isMobile } from '../utils/deviceCapability'
 import { reportError } from '../analytics'
+import type { DatasetOverlayOptions } from '../types'
+import {
+  ATMOSPHERE_GLSL_CONSTANTS,
+  ATMOSPHERE_GLSL_DENSITY,
+  ATMOSPHERE_GLSL_PHASE,
+  ATMOSPHERE_GLSL_INTERSECT,
+  ATMOSPHERE_GLSL_TONEMAP,
+  ATMOSPHERE_STEPS_HIGH,
+  ATMOSPHERE_STEPS_MOBILE,
+  ATMOSPHERE_RADIUS_FACTOR,
+  PLANET_RADIUS_KM,
+  buildAtmosphereRaymarchGlsl,
+} from './atmosphereConstants'
+import { computeTransmittanceLut } from './atmosphereLut'
+import { EARTH_ASSET_BASE } from '../config/endpoints'
+
+// Pick step counts once at module load. The shader source is a
+// top-level constant in this file (compiled when the layer is
+// first added to a map), so this matches the lifetime of the
+// program. If the user resizes a desktop browser to phone width
+// the shader doesn't re-compile — fine for this build's audience.
+const ATMOSPHERE_STEPS = isMobile() ? ATMOSPHERE_STEPS_MOBILE : ATMOSPHERE_STEPS_HIGH
 
 // --- Texture URLs ---
 const SPECULAR_MAP_URL = '/assets/Earth_Specular_2K.jpg'
+// §7.2 normal-map asset. Tangent-space encoding (R/G/B = X/Y/Z of
+// the surface normal in [0,255]), equirectangular projection.
+// Hosted on the same CloudFront + S3 path the VR diffuse / lights
+// tiers use (see EARTH_TEXTURE_BASE in photorealEarth.ts) — same
+// `metadata.sosexplorer.gov` bucket fronted by CloudFront.
+//
+// Tiers walked in ascending order, mirroring the existing
+// `loadProgressive` ladder for the diffuse / night-lights maps:
+// each successful tier replaces the bound texture (re-uploads via
+// texImage2D into the same `bumpTex` handle, so no GPU object
+// churn), regenerates mipmaps, and triggers a repaint. On a 404
+// or network error, progression stops and the most recently
+// loaded tier stays applied — so a fresh stack with only the 8K
+// uploaded still works, and a bandwidth-constrained client that
+// times out fetching 4K keeps the 2K bump it already has.
+const NORMAL_MAP_URLS = [
+  `${EARTH_ASSET_BASE}/earth_normal_2048.jpg`,
+  `${EARTH_ASSET_BASE}/earth_normal_4096.jpg`,
+  `${EARTH_ASSET_BASE}/earth_normal_8192.jpg`,
+]
 const CLOUD_TEXTURE_URL = getCloudTextureUrl()
 
 // --- Rendering constants (matched to earthMaterials.ts) ---
 const NIGHT_LIGHT_STRENGTH = 0.5
-const NIGHT_DARKENING = 0.03 // how dark the night side gets (before city lights)
+const NIGHT_DARKENING = 0.01 // how dark the night side gets (before city lights)
 const CLOUD_RADIUS = 1.005   // slightly above globe surface
 const CLOUD_OPACITY = 0.65
 const CLOUD_ALPHA_GAMMA = 1.8
 const CLOUD_NIGHT_DARKENING = 0.08
 const SPECULAR_SHININESS = 40.0
-const SPECULAR_STRENGTH = 0.6
+// Specular strength moved to shaderSettingsService (§7.2) — the
+// shipped default lives in SHADER_DEFAULTS there, and the live
+// value flows through Tools → Display preset clicks + the
+// `?tune=shader` slider page. Pre-§7.2 value was 0.60 (kept as
+// the Tools-menu "Comfortable" preset, slightly reduced to 0.55
+// per Adrian's "reduce specular" ask).
 const STAR_BRIGHTNESS = 0.2
+/**
+ * Multiplier on the raymarched scattering colour before additive
+ * blend. The raymarch produces HDR values that ACES compresses to
+ * [0,1]; this knob lets us dial down the limb glow without changing
+ * the physical model. 1.0 = full strength.
+ */
+const ATMOSPHERE_INTENSITY = 1.0
 const SKYBOX_FACES = ['px', 'nx', 'py', 'ny', 'pz', 'nz'] as const
 const SKYBOX_URL_BASE = '/assets/skybox/'
 
@@ -95,6 +153,94 @@ function invertMat4(out: Float32Array, m: ArrayLike<number>): boolean {
   out[10]=(a30*b04-a31*b02+a33*b00)*det;out[11]=(a21*b02-a20*b04-a23*b00)*det
   out[12]=(a11*b07-a10*b09-a12*b06)*det;out[13]=(a00*b09-a01*b07+a02*b06)*det
   out[14]=(a31*b01-a30*b03-a32*b00)*det;out[15]=(a20*b03-a21*b01+a22*b00)*det
+  return true
+}
+
+// --- Camera position extraction ---
+//
+// MapLibre exposes the projection-view matrix (`uMatrix`) but no
+// direct camera position. For Tier-2 raymarching we need the camera
+// position in the same ECEF unit-sphere coordinate frame as the
+// rendered globe so the ray geometry is correct at any zoom level.
+//
+// Method: two view rays through clip space (one centred, one
+// off-axis) meet at the camera for a perspective projection. We
+// invert `uMatrix`, project two pairs of clip-space points through
+// it to get four world-space points, then find the closest point on
+// the two world-space lines — that point is the camera.
+
+const _invMatrixScratch = new Float32Array(16)
+const _projScratch1 = new Float32Array(3)
+const _projScratch2 = new Float32Array(3)
+const _projScratch3 = new Float32Array(3)
+const _projScratch4 = new Float32Array(3)
+
+function unprojectClip(
+  invM: Float32Array, x: number, y: number, z: number, out: Float32Array,
+): boolean {
+  const w = invM[3] * x + invM[7] * y + invM[11] * z + invM[15]
+  // Near-zero w means the clip-space point sits on the projective
+  // infinity plane (camera origin under perspective). Bail rather
+  // than produce ±Inf / NaN that would propagate into uniforms.
+  if (Math.abs(w) < 1e-10) return false
+  const iw = 1 / w
+  out[0] = (invM[0] * x + invM[4] * y + invM[8] * z + invM[12]) * iw
+  out[1] = (invM[1] * x + invM[5] * y + invM[9] * z + invM[13]) * iw
+  out[2] = (invM[2] * x + invM[6] * y + invM[10] * z + invM[14]) * iw
+  return true
+}
+
+/**
+ * Camera position in the world-space coord frame `matrix` projects
+ * from. For MapLibre's globe view that's ECEF unit-sphere coords
+ * (planet radius = 1). Caller scales to km if needed.
+ *
+ * Writes into `out` and returns `true` on success. Returns `false`
+ * (without touching `out`) if the matrix is singular, any
+ * unprojection lands on the projective-infinity plane, or the two
+ * world-space rays are parallel — caller must skip the atmosphere
+ * pass in that case. Falling back to (0, 0, 0) would put the
+ * raymarch's ray origin at the planet centre, which produces
+ * extreme artifacts rather than a clean degradation.
+ */
+function computeCameraWorldPosFromMatrix(
+  matrix: ArrayLike<number>, out: [number, number, number],
+): boolean {
+  if (!invertMat4(_invMatrixScratch, matrix)) return false
+  if (
+    !unprojectClip(_invMatrixScratch, 0,   0, -1, _projScratch1) ||
+    !unprojectClip(_invMatrixScratch, 0,   0,  1, _projScratch2) ||
+    !unprojectClip(_invMatrixScratch, 0.5, 0, -1, _projScratch3) ||
+    !unprojectClip(_invMatrixScratch, 0.5, 0,  1, _projScratch4)
+  ) {
+    return false
+  }
+
+  const d1x = _projScratch2[0] - _projScratch1[0]
+  const d1y = _projScratch2[1] - _projScratch1[1]
+  const d1z = _projScratch2[2] - _projScratch1[2]
+  const d2x = _projScratch4[0] - _projScratch3[0]
+  const d2y = _projScratch4[1] - _projScratch3[1]
+  const d2z = _projScratch4[2] - _projScratch3[2]
+  const ex = _projScratch3[0] - _projScratch1[0]
+  const ey = _projScratch3[1] - _projScratch1[1]
+  const ez = _projScratch3[2] - _projScratch1[2]
+
+  const d1d1 = d1x * d1x + d1y * d1y + d1z * d1z
+  const d1d2 = d1x * d2x + d1y * d2y + d1z * d2z
+  const d2d2 = d2x * d2x + d2y * d2y + d2z * d2z
+  const ed1 = ex * d1x + ey * d1y + ez * d1z
+  const ed2 = ex * d2x + ey * d2y + ez * d2z
+  const denom = d1d1 * d2d2 - d1d2 * d1d2
+
+  // Parallel rays (orthographic projection) — no perspective
+  // convergence point, no camera position to extract.
+  if (Math.abs(denom) < 1e-10) return false
+
+  const t = (ed1 * d2d2 - ed2 * d1d2) / denom
+  out[0] = _projScratch1[0] + t * d1x
+  out[1] = _projScratch1[1] + t * d1y
+  out[2] = _projScratch1[2] + t * d1z
   return true
 }
 
@@ -175,6 +321,156 @@ function sunDirectionFromLatLng(latDeg: number, lngDeg: number): [number, number
 }
 
 // --- Shader source ---
+
+// Pass 0: replace blend — contrast / saturation post-process (§7.2).
+//
+// Runs FIRST in the earth-tile-layer's render pipeline, before the
+// night-darkening / lights / specular / cloud / atmosphere passes.
+// Captures the existing framebuffer (NASA Blue Marble tiles as drawn
+// by MapLibre) to a screen-space texture, applies the contrast and
+// saturation uniforms, and writes the corrected colour back with a
+// `(ONE, ZERO)` blend — i.e. straight replace. Pass 1 onwards then
+// composites night, lights, glint, clouds, and atmosphere on top of
+// the corrected base. Sphere geometry is used so the colour
+// correction only touches Earth pixels — the skybox / space
+// background outside the sphere is untouched.
+//
+// Uniforms come from shaderSettingsService:
+//   - uContrast    — pivot-around-0.5 contrast (1.0 == identity)
+//   - uSaturation  — luminance-anchored saturation (1.0 == identity)
+// Setting both to 1.0 (the universal identity) leaves the
+// framebuffer byte-equivalent to the un-corrected baseline; the
+// shipped non-1 values bring the look closer to Adrian's Blue Marble
+// reference.
+const colorCorrectVertSrc = `#version 300 es
+  layout(location = 0) in vec3 aPosition;
+  uniform mat4 uMatrix;
+  uniform float uRadiusScale;
+
+  void main() {
+    gl_Position = uMatrix * vec4(aPosition * uRadiusScale, 1.0);
+  }
+`
+
+const colorCorrectFragSrc = `#version 300 es
+  precision highp float;
+  uniform sampler2D uFramebuffer;
+  uniform vec2 uViewportSize;
+  uniform float uContrast;
+  uniform float uSaturation;
+  out vec4 fragColor;
+
+  void main() {
+    vec2 screenUV = gl_FragCoord.xy / uViewportSize;
+    vec3 color = texture(uFramebuffer, screenUV).rgb;
+
+    // Contrast — push values away from / toward 0.5 grey. Identity
+    // at uContrast == 1.0.
+    color = (color - 0.5) * uContrast + 0.5;
+
+    // Saturation — mix between the luma (grayscale) and the original
+    // colour. Identity at uSaturation == 1.0.
+    // Rec. 709 luminance weights (same as the cloud-mask gating in
+    // the specular pass).
+    float luma = dot(color, vec3(0.299, 0.587, 0.114));
+    color = mix(vec3(luma), color, uSaturation);
+
+    fragColor = vec4(clamp(color, 0.0, 1.0), 1.0);
+  }
+`
+
+// Pass 1.5: multiply blend — bump shading from a global normal map (§7.2).
+//
+// Runs after Pass 1 (night darken) but before Pass 2 (city lights),
+// so the bumps shade the diffuse Earth without muddying the city-
+// lights pass. Day-side only — gated by smoothstep on the un-
+// perturbed NdotL so the night side stays uniform and lights read
+// clean.
+//
+// The normal map is an equirectangular, tangent-space encoded image
+// (R/G/B = X/Y/Z of the local-space normal, [0, 255]). We
+// reconstruct the tangent-space normal, build a TBN matrix from the
+// sphere surface normal at the fragment, transform into world
+// space, and recompute NdotL with the perturbed normal. The output
+// is the RATIO between the new and old NdotL — under multiply
+// blend, a ratio >1 brightens the fragment (rough side toward sun)
+// and <1 darkens it (turned away). Mixed back to 1.0 by
+// uBumpStrength so the effect can be tuned via the ?tune=shader
+// page; 0.0 == no bumps, 1.0 == full normal-map shading.
+const bumpVertSrc = `#version 300 es
+  layout(location = 0) in vec3 aPosition;
+  layout(location = 1) in vec3 aNormal;
+  layout(location = 2) in vec2 aUV;
+  uniform mat4 uMatrix;
+  uniform float uRadiusScale;
+  out vec3 vNormal;
+  out vec2 vUV;
+
+  void main() {
+    vNormal = aNormal;
+    vUV = aUV;
+    gl_Position = uMatrix * vec4(aPosition * uRadiusScale, 1.0);
+  }
+`
+
+const bumpFragSrc = `#version 300 es
+  precision highp float;
+  uniform vec3 uSunDir;
+  uniform sampler2D uNormalMap;
+  uniform float uStrength;
+  in vec3 vNormal;
+  in vec2 vUV;
+  out vec4 fragColor;
+
+  void main() {
+    vec3 N = normalize(vNormal);
+
+    // Use the sphere geometry's UV directly — it's already
+    // equirectangular with u=0 at the dateline and v=0 at the
+    // north pole, matching how every other texture in this layer
+    // (Blue Marble, specular, clouds) is sampled. A fragment-
+    // computed vec2(lon, lat) UV would invert V (image y=0 vs
+    // mathematical lat=+PI/2) and put the north-pole normals on
+    // the south-pole pixels.
+    vec2 uv = vUV;
+
+    // Tangent-space normal from the map. Decode each channel from
+    // [0, 1] to [-1, 1], then renormalise so JPEG round-trip and
+    // mipmap-LOD bilinear blending don't leave us with sub-unit
+    // (or super-unit) normals.
+    vec3 tN = normalize(texture(uNormalMap, uv).rgb * 2.0 - 1.0);
+
+    // Build TBN from the sphere surface normal. T points east, B
+    // points north. At the poles, N is colinear with the world-up
+    // axis used to derive T, so we fall back to a perpendicular
+    // up-axis there. Without this guard the cross product
+    // collapses to (0, 0, 0) and the normalize blows the entire
+    // polar cap up into NaN-shaded garbage.
+    vec3 up = abs(N.y) > 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
+    vec3 T = normalize(cross(up, N));
+    vec3 B = cross(N, T);
+    mat3 TBN = mat3(T, B, N);
+
+    vec3 perturbed = normalize(TBN * tN);
+
+    float ndotL_flat = max(0.0, dot(N, uSunDir));
+    float ndotL_pert = max(0.0, dot(perturbed, uSunDir));
+
+    // Day-side mask — night side returns to ratio 1.0 (no change)
+    // so the city-lights pass below sees clean diffuse.
+    float dayMask = smoothstep(0.0, 0.2, ndotL_flat);
+
+    // Ratio. Floor at 0.1 to avoid divide-by-near-zero near the
+    // terminator (where ndotL_flat trends to 0). Clamp the result
+    // so a single pixel can't push the framebuffer to extremes.
+    float ratio = ndotL_pert / max(ndotL_flat, 0.1);
+    float shading = mix(1.0, ratio, uStrength);
+    shading = mix(1.0, shading, dayMask);
+    shading = clamp(shading, 0.5, 1.5);
+
+    fragColor = vec4(vec3(shading), 1.0);
+  }
+`
 
 // Pass 1: multiply blend — darkens night side of existing tiles
 const darkenVertSrc = `#version 300 es
@@ -336,6 +632,11 @@ const specularFragSrc = `#version 300 es
   uniform float uShininess;
   uniform float uStrength;
   uniform float uCloudAlphaGamma;
+  // 1.0 at zoom levels where the cloud pass renders clouds, fading
+  // to 0 as the cloud pass fades. Without this the cloud mask
+  // still suppresses sun glint at high zoom — clouds disappear
+  // visually but their "shadow" stays on the water surface.
+  uniform float uCloudZoomFade;
   in vec3 vNormal;
   in vec2 vUV;
   out vec4 fragColor;
@@ -356,16 +657,95 @@ const specularFragSrc = `#version 300 es
     // Mask by specular map (bright = water/shiny, dark = land/matte)
     float specMask = texture(uSpecMap, vUV).r;
 
-    // Reduce glint under clouds — sample cloud density
+    // Reduce glint under clouds — sample cloud density, gated by
+    // the same zoom-fade the cloud pass uses so the mask matches
+    // what's actually visible.
     vec4 cloudSample = texture(uCloudMask, vUV);
     float cloudLum = dot(cloudSample.rgb, vec3(0.299, 0.587, 0.114));
-    float cloudDensity = pow(cloudLum, uCloudAlphaGamma);
+    float cloudDensity = pow(cloudLum, uCloudAlphaGamma) * uCloudZoomFade;
     spec *= specMask * uStrength * (1.0 - cloudDensity);
 
     // Additive: white highlight
     fragColor = vec4(vec3(spec), 1.0);
   }
 `
+
+// Pass 5: additive blend — atmospheric scattering halo around the globe.
+// Tier-2 bounded raymarch matching `photorealEarth.ts` and the article's
+// "rendering planets" case. The shell mesh sits at exactly the
+// atmosphere boundary (`ATMOSPHERE_RADIUS_FACTOR ≈ 1.0157` from the
+// shared constants) so every front-face fragment is the camera-side
+// entry point for that pixel's ray, and the raymarch in the fragment
+// shader integrates inward.
+const atmosphereVertSrc = `#version 300 es
+  layout(location = 0) in vec3 aPosition;
+  uniform mat4 uMatrix;
+  uniform float uRadiusScale;
+  // Fragment world position in km (planet at origin, radius 6371).
+  // aPosition * uRadiusScale is in ECEF unit-sphere units; scaling
+  // to km lines up with the constants in the shared GLSL block so
+  // density / extinction math is dimensionally clean.
+  out vec3 vWorldPositionKm;
+
+  void main() {
+    vec3 unit = aPosition * uRadiusScale;
+    vWorldPositionKm = unit * ${PLANET_RADIUS_KM.toFixed(1)};
+    gl_Position = uMatrix * vec4(unit, 1.0);
+  }
+`
+
+// GLSL 3.00 ES sampleTransmittanceLut helper. The shared raymarch
+// declares the function; we define it ahead of the raymarch
+// injection. The photorealEarth.ts (Three.js, GLSL 1.00) path
+// defines an equivalent helper using texture2D() instead.
+const atmosphereLutSamplerHelper = /* glsl */ `
+  uniform sampler2D uTransmittanceLut;
+  vec3 sampleTransmittanceLut(vec3 samplePos, vec3 sunDir) {
+    float altitude = length(samplePos) - PLANET_RADIUS;
+    float mu = dot(normalize(samplePos), sunDir);
+    vec2 lutUV = vec2(
+      mu * 0.5 + 0.5,
+      clamp(altitude / ATMOSPHERE_HEIGHT, 0.0, 1.0)
+    );
+    return texture(uTransmittanceLut, lutUV).rgb;
+  }
+`
+
+const atmosphereFragSrc = `#version 300 es
+  precision highp float;
+  uniform vec3 uSunDir;
+  uniform vec3 uCameraPosKm;
+  uniform float uIntensity;
+  in vec3 vWorldPositionKm;
+  out vec4 fragColor;
+  ${ATMOSPHERE_GLSL_CONSTANTS}
+  ${ATMOSPHERE_GLSL_DENSITY}
+  ${ATMOSPHERE_GLSL_PHASE}
+  ${ATMOSPHERE_GLSL_INTERSECT}
+  ${ATMOSPHERE_GLSL_TONEMAP}
+  ${atmosphereLutSamplerHelper}
+  ${buildAtmosphereRaymarchGlsl(ATMOSPHERE_STEPS)}
+
+  void main() {
+    vec3 rayDir = normalize(vWorldPositionKm - uCameraPosKm);
+    // result.rgb = HDR in-scattered light; result.a = view
+    // transmittance scalar. Composition is article-style:
+    // framebuffer becomes  scattered + bg × viewTrans
+    // via blendFunc(ONE, SRC_ALPHA) in the render call.
+    vec4 result = computeAtmosphereScattering(uCameraPosKm, rayDir, uSunDir);
+    fragColor = vec4(acesFilm(result.rgb) * uIntensity, result.a);
+  }
+`
+
+interface AtmosphereProgram {
+  program: WebGLProgram
+  matrixLoc: WebGLUniformLocation | null
+  radiusScaleLoc: WebGLUniformLocation | null
+  sunDirLoc: WebGLUniformLocation | null
+  cameraPosKmLoc: WebGLUniformLocation | null
+  intensityLoc: WebGLUniformLocation | null
+  transmittanceLutLoc: WebGLUniformLocation | null
+}
 
 // Skybox: full-screen pass that samples cubemap faces based on camera rotation
 const skyboxVertSrc = `#version 300 es
@@ -471,9 +851,36 @@ const datasetVertSrc = `#version 300 es
   }
 `
 
+// Dataset overlay fragment shader. Phase 3e/B extends the simple
+// `texture(uDatasetTex, vUV)` passthrough with three modes driven
+// by per-dataset options the loader passes in (sourced from the
+// Phase 3d catalog metadata):
+//
+//   - `uHasBbox`: when true, the dataset is treated as a regional
+//     overlay clipped to `uBbox = (n, s, w, e)` in degrees.
+//     Fragments outside the box are discarded so the base raster
+//     layer shows through; fragments inside are remapped so the
+//     texture STRETCHES to the bbox extent. Antimeridian-crossing
+//     boxes (w > e) are handled — e.g. a Pacific window from
+//     w=170 to e=-170.
+//
+//   - `uLonOrigin` (non-bbox path only): shifts the U coordinate
+//     so a globally-equirectangular texture centered on the
+//     dateline (lonOrigin=±180) wraps correctly. lonOrigin=0
+//     reduces to vUV.x passthrough so legacy datasets render
+//     identically to before 3e/B.
+//
+//   - `uFlipY`: applied last in both paths, flips the V axis for
+//     datasets authored with inverted-Y conventions. Zero SOS
+//     rows use this today but the field is wired for future
+//     publishers.
 const datasetFragSrc = `#version 300 es
   precision highp float;
   uniform sampler2D uDatasetTex;
+  uniform bool uHasBbox;
+  uniform vec4 uBbox;        // (n, s, w, e) degrees
+  uniform float uLonOrigin;  // degrees
+  uniform bool uFlipY;
   in vec2 vUV;
   out vec4 fragColor;
 
@@ -504,9 +911,58 @@ const datasetFragSrc = `#version 300 es
   }
 
   void main() {
-    vec4 color = samplePremultipliedBilinear(vUV);
-    if (color.a <= 0.001) discard;
-    fragColor = color;
+    // vUV.y == 0 at north pole, == 1 at south pole (sphere geometry
+    // convention). Derive geographic lat/lon so the bbox math
+    // doesn't have to reason in texture space.
+    float lat = (0.5 - vUV.y) * 180.0;
+    float lon = (vUV.x - 0.5) * 360.0;
+
+    vec2 sampleUV;
+    if (uHasBbox) {
+      float n = uBbox.x;
+      float s = uBbox.y;
+      float w = uBbox.z;
+      float e = uBbox.w;
+
+      // Latitude clip: outside [s, n] → base layer shows through.
+      if (lat > n || lat < s) {
+        discard;
+      }
+
+      float u;
+      if (w <= e) {
+        // Normal (non-wrapping) box.
+        if (lon < w || lon > e) {
+          discard;
+        }
+        u = (lon - w) / (e - w);
+      } else {
+        // Antimeridian-crossing box: a fragment is inside if its
+        // longitude is east of w OR west of e.
+        float span = (360.0 - w) + e;
+        if (lon >= w) {
+          u = (lon - w) / span;
+        } else if (lon <= e) {
+          u = (lon + 360.0 - w) / span;
+        } else {
+          discard;
+        }
+      }
+
+      // Latitude → V with image convention (n on top → V=0).
+      float v = (n - lat) / (n - s);
+      if (uFlipY) v = 1.0 - v;
+      sampleUV = vec2(u, v);
+    } else {
+      // Full-globe path. lonOrigin shifts the U axis; fract()
+      // wraps so a sample at lon < lonOrigin pulls from the
+      // texture's right edge (and vice versa).
+      float u = fract((lon - uLonOrigin) / 360.0 + 0.5);
+      float v = uFlipY ? (1.0 - vUV.y) : vUV.y;
+      sampleUV = vec2(u, v);
+    }
+
+    fragColor = texture(uDatasetTex, sampleUV);
   }
 `
 
@@ -644,6 +1100,11 @@ interface DatasetProgram {
   matrixLoc: WebGLUniformLocation | null
   texLoc: WebGLUniformLocation | null
   radiusScaleLoc: WebGLUniformLocation | null
+  /** Phase 3e/B per-dataset overlay uniforms. */
+  hasBboxLoc: WebGLUniformLocation | null
+  bboxLoc: WebGLUniformLocation | null
+  lonOriginLoc: WebGLUniformLocation | null
+  flipYLoc: WebGLUniformLocation | null
 }
 
 interface DayNightProgram {
@@ -651,6 +1112,25 @@ interface DayNightProgram {
   matrixLoc: WebGLUniformLocation | null
   sunDirLoc: WebGLUniformLocation | null
   radiusScaleLoc: WebGLUniformLocation | null
+}
+
+interface ColorCorrectProgram {
+  program: WebGLProgram
+  matrixLoc: WebGLUniformLocation | null
+  radiusScaleLoc: WebGLUniformLocation | null
+  framebufferLoc: WebGLUniformLocation | null
+  viewportSizeLoc: WebGLUniformLocation | null
+  contrastLoc: WebGLUniformLocation | null
+  saturationLoc: WebGLUniformLocation | null
+}
+
+interface BumpProgram {
+  program: WebGLProgram
+  matrixLoc: WebGLUniformLocation | null
+  radiusScaleLoc: WebGLUniformLocation | null
+  sunDirLoc: WebGLUniformLocation | null
+  normalMapLoc: WebGLUniformLocation | null
+  strengthLoc: WebGLUniformLocation | null
 }
 
 interface LightsProgram extends DayNightProgram {
@@ -666,6 +1146,7 @@ interface SpecularProgram extends DayNightProgram {
   shininessLoc: WebGLUniformLocation | null
   strengthLoc: WebGLUniformLocation | null
   cloudAlphaGammaLoc: WebGLUniformLocation | null
+  cloudZoomFadeLoc: WebGLUniformLocation | null
 }
 
 interface CloudsProgram extends DayNightProgram {
@@ -737,10 +1218,16 @@ export interface EarthTileLayerControl {
   setVisible(visible: boolean): void
   /** Inflate effects sphere to cover exaggerated terrain. 0 = no terrain. */
   setTerrainExaggeration(exaggeration: number): void
-  /** Display an equirectangular image as a dataset overlay on the globe. */
-  setDatasetTexture(image: HTMLCanvasElement | HTMLImageElement): void
+  /** Display an equirectangular image as a dataset overlay on the globe.
+   * `options` carries Phase 3d metadata (bbox / lonOrigin / isFlippedInY)
+   * that the dataset-overlay shader applies in 3e/B; until then the
+   * options are stored but the rendering is unchanged. */
+  setDatasetTexture(
+    image: HTMLCanvasElement | HTMLImageElement,
+    options?: DatasetOverlayOptions,
+  ): void
   /** Display an equirectangular video as a dataset overlay on the globe. */
-  setDatasetVideo(video: HTMLVideoElement): void
+  setDatasetVideo(video: HTMLVideoElement, options?: DatasetOverlayOptions): void
   /** Force a one-shot video texture re-upload (e.g. after scrubbing while paused). */
   requestVideoUpdate(): void
   /** Remove the current dataset overlay (image or video). */
@@ -756,10 +1243,22 @@ export function createEarthTileLayer(): EarthTileLayerControl {
   let lights: LightsProgram | null = null
   let specular: SpecularProgram | null = null
   let clouds: CloudsProgram | null = null
+  let atmosphere: AtmosphereProgram | null = null
+  let colorCorrect: ColorCorrectProgram | null = null
+  let bump: BumpProgram | null = null
+  let bumpTex: WebGLTexture | null = null
+  let bumpTexReady = false
   let vao: WebGLVertexArrayObject | null = null
   let indexCount = 0
   let captureTex: WebGLTexture | null = null
   let captureW = 0, captureH = 0
+  // Separate framebuffer-capture texture for the §7.2 colour-correction
+  // pre-pass. Distinct from `captureTex` (Black Marble) — that one is
+  // populated by the standalone capture layer between Black Marble and
+  // Blue Marble, while this one is filled at the start of THIS layer's
+  // render() after Blue Marble has drawn.
+  let baseTex: WebGLTexture | null = null
+  let baseW = 0, baseH = 0
   let specTex: WebGLTexture | null = null
   let specTexReady = false
   let cloudTex: WebGLTexture | null = null
@@ -769,7 +1268,14 @@ export function createEarthTileLayer(): EarthTileLayerControl {
   let datasetTex: WebGLTexture | null = null
   let datasetVideo: HTMLVideoElement | null = null
   let datasetActive = false
+  // Phase 3e: per-dataset overlay options. Stored verbatim from the
+  // caller; the dataset-overlay fragment shader will read them in
+  // 3e/B to clip to bbox / shift U by lonOrigin / flip V when
+  // isFlippedInY is set. Until 3e/B lands, the options are
+  // captured but the rendering ignores them — pure plumbing.
+  let datasetOptions: DatasetOverlayOptions | null = null
   let forceVideoUpdate = false
+  let transmittanceLutTex: WebGLTexture | null = null
   let skyboxProg: WebGLProgram | null = null
   let skyboxInvProjLoc: WebGLUniformLocation | null = null
   let skyboxCameraLoc: WebGLUniformLocation | null = null
@@ -782,10 +1288,20 @@ export function createEarthTileLayer(): EarthTileLayerControl {
   let glRef: WebGL2RenderingContext | null = null
   let mapRef: MaplibreMap | null = null
 
+  // Unsubscribe handle for shader-settings change events (§7.2).
+  // Returned by onShaderSettingsChange in onAdd; called in onRemove
+  // to drop the listener when the layer detaches.
+  let unsubscribeShaderSettings: (() => void) | null = null
+
   // Sun direction — updated each frame from real time, or set externally
   let sunDir: [number, number, number] = [1, 0, 0]
   let sunOverride: { lat: number; lng: number } | null = null
   let visible = true
+
+  // Scratch buffer reused each frame by the atmosphere pass to derive
+  // the camera position in ECEF unit-sphere coords. Lives in closure
+  // scope so per-frame work doesn't allocate.
+  const cameraEcefScratch: [number, number, number] = [0, 0, 0]
 
   // Terrain-aware radius scale — inflates effects sphere to cover exaggerated terrain.
   // Max Earth elevation ~8848m / 6371km radius ≈ 0.00139 normalized.
@@ -811,6 +1327,15 @@ export function createEarthTileLayer(): EarthTileLayerControl {
       // camera rotation automatically so no per-frame updates needed.
       const initSun = getSunPosition(new Date())
       syncAtmosphereLight(_map, initSun.lat, initSun.lng)
+
+      // Subscribe to shader-settings changes (§7.2) so a Tools-menu
+      // specular preset click — or a tuner-page slider drag — re-
+      // renders the globe without waiting for the next camera motion.
+      // The render() function reads the live snapshot each frame, so
+      // we don't need to push uniform values here; just trigger paint.
+      unsubscribeShaderSettings = onShaderSettingsChange(() => {
+        _map.triggerRepaint()
+      })
 
       const gl2 = gl as WebGL2RenderingContext
       glRef = gl2
@@ -886,10 +1411,44 @@ export function createEarthTileLayer(): EarthTileLayerControl {
           matrixLoc: gl2.getUniformLocation(datasetProg, 'uMatrix'),
           texLoc: gl2.getUniformLocation(datasetProg, 'uDatasetTex'),
           radiusScaleLoc: gl2.getUniformLocation(datasetProg, 'uRadiusScale'),
+          hasBboxLoc: gl2.getUniformLocation(datasetProg, 'uHasBbox'),
+          bboxLoc: gl2.getUniformLocation(datasetProg, 'uBbox'),
+          lonOriginLoc: gl2.getUniformLocation(datasetProg, 'uLonOrigin'),
+          flipYLoc: gl2.getUniformLocation(datasetProg, 'uFlipY'),
         }
       }
 
       // --- Compile all earth effect shader programs ---
+      const colorCorrectProg = compileProgram(
+        gl2,
+        colorCorrectVertSrc,
+        colorCorrectFragSrc,
+        'colorCorrect',
+      )
+      if (colorCorrectProg) {
+        colorCorrect = {
+          program: colorCorrectProg,
+          matrixLoc: gl2.getUniformLocation(colorCorrectProg, 'uMatrix'),
+          radiusScaleLoc: gl2.getUniformLocation(colorCorrectProg, 'uRadiusScale'),
+          framebufferLoc: gl2.getUniformLocation(colorCorrectProg, 'uFramebuffer'),
+          viewportSizeLoc: gl2.getUniformLocation(colorCorrectProg, 'uViewportSize'),
+          contrastLoc: gl2.getUniformLocation(colorCorrectProg, 'uContrast'),
+          saturationLoc: gl2.getUniformLocation(colorCorrectProg, 'uSaturation'),
+        }
+      }
+
+      const bumpProg = compileProgram(gl2, bumpVertSrc, bumpFragSrc, 'bump')
+      if (bumpProg) {
+        bump = {
+          program: bumpProg,
+          matrixLoc: gl2.getUniformLocation(bumpProg, 'uMatrix'),
+          radiusScaleLoc: gl2.getUniformLocation(bumpProg, 'uRadiusScale'),
+          sunDirLoc: gl2.getUniformLocation(bumpProg, 'uSunDir'),
+          normalMapLoc: gl2.getUniformLocation(bumpProg, 'uNormalMap'),
+          strengthLoc: gl2.getUniformLocation(bumpProg, 'uStrength'),
+        }
+      }
+
       const darkenProg = compileProgram(gl2, darkenVertSrc, darkenFragSrc, 'darken')
       if (darkenProg) {
         darken = {
@@ -942,7 +1501,38 @@ export function createEarthTileLayer(): EarthTileLayerControl {
           shininessLoc: gl2.getUniformLocation(specularProg, 'uShininess'),
           strengthLoc: gl2.getUniformLocation(specularProg, 'uStrength'),
           cloudAlphaGammaLoc: gl2.getUniformLocation(specularProg, 'uCloudAlphaGamma'),
+          cloudZoomFadeLoc: gl2.getUniformLocation(specularProg, 'uCloudZoomFade'),
         }
+      }
+
+      const atmosphereProg = compileProgram(gl2, atmosphereVertSrc, atmosphereFragSrc, 'atmosphere')
+      if (atmosphereProg) {
+        atmosphere = {
+          program: atmosphereProg,
+          matrixLoc: gl2.getUniformLocation(atmosphereProg, 'uMatrix'),
+          radiusScaleLoc: gl2.getUniformLocation(atmosphereProg, 'uRadiusScale'),
+          sunDirLoc: gl2.getUniformLocation(atmosphereProg, 'uSunDir'),
+          cameraPosKmLoc: gl2.getUniformLocation(atmosphereProg, 'uCameraPosKm'),
+          intensityLoc: gl2.getUniformLocation(atmosphereProg, 'uIntensity'),
+          transmittanceLutLoc: gl2.getUniformLocation(atmosphereProg, 'uTransmittanceLut'),
+        }
+      }
+
+      // --- Build the transmittance LUT and upload as a texture ---
+      // CPU-side compute keeps this independent of MapLibre's render
+      // lifecycle. Tens-of-ms one-time cost on app start.
+      {
+        const lut = computeTransmittanceLut()
+        transmittanceLutTex = gl2.createTexture()
+        gl2.bindTexture(gl2.TEXTURE_2D, transmittanceLutTex)
+        gl2.texImage2D(
+          gl2.TEXTURE_2D, 0, gl2.RGBA, lut.width, lut.height, 0,
+          gl2.RGBA, gl2.UNSIGNED_BYTE, lut.pixels,
+        )
+        gl2.texParameteri(gl2.TEXTURE_2D, gl2.TEXTURE_MIN_FILTER, gl2.LINEAR)
+        gl2.texParameteri(gl2.TEXTURE_2D, gl2.TEXTURE_MAG_FILTER, gl2.LINEAR)
+        gl2.texParameteri(gl2.TEXTURE_2D, gl2.TEXTURE_WRAP_S, gl2.CLAMP_TO_EDGE)
+        gl2.texParameteri(gl2.TEXTURE_2D, gl2.TEXTURE_WRAP_T, gl2.CLAMP_TO_EDGE)
       }
 
       // --- Generate sphere geometry ---
@@ -991,6 +1581,24 @@ export function createEarthTileLayer(): EarthTileLayerControl {
       gl2.texParameteri(gl2.TEXTURE_2D, gl2.TEXTURE_WRAP_T, gl2.CLAMP_TO_EDGE)
       captureW = 0
       captureH = 0
+
+      // --- Initialize Blue-Marble base-colour capture (§7.2 colour correction) ---
+      // Filled at the start of every render() so the colour-correction
+      // pre-pass can sample the un-corrected base. Same shape as
+      // captureTex; resized on first use when the canvas dimensions
+      // are known. Starts as a 1×1 black placeholder so any pre-init
+      // sample returns a well-defined zero rather than reading
+      // uninitialised GPU memory.
+      baseTex = gl2.createTexture()
+      gl2.bindTexture(gl2.TEXTURE_2D, baseTex)
+      gl2.texImage2D(gl2.TEXTURE_2D, 0, gl2.RGBA, 1, 1, 0, gl2.RGBA, gl2.UNSIGNED_BYTE,
+        new Uint8Array([0, 0, 0, 255]))
+      gl2.texParameteri(gl2.TEXTURE_2D, gl2.TEXTURE_MIN_FILTER, gl2.LINEAR)
+      gl2.texParameteri(gl2.TEXTURE_2D, gl2.TEXTURE_MAG_FILTER, gl2.LINEAR)
+      gl2.texParameteri(gl2.TEXTURE_2D, gl2.TEXTURE_WRAP_S, gl2.CLAMP_TO_EDGE)
+      gl2.texParameteri(gl2.TEXTURE_2D, gl2.TEXTURE_WRAP_T, gl2.CLAMP_TO_EDGE)
+      baseW = 0
+      baseH = 0
 
       // --- Load cloud texture asynchronously ---
       cloudTex = gl2.createTexture()
@@ -1062,6 +1670,78 @@ export function createEarthTileLayer(): EarthTileLayerControl {
         ? requestIdleCallback(loadSpecularMap, { timeout: 1000 })
         : setTimeout(loadSpecularMap, 200)
 
+      // --- Load normal-map texture (§7.2) — graceful when missing ---
+      // The asset (`earth_normal_8192.jpg`, URL constant above) lives on the same
+      // CloudFront-fronted S3 bucket as the VR diffuse / lights
+      // tiers; URL above. If the file isn't present we skip the bump
+      // pass entirely rather than render a flat-shaded artifact.
+      // Deferred via requestIdleCallback so the initial-tile-bandwidth
+      // budget isn't shared. Also runs AFTER the specular map's load
+      // window so the two large CDN fetches don't race.
+      bumpTex = gl2.createTexture()
+      gl2.bindTexture(gl2.TEXTURE_2D, bumpTex)
+      // Flat-normal placeholder so a sampler bind before the load
+      // completes returns a well-defined value. Never actually
+      // sampled — the pass is gated on bumpTexReady. RGB8 (not
+      // RGBA8) matches the real upload below; the shader only
+      // touches `.rgb` so the alpha channel was just costing
+      // ~25% extra VRAM (≈32 MB at 8192×4096).
+      gl2.texImage2D(gl2.TEXTURE_2D, 0, gl2.RGB8, 1, 1, 0, gl2.RGB, gl2.UNSIGNED_BYTE,
+        new Uint8Array([128, 128, 255]))
+
+      // Progressive normal-map tier walker. Mirrors the photorealEarth
+      // `loadProgressive` shape: ascending tiers, each successful
+      // upload replaces the previous, repaint after every step, halt
+      // on the first failure (stale lower tier stays applied). Sequential
+      // rather than parallel so a slow 8K fetch doesn't starve the 2K
+      // first-bump frame.
+      const loadNormalMapTier = (url: string): Promise<boolean> => {
+        return new Promise((resolve) => {
+          if (disposed) return resolve(false)
+          const normalImg = new Image()
+          normalImg.crossOrigin = 'anonymous'
+          normalImg.onload = () => {
+            if (disposed) return resolve(false)
+            gl2.bindTexture(gl2.TEXTURE_2D, bumpTex)
+            // Sized RGB8 internal format — see the placeholder above.
+            gl2.texImage2D(gl2.TEXTURE_2D, 0, gl2.RGB8, gl2.RGB, gl2.UNSIGNED_BYTE, normalImg)
+            gl2.generateMipmap(gl2.TEXTURE_2D)
+            gl2.texParameteri(gl2.TEXTURE_2D, gl2.TEXTURE_MIN_FILTER, gl2.LINEAR_MIPMAP_LINEAR)
+            gl2.texParameteri(gl2.TEXTURE_2D, gl2.TEXTURE_MAG_FILTER, gl2.LINEAR)
+            gl2.texParameteri(gl2.TEXTURE_2D, gl2.TEXTURE_WRAP_S, gl2.REPEAT)
+            gl2.texParameteri(gl2.TEXTURE_2D, gl2.TEXTURE_WRAP_T, gl2.CLAMP_TO_EDGE)
+            bumpTexReady = true
+            _map.triggerRepaint()
+            logger.info('[EarthTileLayer] Normal map tier loaded (%dx%d)', normalImg.width, normalImg.height)
+            resolve(true)
+          }
+          normalImg.onerror = () => resolve(false)
+          normalImg.src = url
+        })
+      }
+      const loadNormalMap = async () => {
+        for (const url of NORMAL_MAP_URLS) {
+          const ok = await loadNormalMapTier(url)
+          if (!ok) {
+            // First failure halts progression — whatever tier
+            // most recently succeeded stays applied. Logged at
+            // info because a missing higher tier is expected
+            // (operator may not have uploaded 4K / 8K yet) and
+            // a missing 2K just disables bump shading until an
+            // asset shows up.
+            if (!bumpTexReady) {
+              logger.info('[EarthTileLayer] Normal map not available; bump shading disabled')
+            } else {
+              logger.info('[EarthTileLayer] Normal map progression halted; staying at the last successful tier')
+            }
+            return
+          }
+        }
+      }
+      typeof requestIdleCallback !== 'undefined'
+        ? requestIdleCallback(loadNormalMap, { timeout: 1500 })
+        : setTimeout(loadNormalMap, 400)
+
       logger.info('[EarthTileLayer] Day/night+clouds+specular layer initialized (%d triangles)', indexCount / 3)
     },
 
@@ -1102,9 +1782,30 @@ export function createEarthTileLayer(): EarthTileLayerControl {
         gl2.useProgram(dataset.program)
         gl2.uniformMatrix4fv(dataset.matrixLoc, false, matrix)
         gl2.uniform1f(dataset.radiusScaleLoc, terrainRadiusScale)
+        // Phase 3e/B: bbox / lonOrigin / flipY uniforms. Defaults
+        // (no bbox, lonOrigin 0, no flip) reduce the shader to the
+        // pre-3e equirectangular passthrough, so any dataset
+        // without 3d metadata renders bit-identically.
+        const bbox = datasetOptions?.boundingBox
+        if (bbox) {
+          gl2.uniform1i(dataset.hasBboxLoc, 1)
+          gl2.uniform4f(dataset.bboxLoc, bbox.n, bbox.s, bbox.w, bbox.e)
+        } else {
+          gl2.uniform1i(dataset.hasBboxLoc, 0)
+          gl2.uniform4f(dataset.bboxLoc, 0, 0, 0, 0)
+        }
+        gl2.uniform1f(dataset.lonOriginLoc, datasetOptions?.lonOrigin ?? 0)
+        gl2.uniform1i(dataset.flipYLoc, datasetOptions?.isFlippedInY ? 1 : 0)
         gl2.activeTexture(gl2.TEXTURE0)
         gl2.bindTexture(gl2.TEXTURE_2D, datasetTex)
         gl2.uniform1i(dataset.texLoc, 0)
+        // BLEND is disabled above, so the bbox interior is opaque —
+        // the base tile layers (which 3e/C keeps visible for bbox
+        // datasets) are revealed solely by the fragment shader's
+        // `discard` on the outside-the-box path, never by alpha
+        // compositing inside it. Adding real alpha-blended overlays
+        // would require re-enabling BLEND here and giving the
+        // shader an alpha source.
         gl2.drawElements(gl2.TRIANGLES, indexCount, gl2.UNSIGNED_SHORT, 0)
 
         // Restore GL state and return — no earth effects when dataset is active
@@ -1122,6 +1823,58 @@ export function createEarthTileLayer(): EarthTileLayerControl {
         return
       }
 
+      // Read the live shader settings snapshot once per frame so
+      // every pass below sees a consistent set of values even if a
+      // tuner-page slider drag fires mid-frame.
+      const shader = getShaderSettings()
+
+      // --- Pass 0: Replace blend — contrast / saturation pre-pass (§7.2) ---
+      // Skipped when both uniforms are identity (1.0) — saves the
+      // framebuffer copy + a draw call. The threshold is loose
+      // (±0.005) so floating-point drift through localStorage /
+      // round-trip doesn't accidentally re-enable the pass.
+      const ccEnabled = colorCorrect && baseTex && (
+        Math.abs(shader.contrast - 1.0) > 0.005 ||
+        Math.abs(shader.saturation - 1.0) > 0.005
+      )
+      if (ccEnabled && colorCorrect && baseTex) {
+        const canvas = mapRef?.getCanvas()
+        if (canvas) {
+          const w = canvas.width, h = canvas.height
+
+          // Copy the current framebuffer (Blue Marble + Black Marble
+          // city lights from MapLibre's tile rendering) into baseTex.
+          // High texture unit (TEXTURE6) so it doesn't collide with
+          // the Black-Marble capture (TEXTURE7) or the per-pass
+          // sampler bindings below.
+          gl2.activeTexture(gl2.TEXTURE6)
+          gl2.bindTexture(gl2.TEXTURE_2D, baseTex)
+          if (w !== baseW || h !== baseH) {
+            gl2.texImage2D(gl2.TEXTURE_2D, 0, gl2.RGBA, w, h, 0, gl2.RGBA, gl2.UNSIGNED_BYTE, null)
+            baseW = w
+            baseH = h
+          }
+          gl2.copyTexSubImage2D(gl2.TEXTURE_2D, 0, 0, 0, 0, 0, w, h)
+
+          // Replace blend — write the corrected colour straight
+          // back. The sphere geometry constrains the rewrite to
+          // Earth pixels; the skybox / space background outside the
+          // sphere is untouched (no fragments shaded there).
+          gl2.enable(gl2.BLEND)
+          gl2.blendFunc(gl2.ONE, gl2.ZERO)
+
+          gl2.useProgram(colorCorrect.program)
+          gl2.uniformMatrix4fv(colorCorrect.matrixLoc, false, matrix)
+          gl2.uniform1f(colorCorrect.radiusScaleLoc, terrainRadiusScale)
+          gl2.uniform2f(colorCorrect.viewportSizeLoc, w, h)
+          gl2.uniform1f(colorCorrect.contrastLoc, shader.contrast)
+          gl2.uniform1f(colorCorrect.saturationLoc, shader.saturation)
+          gl2.uniform1i(colorCorrect.framebufferLoc, 6)
+
+          gl2.drawElements(gl2.TRIANGLES, indexCount, gl2.UNSIGNED_SHORT, 0)
+        }
+      }
+
       // --- Pass 1: Multiply blend — darken night side ---
       gl2.enable(gl2.BLEND)
       gl2.blendFunc(gl2.DST_COLOR, gl2.ZERO) // result = src * dst
@@ -1131,6 +1884,27 @@ export function createEarthTileLayer(): EarthTileLayerControl {
       gl2.uniform1f(darken.radiusScaleLoc, terrainRadiusScale)
       gl2.uniform3f(darken.sunDirLoc, sunDir[0], sunDir[1], sunDir[2])
       gl2.drawElements(gl2.TRIANGLES, indexCount, gl2.UNSIGNED_SHORT, 0)
+
+      // --- Pass 1.5: Multiply blend — normal-map bump shading (§7.2) ---
+      // Day-side only; gated on the bumpStrength uniform AND the
+      // normal-map asset being present. Skipped when strength is
+      // effectively zero so a "no bump" tuner setting saves the
+      // draw call.
+      if (bump && bumpTexReady && shader.bumpStrength > 0.005) {
+        gl2.blendFunc(gl2.DST_COLOR, gl2.ZERO) // multiply
+
+        gl2.useProgram(bump.program)
+        gl2.uniformMatrix4fv(bump.matrixLoc, false, matrix)
+        gl2.uniform1f(bump.radiusScaleLoc, terrainRadiusScale)
+        gl2.uniform3f(bump.sunDirLoc, sunDir[0], sunDir[1], sunDir[2])
+        gl2.uniform1f(bump.strengthLoc, shader.bumpStrength)
+
+        gl2.activeTexture(gl2.TEXTURE0)
+        gl2.bindTexture(gl2.TEXTURE_2D, bumpTex)
+        gl2.uniform1i(bump.normalMapLoc, 0)
+
+        gl2.drawElements(gl2.TRIANGLES, indexCount, gl2.UNSIGNED_SHORT, 0)
+      }
 
       // --- Pass 2: Additive blend — overlay Black Marble city lights (screen-space) ---
       if (lights && captureTex && captureW > 0) {
@@ -1149,6 +1923,15 @@ export function createEarthTileLayer(): EarthTileLayerControl {
 
         gl2.drawElements(gl2.TRIANGLES, indexCount, gl2.UNSIGNED_SHORT, 0)
       }
+
+      // Cloud zoom-fade: fully visible at zoom ≤3, fully gone at
+      // zoom ≥6. Both the cloud pass (pass 4) and the specular
+      // pass's cloud-mask gating (pass 3) use the same value so the
+      // glint-suppression mask vanishes alongside the clouds it
+      // models — otherwise high zoom shows cloud-shaped patches of
+      // missing glint over water.
+      const zoom = mapRef?.getZoom() ?? 0
+      const cloudZoomFade = 1.0 - Math.max(0, Math.min(1, (zoom - 3) / 3))
 
       // --- Pass 3: Additive blend — specular sun glint on water ---
       if (specular && specTexReady && mapRef) {
@@ -1170,7 +1953,11 @@ export function createEarthTileLayer(): EarthTileLayerControl {
         gl2.uniform3f(specular.sunDirLoc, sunDir[0], sunDir[1], sunDir[2])
         gl2.uniform3f(specular.viewDirLoc, viewDir[0], viewDir[1], viewDir[2])
         gl2.uniform1f(specular.shininessLoc, SPECULAR_SHININESS)
-        gl2.uniform1f(specular.strengthLoc, SPECULAR_STRENGTH)
+        // Strength is user-controllable via the Tools menu specular
+        // preset (None / Default / Comfortable, §7.2). The `shader`
+        // snapshot was taken once at the top of this render() so
+        // every pass sees a consistent set of values.
+        gl2.uniform1f(specular.strengthLoc, shader.specularStrength)
 
         gl2.activeTexture(gl2.TEXTURE0)
         gl2.bindTexture(gl2.TEXTURE_2D, specTex)
@@ -1180,6 +1967,7 @@ export function createEarthTileLayer(): EarthTileLayerControl {
         gl2.bindTexture(gl2.TEXTURE_2D, cloudTex)
         gl2.uniform1i(specular.cloudMaskLoc, 1)
         gl2.uniform1f(specular.cloudAlphaGammaLoc, CLOUD_ALPHA_GAMMA)
+        gl2.uniform1f(specular.cloudZoomFadeLoc, cloudZoomFade)
 
         gl2.drawElements(gl2.TRIANGLES, indexCount, gl2.UNSIGNED_SHORT, 0)
       }
@@ -1189,10 +1977,6 @@ export function createEarthTileLayer(): EarthTileLayerControl {
         // Standard alpha blend: clouds over existing content
         gl2.blendFunc(gl2.SRC_ALPHA, gl2.ONE_MINUS_SRC_ALPHA)
 
-        // Fade clouds: fully visible at zoom ≤3, fully gone at zoom ≥6
-        const zoom = mapRef?.getZoom() ?? 0
-        const zoomFade = 1.0 - Math.max(0, Math.min(1, (zoom - 3) / 3))
-
         gl2.useProgram(clouds.program)
         gl2.uniformMatrix4fv(clouds.matrixLoc, false, matrix)
         gl2.uniform3f(clouds.sunDirLoc, sunDir[0], sunDir[1], sunDir[2])
@@ -1200,11 +1984,72 @@ export function createEarthTileLayer(): EarthTileLayerControl {
         gl2.uniform1f(clouds.opacityLoc, CLOUD_OPACITY)
         gl2.uniform1f(clouds.alphaGammaLoc, CLOUD_ALPHA_GAMMA)
         gl2.uniform1f(clouds.nightDarkeningLoc, CLOUD_NIGHT_DARKENING)
-        gl2.uniform1f(clouds.zoomFadeLoc, zoomFade)
+        gl2.uniform1f(clouds.zoomFadeLoc, cloudZoomFade)
 
         gl2.activeTexture(gl2.TEXTURE0)
         gl2.bindTexture(gl2.TEXTURE_2D, cloudTex)
         gl2.uniform1i(clouds.cloudTexLoc, 0)
+
+        gl2.drawElements(gl2.TRIANGLES, indexCount, gl2.UNSIGNED_SHORT, 0)
+      }
+
+      // --- Pass 5: Additive blend — atmospheric scattering halo ---
+      // Rendered last so the limb glow sits in front of clouds,
+      // matching the article's render order and photorealEarth.ts.
+      // Tier-2 bounded raymarch: the shell mesh is the atmosphere
+      // ceiling; each front-face fragment is the camera-side entry
+      // point of that pixel's ray, and the shader integrates inward
+      // through Rayleigh + Mie + ozone densities.
+      // Camera position derived from the projection matrix so the
+      // raymarch ray geometry is correct at any zoom level. ECEF
+      // unit-sphere coords scaled to km for the shader. Skip the
+      // atmosphere pass entirely on failure rather than placing the
+      // camera at (0, 0, 0) — the raymarch would treat that as the
+      // planet centre and produce extreme artifacts.
+      if (
+        atmosphere && mapRef &&
+        computeCameraWorldPosFromMatrix(matrix, cameraEcefScratch)
+      ) {
+        // Article-style composition (Tier 3.5 fix):
+        //   result = src.rgb × 1 + dst.rgb × src.alpha
+        //         = scattered + bg × viewTransmittance
+        // The fragment writes ACES-tonemapped scattered light in
+        // RGB and the scalar view transmittance in alpha. With this
+        // blend func the framebuffer is BOTH brightened by the
+        // scattered light AND dimmed by the path-length-dependent
+        // viewTrans — without the dimming term the atmosphere pass
+        // washed out the planet face at noon viewing.
+        gl2.blendFunc(gl2.ONE, gl2.SRC_ALPHA)
+
+        const cx = cameraEcefScratch[0] * PLANET_RADIUS_KM
+        const cy = cameraEcefScratch[1] * PLANET_RADIUS_KM
+        const cz = cameraEcefScratch[2] * PLANET_RADIUS_KM
+
+        // Cull selection. The shell mesh has outward-facing normals,
+        // so from OUTSIDE the shell the front (camera-facing) side
+        // is what we want — default BACK culling. From INSIDE the
+        // shell (high zoom, camera within the atmosphere), front
+        // faces point away from the camera and BACK culling would
+        // hide the atmosphere entirely; switching to FRONT culling
+        // renders the inner surface that's actually visible.
+        const shellRadiusEcef = terrainRadiusScale * ATMOSPHERE_RADIUS_FACTOR
+        const cameraDistEcefSq =
+          cameraEcefScratch[0] * cameraEcefScratch[0] +
+          cameraEcefScratch[1] * cameraEcefScratch[1] +
+          cameraEcefScratch[2] * cameraEcefScratch[2]
+        const cameraInsideShell = cameraDistEcefSq < shellRadiusEcef * shellRadiusEcef
+        gl2.cullFace(cameraInsideShell ? gl2.FRONT : gl2.BACK)
+
+        gl2.useProgram(atmosphere.program)
+        gl2.uniformMatrix4fv(atmosphere.matrixLoc, false, matrix)
+        gl2.uniform1f(atmosphere.radiusScaleLoc, terrainRadiusScale * ATMOSPHERE_RADIUS_FACTOR)
+        gl2.uniform3f(atmosphere.sunDirLoc, sunDir[0], sunDir[1], sunDir[2])
+        gl2.uniform3f(atmosphere.cameraPosKmLoc, cx, cy, cz)
+        gl2.uniform1f(atmosphere.intensityLoc, ATMOSPHERE_INTENSITY)
+
+        gl2.activeTexture(gl2.TEXTURE0)
+        gl2.bindTexture(gl2.TEXTURE_2D, transmittanceLutTex)
+        gl2.uniform1i(atmosphere.transmittanceLutLoc, 0)
 
         gl2.drawElements(gl2.TRIANGLES, indexCount, gl2.UNSIGNED_SHORT, 0)
       }
@@ -1218,17 +2063,25 @@ export function createEarthTileLayer(): EarthTileLayerControl {
 
     onRemove(_map: MaplibreMap, gl: WebGL2RenderingContext | WebGLRenderingContext) {
       disposed = true
+      unsubscribeShaderSettings?.()
+      unsubscribeShaderSettings = null
       const gl2 = gl as WebGL2RenderingContext
       if (dataset) gl2.deleteProgram(dataset.program)
       if (darken) gl2.deleteProgram(darken.program)
       if (lights) gl2.deleteProgram(lights.program)
       if (specular) gl2.deleteProgram(specular.program)
       if (clouds) gl2.deleteProgram(clouds.program)
+      if (atmosphere) gl2.deleteProgram(atmosphere.program)
+      if (colorCorrect) gl2.deleteProgram(colorCorrect.program)
+      if (bump) gl2.deleteProgram(bump.program)
       if (vao) gl2.deleteVertexArray(vao)
       if (captureTex) gl2.deleteTexture(captureTex)
+      if (baseTex) gl2.deleteTexture(baseTex)
+      if (bumpTex) gl2.deleteTexture(bumpTex)
       if (specTex) gl2.deleteTexture(specTex)
       if (cloudTex) gl2.deleteTexture(cloudTex)
       if (datasetTex) gl2.deleteTexture(datasetTex)
+      if (transmittanceLutTex) gl2.deleteTexture(transmittanceLutTex)
     },
   }
 
@@ -1401,7 +2254,10 @@ export function createEarthTileLayer(): EarthTileLayerControl {
       terrainRadiusScale = 1.0 + (MAX_ELEVATION_M * exaggeration / GLOBE_RADIUS) * 1.05
       mapRef?.triggerRepaint()
     },
-    setDatasetTexture(image: HTMLCanvasElement | HTMLImageElement) {
+    setDatasetTexture(
+      image: HTMLCanvasElement | HTMLImageElement,
+      options?: DatasetOverlayOptions,
+    ) {
       if (!glRef) return
       datasetVideo = null // clear any previous video
       if (!datasetTex) {
@@ -1417,9 +2273,15 @@ export function createEarthTileLayer(): EarthTileLayerControl {
       glRef.texParameteri(glRef.TEXTURE_2D, glRef.TEXTURE_WRAP_S, glRef.REPEAT)
       glRef.texParameteri(glRef.TEXTURE_2D, glRef.TEXTURE_WRAP_T, glRef.CLAMP_TO_EDGE)
       datasetActive = true
+      // `?? null` (not `?? datasetOptions`) so back-to-back swaps
+      // without a `clearDatasetTexture()` in between don't leak the
+      // prior dataset's bbox / lonOrigin / flipY onto the new one.
+      // Callers should pass `options` whenever the new dataset has
+      // 3d metadata; omit only for the legacy fast-path case.
+      datasetOptions = options ?? null
       mapRef?.triggerRepaint()
     },
-    setDatasetVideo(video: HTMLVideoElement) {
+    setDatasetVideo(video: HTMLVideoElement, options?: DatasetOverlayOptions) {
       if (!glRef) return
       datasetVideo = video
       if (!datasetTex) {
@@ -1435,6 +2297,7 @@ export function createEarthTileLayer(): EarthTileLayerControl {
       glRef.texParameteri(glRef.TEXTURE_2D, glRef.TEXTURE_WRAP_S, glRef.REPEAT)
       glRef.texParameteri(glRef.TEXTURE_2D, glRef.TEXTURE_WRAP_T, glRef.CLAMP_TO_EDGE)
       datasetActive = true
+      datasetOptions = options ?? null
       mapRef?.triggerRepaint()
     },
     requestVideoUpdate() {
@@ -1446,6 +2309,7 @@ export function createEarthTileLayer(): EarthTileLayerControl {
     clearDatasetTexture() {
       datasetActive = false
       datasetVideo = null
+      datasetOptions = null
       mapRef?.triggerRepaint()
     },
   }

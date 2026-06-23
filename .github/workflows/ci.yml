@@ -1,14 +1,28 @@
 name: CI
 
 on:
+  # `push` only on main so the production deploy fires on merge.
+  # Branch CI + preview deploys come from the `pull_request` trigger
+  # below, so a single push to a branch with an open PR no longer
+  # races a duplicate deploy against Cloudflare Pages (the previous
+  # `branches: ['**']` shape ran the whole pipeline twice and
+  # produced sporadic "must be valid UTF-8" errors when the two
+  # deploys hit the same project + commit-hash simultaneously).
   push:
-    branches: ['**']
+    branches: [main]
   pull_request:
     branches: [main]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+
+# Default to read-only on the GITHUB_TOKEN; the deploy job uses
+# Cloudflare API credentials (not GITHUB_TOKEN), so no write scopes
+# are required. CodeQL flags workflows without an explicit
+# `permissions:` block as a hardening miss.
+permissions:
+  contents: read
 
 jobs:
   type-check:
@@ -53,6 +67,14 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
+        env:
+          # SOS deployment ships 1.5 (§7.1) as the first-launch UI
+          # size for its kiosk audience. Set as a GitHub Variable
+          # (Settings → Environments → production → Variables);
+          # unset evaluates to '' which uiScaleService rejects and
+          # falls through to 1.0, so non-production builds boot at
+          # the universal default.
+          VITE_DEFAULT_UI_SCALE: ${{ vars.VITE_DEFAULT_UI_SCALE }}
       - uses: actions/upload-artifact@v4
         with:
           name: dist
@@ -66,10 +88,17 @@ jobs:
     if: github.event_name == 'push' || (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork)
     environment:
       name: ${{ github.ref == 'refs/heads/main' && 'production' || 'preview' }}
-      url: ${{ github.ref == 'refs/heads/main' && 'https://vr.ayni.eu.com/' || '' }}
-    env:
-      CLOUDFLARE_PAGES_PROJECT_NAME: ayni-vr
-      VITE_REALTIME_DASH_BASE_URL: ${{ vars.VITE_REALTIME_DASH_BASE_URL }}
+      # Production URL shown in GitHub's Deployments UI / the PR
+      # "deployed" badge. Cosmetic only — does not affect where
+      # wrangler deploys (that's --project-name below). Sourced from
+      # the TERRAVIZ_SERVER *Variable* so forks pick up their own
+      # hostname without editing this file. NOTE: the `secrets` context
+      # is not available in `environment.url` (GitHub rejects it), so
+      # this must be a Variable (Settings → Variables, repo or the
+      # `production` Environment), not the secret transcode-hls.yml
+      # reads. Set it to the same value, e.g. https://terraviz.test.gsl.noaa.gov.
+      # Unset → '' (no link rendered).
+      url: ${{ github.ref == 'refs/heads/main' && vars.TERRAVIZ_SERVER || '' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -80,6 +109,55 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
+        env:
+          # Same passthrough as the build job above — the deploy
+          # job re-runs the build so the production bundle carries
+          # the production-environment Variables (1.5 for the SOS
+          # deploy, '' / 1.0 for preview).
+          VITE_DEFAULT_UI_SCALE: ${{ vars.VITE_DEFAULT_UI_SCALE }}
+      # Apply pending CATALOG_DB migrations to the REMOTE before the new
+      # Functions go live, so additive schema (new tables/columns) is
+      # present when the new code lands. `wrangler d1 migrations apply`
+      # is idempotent — it tracks applied files in `d1_migrations` and
+      # only runs pending ones, so re-running every deploy is a no-op
+      # when current.
+      #
+      # CATALOG_DB only. We deliberately do NOT auto-apply FEEDBACK_DB:
+      # its migrations_dir is the repo-root `migrations/`, which also
+      # holds the generated `catalog-schema.sql` *snapshot* — wrangler
+      # would treat that snapshot as a feedback "migration" and try to
+      # create catalog tables in the feedback DB. CATALOG_DB's dir is
+      # `migrations/catalog/` (no snapshot), so it's clean. The two
+      # bindings point at the same physical D1, so the catalog
+      # migrations are all the catalog backend / hero feature needs.
+      # Feedback-DB schema changes are rare and applied by hand
+      # (docs/SELF_HOSTING.md Step 5).
+      #
+      # Gated to `main` only: preview and production point at the SAME
+      # physical D1 instance (one database_id in wrangler.toml), so
+      # applying on a preview PR would mutate the production schema
+      # before the code merges. Never run this on the preview path.
+      #
+      # OPT-IN: off by default. Set the repo/Environment variable
+      # ENABLE_D1_MIGRATE=1 to turn it on — and only after granting the
+      # CI token **D1:Edit** (Account → D1 → Edit). A deploy-only token
+      # produces a Cloudflare 7403/7500 here and would block the
+      # deploy, so the safe default is off (forks aren't broken out of
+      # the box). See docs/SELF_HOSTING.md.
+      #
+      # `check:migrations` (in the type-check job) guarantees every
+      # migration is additive or explicitly reviewed-destructive, which
+      # is what makes apply-before-deploy safe.
+      - name: Apply D1 migrations (remote, main only)
+        if: github.ref == 'refs/heads/main' && vars.ENABLE_D1_MIGRATE == '1'
+        run: |
+          set -o pipefail
+          # Select by BINDING name (not the shared database_name) so
+          # wrangler resolves migrations/catalog/.
+          npx wrangler@4 d1 migrations apply CATALOG_DB --remote --config wrangler.toml
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       - name: Deploy
         id: deploy
         run: |
@@ -98,7 +176,7 @@ jobs:
           # before the step dies, and `set -o pipefail` keeps the step failing on
           # wrangler errors.
           DEPLOY_LOG=$(mktemp)
-          npx wrangler@3 pages deploy dist/ --project-name "$CLOUDFLARE_PAGES_PROJECT_NAME" --branch "$BRANCH_NAME" --commit-hash ${{ github.sha }} 2>&1 | tee "$DEPLOY_LOG"
+          npx wrangler@4 pages deploy dist/ --project-name terraviz --branch "$BRANCH_NAME" --commit-hash ${{ github.sha }} 2>&1 | tee "$DEPLOY_LOG"
           # Extract the preview URL from the captured log. `|| true` guards against
           # a grep no-match (which would otherwise kill the step under `bash -e`)
           # while preserving wrangler's real exit code from the pipeline above.

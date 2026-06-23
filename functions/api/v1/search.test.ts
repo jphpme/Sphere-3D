@@ -33,7 +33,7 @@ function setup(opts: { withAi?: boolean; withVec?: boolean; withKv?: boolean } =
   sqlite
     .prepare(
       `INSERT INTO publishers (id, email, display_name, role, status, created_at)
-       VALUES ('PUB001', 'p@t', 'P', 'staff', 'active', ?)`,
+       VALUES ('PUB001', 'p@t', 'P', 'admin', 'active', ?)`,
     )
     .run(TS)
 
@@ -133,6 +133,25 @@ describe('GET /api/v1/search', () => {
       const ctx = makeCtx({ env, url: `https://t/api/v1/search?q=hurricane&limit=${bad}` })
       const res = await onRequestGet(ctx)
       expect(res.status).toBe(400)
+    }
+  })
+
+  it('400 for malformed ?time_range (3pg/D)', async () => {
+    const { env } = setup()
+    const bad = [
+      '2026-05-16T00:00:00Z', // missing slash + second half
+      '/2026-05-17T00:00:00Z', // empty first half
+      '2026-05-17T00:00:00Z/', // empty second half
+      'notadate/2026-05-17T00:00:00Z', // unparseable
+      '2026-05-17T00:00:00Z/2026-05-16T00:00:00Z', // to < from
+    ]
+    for (const variant of bad) {
+      const ctx = makeCtx({
+        env,
+        url: `https://t/api/v1/search?q=hurricane&time_range=${encodeURIComponent(variant)}`,
+      })
+      const res = await onRequestGet(ctx)
+      expect(res.status, `variant ${JSON.stringify(variant)}`).toBe(400)
     }
   })
 

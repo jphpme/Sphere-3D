@@ -53,6 +53,20 @@ positional schema. The first four `blobs[]` are server-stamped
 > within that filter) so a future schema addition doesn't silently
 > change column meaning.
 
+> **Two direct consumers of these layouts.** The positions below are
+> read by (1) Grafana panels and human spelunking, and (2) the
+> **nightly export job**, which decodes AE rows back into named fields
+> before archiving them to R2 and aggregating them into the D1 rollups
+> (`functions/api/v1/_lib/analytics-layouts.ts` — a typed mirror of
+> this table, drift-checked against the `TelemetryEvent` union and
+> round-tripped through the real encoder in CI). The in-app
+> `/publish/analytics` tab is an *indirect* consumer: it reads those
+> D1 rollups, not AE positions. When you add or reorder an event
+> field, update that registry in the same change, or the archive's
+> decoded field names go stale. See
+> [`ANALYTICS_STORAGE_AND_ADMIN_PLAN.md`](ANALYTICS_STORAGE_AND_ADMIN_PLAN.md)
+> Phase A.
+
 > **Null on the wire is forbidden.** Clients emit `''` for empty
 > strings and `0` for empty numbers; the ingest function rejects
 > events containing `null` field values with 400. Otherwise a
@@ -139,6 +153,7 @@ the four server-stamped blobs. Order is alphabetical by field name
 | `double1` | `client_offset_ms` |
 | `double2` | `duration_ms` |
 | `double3` | `event_count` |
+| `double4` | `visible_ms` (page-visible wall clock — idle-tab-aware view time; 0 on rows from clients predating the field) |
 
 ### `layer_loaded` (Tier A)
 
@@ -174,6 +189,14 @@ the four server-stamped blobs. Order is alphabetical by field name
 | `double4` | `client_offset_ms` |
 | `double5` | `pitch` (degrees) |
 | `double6` | `zoom` (2 decimals) |
+
+Emitted on `moveend` (drag release, wheel stop, `flyTo`/`easeTo`
+completion). **Auto-rotate moves are excluded** — the 2D globe's
+auto-rotate sweeps the centre longitude on a timer, and emitting
+those completions would paint a spurious latitude-wide band across
+the spatial heatmap, so `mapRenderer` skips the emit while
+auto-rotate is driving the camera (it stops on user interaction, so
+genuine settles still emit).
 
 ### `map_click` (Tier A)
 
@@ -221,15 +244,96 @@ the four server-stamped blobs. Order is alphabetical by field name
 | `blob6` | — | `result_count_bucket` |
 | `double1` | `client_offset_ms` | `client_offset_ms` |
 
+### `catalog_view_mode_changed` (Tier A)
+
+Fires every time the user toggles between Cards / Graph / (later)
+Timeline / Map. `from` carries the previous view-mode so a dashboard
+can read pivot direction (Cards → Graph vs. Graph → Cards) without
+window-functioning over a series.
+
+Positional layout — blobs are sorted alphabetically by field name
+(see `toDataPoint` in `functions/api/ingest.ts`).
+
+| Position | Field |
+|---|---|
+| `blob5` | `from` (`cards` / `graph` / `timeline` / `map`) |
+| `blob6` | `result_count_bucket` |
+| `blob7` | `view_mode` (the destination mode) |
+| `double1` | `client_offset_ms` |
+
+### `catalog_graph_node_clicked` (Tier B)
+
+Fires on Graph view node clicks (Phase 4 §6.7). Throttled to ≤30/min
+per session (same budget pattern as `camera_settled`). `value_hash` is
+the SHA-256 12-hex of the lowercased node value — counts unique
+distinct clicks without exposing the value itself, mirroring
+`browse_search.query_hash`.
+
+Positional layout — alphabetical.
+
+| Position | Field |
+|---|---|
+| `blob5` | `facet` (facet name for facet-value nodes; `'keyword'` for keyword nodes; `''` for dataset nodes) |
+| `blob6` | `node_kind` (`facet-value` / `keyword` / `dataset`) |
+| `blob7` | `value_hash` |
+| `double1` | `client_offset_ms` |
+
+### `catalog_timeline_brush_applied` (Tier B)
+
+Fires on Timeline view brush gestures (Phase 4 §6.8). The user has
+dragged on the time axis to commit a `dataCoverageYear` range
+filter. Throttled to ≤30/min per session (same budget shape as
+`camera_settled` and `catalog_graph_node_clicked`). Payload is
+integer years only — the brush carries no free-text, so no hash
+field is needed.
+
+Positional layout — fields sorted alphabetically (per `toDataPoint`):
+all three are numeric, so they fill `double1` / `double2` / `double3`
+in alphabetical order of the field name.
+
+| Position | Field |
+|---|---|
+| `double1` | `client_offset_ms` |
+| `double2` | `end_year` |
+| `double3` | `start_year` |
+
+### `catalog_map_region_drawn` (Tier B)
+
+Fires on Map view draw-rectangle gestures (Phase 4 §6.9). The user
+has dragged a rectangle on the mercator canvas to commit a
+`geographicRegion` bbox filter. Throttled to ≤30/min per session
+(same budget shape as `camera_settled`,
+`catalog_graph_node_clicked`, and `catalog_timeline_brush_applied`).
+Bounds round to 3 decimals (~111 m at the equator) — same precision
+`camera.ts` uses for lat/lon. Payload is numeric only — the gesture
+carries no free-text, so no hash field is needed.
+
+Positional layout — fields sorted alphabetically (per `toDataPoint`):
+all five are numeric, so they fill `double1` … `double5` in
+alphabetical order of the field name.
+
+| Position | Field |
+|---|---|
+| `double1` | `client_offset_ms` |
+| `double2` | `east` |
+| `double3` | `north` |
+| `double4` | `south` |
+| `double5` | `west` |
+
 ### `tour_started` (Tier A)
 
 | Position | Field |
 |---|---|
-| `blob5` | `source` (`browse` / `orbit` / `deeplink`) |
+| `blob5` | `source` (`browse` / `orbit` / `deeplink` / `auto`) |
 | `blob6` | `tour_id` |
 | `blob7` | `tour_title` |
 | `double1` | `client_offset_ms` |
 | `double2` | `task_count` |
+
+`source = 'auto'` marks tours auto-started by `dataset.runTourOnLoad`
+(no user intent). The export job rolls the source mix into the
+`tour_start` dimension and excludes `auto` tours from the completion
+funnel — see `tour_ended.was_auto` below.
 
 ### `tour_task_fired` (Tier A)
 
@@ -247,9 +351,15 @@ Position | Paused | Resumed | Ended
 ---|---|---|---
 `blob5` | `reason` | `tour_id` | `outcome`
 `blob6` | `tour_id` | — | `tour_id`
+`blob7` | — | — | `was_auto` (`true` / `false`)
 `double1` | `client_offset_ms` | `client_offset_ms` | `client_offset_ms`
 `double2` | `task_index` | `pause_ms` | `duration_ms`
 `double3` | — | `task_index` | `task_index`
+
+`tour_ended.was_auto` is `true` when the matching `tour_started`
+was `source: 'auto'`. The completion-rate rollup excludes
+`was_auto = true` rows so the funnel reflects user-started tours
+only; the example query below filters them out.
 
 ### `vr_session_started` / `vr_session_ended` (Tier A)
 
@@ -261,6 +371,14 @@ Position | Started | Ended
 `double1` | `client_offset_ms` | `client_offset_ms`
 `double2` | `entry_load_ms` | `duration_ms`
 `double3` | — | `mean_fps` (`0` when the session was too short for a meaningful sample; arithmetic mean over the whole session)
+
+`device_class` is a closed enum stamped client-side by
+`classifyXrDevice()` in `src/utils/vrCapability.ts`. Current
+buckets: `quest`, `quest-pro`, `pico`, `vision-pro`, `hololens`,
+`magic-leap`, `android-ar`, `pcvr`, `unknown`. `android-ar` is
+mode-gated — only emitted when the session is `immersive-ar`
+(an Android UA in `immersive-vr` is almost always a tethered
+PCVR session and buckets as `pcvr`).
 
 ### `vr_placement` (Tier A)
 
@@ -400,6 +518,23 @@ alphabetical layout. Per-event positions:
 | `double5` | `response_ms` |
 | `double6` | `task_index` |
 
+#### `voice_interaction`
+
+Fields sort alphabetically (after the 4 server-stamped blobs, and
+excluding `event_type`): `client_offset_ms` (num), `duration_ms`
+(num), `lang` (str), `mode` (str), `provider` (str), `success`
+(bool → str), `trigger` (str).
+
+| Position | Field |
+|---|---|
+| `blob5` | `lang` (BCP-47 base, e.g. `en`) |
+| `blob6` | `mode` (`stt` / `tts`) |
+| `blob7` | `provider` (`cloud` / `local` / `browser`) |
+| `blob8` | `success` (`true` / `false`) |
+| `blob9` | `trigger` (`mic` / `autospeak` / `replay`) |
+| `double1` | `client_offset_ms` |
+| `double2` | `duration_ms` |
+
 ---
 
 ## Product Health queries
@@ -538,17 +673,22 @@ ORDER BY sessions DESC
 
 ### Tour completion rate
 
+`runTourOnLoad` auto-tours (`tour_started.source = 'auto'` /
+`tour_ended.was_auto = 'true'`) auto-play to completion and would
+inflate the rate, so both legs exclude them.
+
 ```sql
 WITH starts AS (
   SELECT blob6 AS tour_id, count() AS n
   FROM terraviz_events
-  WHERE blob1 = 'tour_started' AND blob2 = 'production'
+  WHERE blob1 = 'tour_started' AND blob2 = 'production' AND blob5 != 'auto'
   GROUP BY tour_id
 ),
 completes AS (
   SELECT blob6 AS tour_id, count() AS n
   FROM terraviz_events
   WHERE blob1 = 'tour_ended' AND blob5 = 'completed' AND blob2 = 'production'
+    AND blob7 != 'true'
   GROUP BY tour_id
 )
 SELECT

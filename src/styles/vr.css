@@ -11,26 +11,28 @@
 
 #vr-enter-btn {
     position: fixed;
-    top: 0.75rem;
-    /* Tuck to the left of the help button (which sits at right: 0.75rem
-       with a minimum width around 72 px). */
-    right: 5rem;
+    top: calc(0.75rem * var(--ui-scale));
+    /* Tuck inline-start of the help button (which sits at
+       inset-inline-end: 0.75rem with a minimum width around
+       72 px). The 5rem offset lands the VR button just before it
+       in both LTR and RTL. */
+    inset-inline-end: calc(5rem * var(--ui-scale));
     z-index: 600;
     display: inline-flex;
     align-items: center;
-    gap: 0.4rem;
-    padding: 0.4rem 0.85rem;
+    gap: calc(0.4rem * var(--ui-scale));
+    padding: calc(0.4rem * var(--ui-scale)) calc(0.85rem * var(--ui-scale));
     background: var(--glass-bg-light);
     backdrop-filter: var(--glass-blur);
     -webkit-backdrop-filter: var(--glass-blur);
     border: 1px solid var(--color-accent);
-    border-radius: 18px;
+    border-radius: calc(18px * var(--ui-scale));
     color: var(--color-accent);
-    font-size: 0.78rem;
+    font-size: calc(0.78rem * var(--ui-scale));
     letter-spacing: 0.04em;
     font-weight: 500;
     cursor: pointer;
-    min-height: 36px;
+    min-height: calc(36px * var(--ui-scale));
     pointer-events: auto;
     transition: background 0.15s, color 0.15s, border-color 0.15s;
 }
@@ -47,7 +49,7 @@
 }
 
 #vr-enter-btn .vr-btn-icon {
-    font-size: 1rem;
+    font-size: calc(1rem * var(--ui-scale));
     line-height: 1;
 }
 
@@ -61,10 +63,84 @@ body.browse-open #vr-enter-btn {
    crowd out the help button on mobile. */
 @media (max-width: 600px) {
     #vr-enter-btn {
-        right: 4.25rem;
-        padding: 0.4rem 0.55rem;
+        inset-inline-end: calc(4.25rem * var(--ui-scale));
+        padding: calc(0.4rem * var(--ui-scale)) calc(0.55rem * var(--ui-scale));
     }
     #vr-enter-btn .vr-btn-label {
         display: none;
+    }
+}
+
+/* --- In-AR vertical zoom slider ---
+ * Mounted by vrSession on screen-tap / transient-pointer sessions.
+ * Floats on the inline-end edge of the viewport, vertically
+ * centered. Logical inline properties so the slider flips correctly
+ * in RTL locales. The WebXR canvas itself is below the DOM (covers
+ * the entire viewport), so this overlay reads as a proper
+ * touch-friendly control on top of it.
+ */
+.vr-zoom-overlay {
+    position: fixed;
+    top: 50%;
+    inset-inline-end: calc(0.75rem * var(--ui-scale));
+    transform: translateY(-50%);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: calc(0.45rem * var(--ui-scale));
+    padding: calc(0.6rem * var(--ui-scale)) calc(0.45rem * var(--ui-scale));
+    background: var(--glass-bg);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
+    border: var(--glass-border);
+    border-radius: var(--radius-lg);
+    color: var(--color-text);
+    z-index: 950;
+    pointer-events: auto;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+    /* Tap targets need to clear ~44 px to be reliable on touch. */
+    min-width: max(44px, calc(44px * var(--ui-scale)));
+}
+
+.vr-zoom-overlay-label {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: calc(0.65rem * var(--ui-scale));
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+    font-weight: 700;
+}
+
+.vr-zoom-overlay-slider {
+    /* Vertical slider — three independent hints because no single
+     * one works everywhere:
+     *   - `appearance: slider-vertical` covers older Chromium/WebKit
+     *   - `orient="vertical"` (set in JS on the element) covers
+     *     Firefox
+     *   - `writing-mode: vertical-lr` is the modern spec-blessed
+     *     route picked up by recent Chromium and WebKit
+     * The combination renders correctly on every engine we've
+     * tested without needing a CSS rotate fallback. */
+    -webkit-appearance: slider-vertical;
+    appearance: slider-vertical;
+    writing-mode: vertical-lr;
+    direction: rtl; /* Fills bottom-to-top per UX expectation. */
+    width: calc(24px * var(--ui-scale));
+    height: calc(200px * var(--ui-scale));
+    accent-color: var(--color-accent);
+    cursor: ns-resize;
+    margin: 0;
+    background: transparent;
+}
+
+.vr-zoom-overlay-slider:focus-visible {
+    outline: 2px solid var(--accent-o70);
+    outline-offset: 4px;
+    border-radius: var(--radius-sm);
+}
+
+@media (max-height: 480px) {
+    .vr-zoom-overlay-slider {
+        height: calc(140px * var(--ui-scale));
     }
 }

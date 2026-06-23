@@ -6,11 +6,10 @@
  * concerns: ULID minting, slug uniqueness checks, decoration
  * upsert, role-aware visibility filters.
  *
- * Authorisation model (Phase 1a):
- *   - `staff` and the synthetic `service` role see all rows.
- *   - `community` (and any role we don't recognise) see only rows
- *     where `publisher_id = caller.id`.
- *   - `is_admin = 1` is staff-equivalent (used by dev-bypass).
+ * Authorisation model:
+ *   - `admin` and the synthetic `service` role see all rows.
+ *   - `publisher` / `readonly` (and any role we don't recognise) see
+ *     only rows where `publisher_id = caller.id`.
  *
  * Phase 1a is metadata-only: `data_ref` / `thumbnail_ref` /
  * `legend_ref` / `caption_ref` are bare strings supplied by the
@@ -133,6 +132,20 @@ export type DraftCreateOutcome = DraftCreateResult | DraftCreateFailure
 function publisherScope(publisher: PublisherRow): { sql: string; binds: unknown[] } {
   if (isPrivileged(publisher)) return { sql: '1=1', binds: [] }
   return { sql: 'publisher_id = ?', binds: [publisher.id] }
+}
+
+/**
+ * Collapse undefined / null / empty / whitespace-only strings to
+ * NULL on the way to D1. Used by Phase 3d's `celestial_body`
+ * column so a publisher posting `""` is treated the same as
+ * omission (the "Earth implicit" convention) — defense in depth
+ * for both the SOS importer (which already strips empties) and
+ * the future publisher-portal client.
+ */
+function normalizeOptionalString(value: string | null | undefined): string | null {
+  if (value == null) return null
+  const trimmed = value.trim()
+  return trimmed.length === 0 ? null : trimmed
 }
 
 export interface ListOptions {
@@ -348,12 +361,15 @@ export async function createDataset(
     .prepare(
       `INSERT INTO datasets (
          id, slug, origin_node, title, abstract, organization, format, data_ref,
-         thumbnail_ref, legend_ref, caption_ref, website_link,
+         thumbnail_ref, legend_ref, caption_ref, color_table_ref, website_link,
          start_time, end_time, period, weight, visibility, is_hidden, run_tour_on_load,
          license_spdx, license_url, license_statement, attribution_text,
          rights_holder, doi, citation_text, legacy_id,
+         probing_info,
+         bbox_n, bbox_s, bbox_w, bbox_e,
+         celestial_body, radius_mi, lon_origin, is_flipped_in_y,
          schema_version, created_at, updated_at, published_at, publisher_id
-       ) VALUES (?,?,(SELECT node_id FROM node_identity LIMIT 1),?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+       ) VALUES (?,?,(SELECT node_id FROM node_identity LIMIT 1),?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     )
     .bind(
       id,
@@ -371,6 +387,7 @@ export async function createDataset(
       body.thumbnail_ref ?? null,
       body.legend_ref ?? null,
       body.caption_ref ?? null,
+      body.color_table_ref ?? null,
       body.website_link ?? null,
       body.start_time ?? null,
       body.end_time ?? null,
@@ -387,6 +404,30 @@ export async function createDataset(
       body.doi ?? null,
       body.citation_text ?? null,
       body.legacy_id ?? null,
+      // Phase 3b restored probing_info from the SOS snapshot.
+      // Validated upstream as a plain JSON-stringified blob; D1
+      // stores it verbatim and the serializer hands it back to
+      // callers unchanged. NULL on rows that don't carry it.
+      body.probing_info ?? null,
+      // Phase 3d typed bbox + non-Earth metadata. NULL when
+      // omitted; the serializer surfaces them only on populated
+      // rows so the wire stays terse for the common case.
+      body.bounding_box?.n ?? null,
+      body.bounding_box?.s ?? null,
+      body.bounding_box?.w ?? null,
+      body.bounding_box?.e ?? null,
+      // celestial_body: blank/whitespace collapses to NULL so the
+      // "Earth implicit" convention is preserved on the read side.
+      // (The SOS importer already strips empties, but a publisher-
+      // portal caller could still post `""` and we want defense in
+      // depth.)
+      normalizeOptionalString(body.celestial_body),
+      body.radius_mi ?? null,
+      body.lon_origin ?? null,
+      // is_flipped_in_y: both undefined and explicit null map to
+      // NULL (the column's default state); booleans round-trip
+      // through 0/1.
+      body.is_flipped_in_y == null ? null : body.is_flipped_in_y ? 1 : 0,
       1,
       now,
       now,
@@ -424,6 +465,90 @@ export async function updateDataset(
 
   const db = env.CATALOG_DB!
 
+  // Asset-coupled field guard: refuse `format` or `data_ref`
+  // mutations while the row is mid-transcode. Without these an
+  // editor could
+  //   • swap `video/mp4` → `image/png` and end up with the
+  //     workflow's eventual HLS data_ref contradicting the new
+  //     format, or
+  //   • paste a manual `vimeo:` / `url:` / `r2:videos/...`
+  //     value into data_ref that the workflow's
+  //     /transcode-complete callback will overwrite as soon as
+  //     it finishes (and which any /publish or /preview hit
+  //     between the manual edit and the callback would
+  //     transiently surface).
+  // The dataset form's UI gate already prevents both through
+  // the supported path (the format radio is disabled in /W,
+  // the data_ref input is replaced by a read-only notice in /Q),
+  // but the server is the authoritative check — a direct API
+  // call could otherwise bypass the UI. Both rejections share
+  // the same 409 envelope so the client treats them uniformly.
+  // PR #112 followup — dataset-form.ts:937 (server-side
+  // companion) + dataset-mutations.ts (data_ref extension).
+  // Capture once and reuse for both the JS pre-check below and
+  // the SQL-level atomic guard further down. Without this, the
+  // pre-check would SELECT and the UPDATE would not know which
+  // fields were "value-actually-changing" vs same-value
+  // submissions (the form re-serializes every field on save,
+  // including format/data_ref, so a save that doesn't touch
+  // those fields still has them in the body).
+  const guardableFieldsInBody =
+    body.format !== undefined || body.data_ref !== undefined
+  let currentForGuard:
+    | { format: string; data_ref: string; transcoding: number | null }
+    | null = null
+  if (guardableFieldsInBody) {
+    currentForGuard =
+      (await db
+        .prepare('SELECT format, data_ref, transcoding FROM datasets WHERE id = ?')
+        .bind(id)
+        .first<{ format: string; data_ref: string; transcoding: number | null }>()) ?? null
+  }
+  const formatChanges =
+    body.format !== undefined && currentForGuard !== null && body.format !== currentForGuard.format
+  const dataRefChanges =
+    body.data_ref !== undefined &&
+    currentForGuard !== null &&
+    body.data_ref !== currentForGuard.data_ref
+
+  if (currentForGuard?.transcoding === 1) {
+    if (formatChanges) {
+      return {
+        ok: false,
+        status: 409,
+        errors: [
+          {
+            field: 'format',
+            code: 'transcoding_in_progress',
+            message:
+              'Cannot change format while a video transcode is in flight — ' +
+              'the workflow will write a video data_ref into this row when it ' +
+              'finishes, which would contradict the new format. Wait for the ' +
+              '"Transcoding…" badge to clear, then update format.',
+          },
+        ],
+      }
+    }
+    if (dataRefChanges) {
+      return {
+        ok: false,
+        status: 409,
+        errors: [
+          {
+            field: 'data_ref',
+            code: 'transcoding_in_progress',
+            message:
+              'Cannot change data_ref while a video transcode is in flight — ' +
+              'the workflow will overwrite it with the new HLS bundle path ' +
+              'when it finishes, and a /publish or /preview hit before that ' +
+              'callback would transiently surface the manual value. Wait for ' +
+              'the "Transcoding…" badge to clear, then update data_ref.',
+          },
+        ],
+      }
+    }
+  }
+
   const sets: string[] = []
   const binds: unknown[] = []
   function set(col: string, v: unknown): void {
@@ -439,6 +564,24 @@ export async function updateDataset(
   if (body.thumbnail_ref !== undefined) set('thumbnail_ref', body.thumbnail_ref)
   if (body.legend_ref !== undefined) set('legend_ref', body.legend_ref)
   if (body.caption_ref !== undefined) set('caption_ref', body.caption_ref)
+  if (body.color_table_ref !== undefined) set('color_table_ref', body.color_table_ref)
+  if (body.probing_info !== undefined) set('probing_info', body.probing_info)
+  // Phase 3d bbox + non-Earth fields. An explicit `null` body
+  // value clears the column; omission leaves it untouched.
+  if (body.bounding_box !== undefined) {
+    set('bbox_n', body.bounding_box?.n ?? null)
+    set('bbox_s', body.bounding_box?.s ?? null)
+    set('bbox_w', body.bounding_box?.w ?? null)
+    set('bbox_e', body.bounding_box?.e ?? null)
+  }
+  if (body.celestial_body !== undefined) {
+    set('celestial_body', normalizeOptionalString(body.celestial_body))
+  }
+  if (body.radius_mi !== undefined) set('radius_mi', body.radius_mi)
+  if (body.lon_origin !== undefined) set('lon_origin', body.lon_origin)
+  if (body.is_flipped_in_y !== undefined) {
+    set('is_flipped_in_y', body.is_flipped_in_y === null ? null : body.is_flipped_in_y ? 1 : 0)
+  }
   if (body.website_link !== undefined) set('website_link', body.website_link)
   if (body.start_time !== undefined) set('start_time', body.start_time)
   if (body.end_time !== undefined) set('end_time', body.end_time)
@@ -496,11 +639,61 @@ export async function updateDataset(
 
   set('updated_at', new Date().toISOString())
 
+  // SQL-level atomic guard for the format/data_ref check above.
+  // The JS pre-check fails fast with a clear error message in
+  // the common case, but is TOCTOU-vulnerable: between its
+  // SELECT and this UPDATE, a concurrent /asset/{upload}/complete
+  // could stamp `transcoding=1`, and the UPDATE would still
+  // apply the format/data_ref change. Scoping the UPDATE itself
+  // to `(transcoding IS NULL OR transcoding = 0)` when those
+  // fields are in the body closes the window — the SQL engine
+  // evaluates the WHERE clause atomically with the SET. PR #112
+  // followup — dataset-mutations.ts (TOCTOU on format/data_ref
+  // guard). On 0 rows affected, return the same 409 envelope
+  // the JS check produces so the client treats the two paths
+  // uniformly.
+  // The atomic guard only fires when format/data_ref are
+  // ACTUALLY changing (different from the row's current value).
+  // Submitting the same value as a no-op shouldn't trip the
+  // guard — the form re-serializes every field on save, so a
+  // save that doesn't touch format/data_ref still has them in
+  // the body.
+  const needsTranscodingGuard = formatChanges || dataRefChanges
+  let whereSql = 'WHERE id = ?'
+  if (needsTranscodingGuard) {
+    whereSql += ' AND (transcoding IS NULL OR transcoding = 0)'
+  }
+
   if (sets.length) {
-    await db
-      .prepare(`UPDATE datasets SET ${sets.join(', ')} WHERE id = ?`)
+    const result = await db
+      .prepare(`UPDATE datasets SET ${sets.join(', ')} ${whereSql}`)
       .bind(...binds, id)
       .run()
+    if (needsTranscodingGuard && (result.meta?.changes ?? 0) === 0) {
+      // The JS pre-check passed but the UPDATE filtered the row
+      // out — a concurrent stamp landed between SELECT and
+      // UPDATE. Surface the same field-level 409 as the pre-
+      // check so the client renders the same per-field message.
+      // We don't know which of format / data_ref the publisher
+      // tried to change, so attribute to whichever was in the
+      // body (format wins if both).
+      const field = body.format !== undefined ? 'format' : 'data_ref'
+      return {
+        ok: false,
+        status: 409,
+        errors: [
+          {
+            field,
+            code: 'transcoding_in_progress',
+            message:
+              `Cannot change ${field} while a video transcode is in flight — ` +
+              `a concurrent upload stamped the row between the freshness check ` +
+              `and the apply step. Wait for the "Transcoding…" badge to clear, ` +
+              `then retry.`,
+          },
+        ],
+      }
+    }
   }
   await replaceDecorations(db, id, body)
 
@@ -542,6 +735,33 @@ export async function publishDataset(
       ok: false,
       status: 404,
       errors: [{ field: 'id', code: 'not_found', message: `Dataset ${id} not found.` }],
+    }
+  }
+
+  // Refuse to publish a row whose video source is still being
+  // transcoded. The detail page's UI gate already disables the
+  // Publish button while `transcoding=1`, but a direct API
+  // POST or a CLI call could bypass that — this server-side
+  // check is the authoritative gate. For a row whose
+  // `data_ref` is already pointing at a playable bundle (the
+  // re-upload case on a published / retracted row), publishing
+  // mid-transcode would also point public clients at the OLD
+  // bundle even though the row's metadata is mid-flip; cleaner
+  // to require the transcode to finish first.
+  if (row.transcoding) {
+    return {
+      ok: false,
+      status: 409,
+      errors: [
+        {
+          field: 'transcoding',
+          code: 'transcoding_in_progress',
+          message:
+            'Cannot publish while a video transcode is in flight. ' +
+            'Wait for the workflow to finish and the "Transcoding…" ' +
+            'badge to clear, then publish.',
+        },
+      ],
     }
   }
 
@@ -674,4 +894,93 @@ export async function retractDataset(
     .bind(id)
     .first<DatasetRow>()
   return { ok: true, dataset: after! }
+}
+
+/**
+ * Hard-delete a dataset — the cleanup path the Z0 spike drafts
+ * surfaced the need for (tours have had one since 3pt/G).
+ * Restricted to rows that are not currently published (retract
+ * first) and not mid-transcode. Removes the D1 row (decoration
+ * tables cascade via their FKs), drops the docent embedding,
+ * invalidates the snapshot, and best-effort deletes the row's R2
+ * prefixes (`uploads/`, `videos/`, `datasets/`) so storage doesn't
+ * leak with the row. Visibility gating goes through
+ * `getDatasetForPublisher`, so a community publisher can only
+ * delete their own rows; staff / admin / service can delete any.
+ */
+export async function deleteDataset(
+  env: CatalogEnv,
+  publisher: PublisherRow,
+  id: string,
+  deps: MutationDeps = {},
+): Promise<
+  | { ok: true; deleted_id: string }
+  | { ok: false; status: number; error: string; message: string }
+> {
+  const db = env.CATALOG_DB!
+  const row = await getDatasetForPublisher(db, publisher, id)
+  if (!row) {
+    return { ok: false, status: 404, error: 'not_found', message: `Dataset ${id} not found.` }
+  }
+  if (row.published_at && !row.retracted_at) {
+    return {
+      ok: false,
+      status: 409,
+      error: 'published',
+      message: 'Retract the dataset before deleting it.',
+    }
+  }
+  if ((row as { transcoding?: number | null }).transcoding) {
+    return {
+      ok: false,
+      status: 409,
+      error: 'transcode_in_progress',
+      message: 'A transcode is in flight; wait for it to finish before deleting.',
+    }
+  }
+  // Conditional delete re-asserts the guards atomically — a row
+  // that became published or started transcoding between the
+  // pre-read and this statement survives, and meta.changes tells
+  // us to re-diagnose (PR #177 Copilot review, TOCTOU).
+  const deleted = await db
+    .prepare(
+      `DELETE FROM datasets
+        WHERE id = ?
+          AND (published_at IS NULL OR retracted_at IS NOT NULL)
+          AND (transcoding IS NULL OR transcoding = 0)`,
+    )
+    .bind(id)
+    .run()
+  if ((deleted.meta?.changes ?? 0) === 0) {
+    return {
+      ok: false,
+      status: 409,
+      error: 'conflict',
+      message: 'The dataset changed state (published or transcoding) before the delete landed; refresh and retry.',
+    }
+  }
+  await invalidateSnapshot(env)
+  // Idempotent at the helper level — deleting a vector that was
+  // never written (drafts are unembedded) is a no-op.
+  await enqueueDeleteEmbedding(deps, env, id)
+  if (env.CATALOG_R2) {
+    for (const prefix of [`uploads/${id}/`, `videos/${id}/`, `datasets/${id}/`]) {
+      try {
+        // Bounded best-effort: a few pages per prefix. Anything
+        // beyond that waits for the storage-GC job scoped in
+        // docs/ZYRA_INTEGRATION_PLAN.md §Open questions — D1 is
+        // the canonical "dataset exists" state and is already
+        // cleared.
+        for (let page = 0; page < 5; page++) {
+          const listing = await env.CATALOG_R2.list({ prefix, limit: 500 })
+          if (listing.objects.length === 0) break
+          await Promise.all(listing.objects.map(o => env.CATALOG_R2!.delete(o.key)))
+          if (!listing.truncated) break
+        }
+      } catch {
+        // R2 hiccup must not fail the delete.
+      }
+    }
+  }
+  return { ok: true, deleted_id: id }
 }

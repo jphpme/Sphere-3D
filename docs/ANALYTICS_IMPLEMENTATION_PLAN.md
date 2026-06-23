@@ -232,7 +232,7 @@ without storing free text. The full text never leaves the client.
 
 | Event | Tier | `blobs[]` | `doubles[]` |
 |---|---|---|---|
-| `vr_session_started` | A | `event_type`, `mode` (`ar`/`vr`), `device_class` (`quest`/`quest-pro`/`vision-pro`/`pcvr`/`unknown`), `layer_id` (nullable — dataset loaded at entry) | `entry_load_ms` |
+| `vr_session_started` | A | `event_type`, `mode` (`ar`/`vr`), `device_class` (`quest`/`quest-pro`/`pico`/`vision-pro`/`hololens`/`magic-leap`/`android-ar`/`pcvr`/`unknown`), `layer_id` (nullable — dataset loaded at entry) | `entry_load_ms` |
 | `vr_session_ended` | A | `event_type`, `mode`, `exit_reason` (`user`/`error`/`session_lost`), `layer_id` (nullable — dataset loaded at exit; may differ from `vr_session_started.layer_id` when the user loaded something different mid-session) | `duration_ms`, `mean_fps` (nullable; arithmetic mean over the whole session) |
 | `vr_placement` | A | `event_type`, `layer_id` (nullable), `persisted` (`true`/`false`) | — |
 | `vr_interaction` | B | `event_type`, `gesture` (`drag`/`pinch`/`thumbstick_zoom`/`flick_spin`/`hud_tap`) | `magnitude` (rotation deg or zoom factor) |
@@ -242,7 +242,7 @@ without storing free text. The full text never leaves the client.
 | Event | Tier | `blobs[]` | `doubles[]` |
 |---|---|---|---|
 | `perf_sample` | A | `event_type`, `surface` (`map`/`vr`), `webgl_renderer_hash` (SHA-256 of `WEBGL_debug_renderer_info`, first 8 hex) | `fps_median_10s`, `frame_time_p95_ms`, `jsheap_mb` (nullable) |
-| `error` | A | `event_type`, `category` (`tile`/`hls`/`llm`/`download`/`vr`/`tour`/`uncaught`/`console`/`native_panic`), `source` (`caught`/`window_error`/`unhandledrejection`/`console_error`/`console_warn`/`tauri_panic`), `code` (HTTP status or classified enum), `message_class` (sanitized first line, ≤ 80 chars) | `count_in_batch` (for deduped repeats) |
+| `error` | A | `event_type`, `category` (`tile`/`hls`/`llm`/`download`/`vr`/`tour`/`caption`/`uncaught`/`console`/`native_panic`), `source` (`caught`/`window_error`/`unhandledrejection`/`console_error`/`console_warn`/`tauri_panic`), `code` (HTTP status or classified enum), `message_class` (sanitized first line, ≤ 80 chars) | `count_in_batch` (for deduped repeats) |
 | `error_detail` | **B** | `event_type`, `category`, `source`, `message_class`, `stack_signature` (SHA-256 of normalized stack, first 12 hex), `frames_json` (compact array of `{fn, line}` pairs, function names only, max 10 frames) | `count_in_batch` |
 
 Two-tier error model — the same pipeline, two different emission paths:
@@ -773,6 +773,14 @@ don't have:
 ---
 
 ## Phase 2 — R2 / Iceberg for Zyra
+
+> **Superseded for sequencing** by
+> [`ANALYTICS_STORAGE_AND_ADMIN_PLAN.md`](ANALYTICS_STORAGE_AND_ADMIN_PLAN.md):
+> long-term retention lands first as a nightly export (AE SQL API →
+> R2 raw NDJSON + D1 rollups) powering an in-app admin dashboard.
+> Iceberg remains the promotion path for that R2 archive when Zyra
+> needs it, rather than the first step. The sketch below is kept as
+> the original design context.
 
 Client and Pages Function are unchanged. The Function fans out:
 

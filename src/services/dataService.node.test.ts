@@ -16,22 +16,22 @@ import { DataService } from './dataService'
 const ORIGINAL_SOURCE = import.meta.env.VITE_CATALOG_SOURCE
 const ORIGINAL_REALTIME_DASH_BASE_URL = import.meta.env.VITE_REALTIME_DASH_BASE_URL
 
-function mockNodeCatalog(datasets: unknown[], realtimeIndex: unknown | null = null) {
+function mockNodeCatalog(datasets: unknown[], tours: unknown[] = []) {
   return vi.fn(async (input: RequestInfo | URL | string) => {
-    if (String(input) === '/assets/realtime-dash-datasets.json') {
-      if (realtimeIndex) {
-        return new Response(JSON.stringify(realtimeIndex), {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' },
-        })
-      }
-      return new Response('', { status: 404 })
+    const url = String(input)
+    if (url === '/api/v1/catalog') {
+      return new Response(JSON.stringify({ datasets }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
     }
-    expect(String(input)).toBe('/api/v1/catalog')
-    return new Response(JSON.stringify({ datasets }), {
-      status: 200,
-      headers: { 'Content-Type': 'application/json' },
-    })
+    if (url === '/api/v1/tours') {
+      return new Response(JSON.stringify({ tours }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    throw new Error(`Unexpected fetch URL: ${url}`)
   }) as unknown as typeof fetch
 }
 
@@ -103,6 +103,109 @@ describe('DataService — node-mode', () => {
     expect(ids).toContain('SAMPLE_TOUR_CLIMATE_FUTURES')
   })
 
+  it('merges publisher tours from /api/v1/tours into the dataset list', async () => {
+    vi.stubGlobal(
+      'fetch',
+      mockNodeCatalog(
+        [],
+        [
+          {
+            id: '01HXPUB000000000000000001',
+            slug: 'hurricane-tour',
+            title: 'Hurricane Tour',
+            description: 'A guided look at hurricane formation.',
+            tour_json_url: 'https://r2.example.com/tours/01HX/published/01HY.json',
+            thumbnail_url: 'https://r2.example.com/tours/01HX/thumb.jpg',
+            visibility: 'public',
+            schema_version: 1,
+            created_at: '2026-05-01T00:00:00.000Z',
+            updated_at: '2026-05-01T00:00:00.000Z',
+            published_at: '2026-05-01T00:00:00.000Z',
+            origin_node: 'NODE000',
+          },
+        ],
+      ),
+    )
+    const svc = new DataService()
+    const datasets = await svc.fetchDatasets()
+    const tour = datasets.find(d => d.id === '01HXPUB000000000000000001')
+    expect(tour).toBeDefined()
+    expect(tour!.format).toBe('tour/json')
+    expect(tour!.title).toBe('Hurricane Tour')
+    expect(tour!.tourJsonUrl).toBe(
+      'https://r2.example.com/tours/01HX/published/01HY.json',
+    )
+    expect(tour!.tags).toEqual(['Tours'])
+  })
+
+  it('drops tours with null tour_json_url (server could not resolve R2)', async () => {
+    // R2_PUBLIC_BASE unset on the deployment → the server
+    // returns tour_json_url: null. A card pointing nowhere
+    // would `fetch('')` on launch and confuse on the HTML
+    // response. The dataService filters these out and warns;
+    // operators see the log and wire the bucket up.
+    vi.stubGlobal(
+      'fetch',
+      mockNodeCatalog(
+        [],
+        [
+          {
+            id: '01HXOK00000000000000000001',
+            slug: 'launchable',
+            title: 'Launchable',
+            description: null,
+            tour_json_url: 'https://r2.example.com/tours/ok/published/1.json',
+            thumbnail_url: null,
+            visibility: 'public',
+            schema_version: 1,
+            created_at: '2026-05-01T00:00:00.000Z',
+            updated_at: '2026-05-01T00:00:00.000Z',
+            published_at: '2026-05-01T00:00:00.000Z',
+            origin_node: 'NODE000',
+          },
+          {
+            id: '01HXBAD00000000000000000001',
+            slug: 'broken',
+            title: 'Broken — no R2 URL',
+            description: null,
+            tour_json_url: null,
+            thumbnail_url: null,
+            visibility: 'public',
+            schema_version: 1,
+            created_at: '2026-05-01T00:00:00.000Z',
+            updated_at: '2026-05-01T00:00:00.000Z',
+            published_at: '2026-05-01T00:00:00.000Z',
+            origin_node: 'NODE000',
+          },
+        ],
+      ),
+    )
+    const svc = new DataService()
+    const datasets = await svc.fetchDatasets()
+    const ids = datasets.map(d => d.id)
+    expect(ids).toContain('01HXOK00000000000000000001')
+    expect(ids).not.toContain('01HXBAD00000000000000000001')
+  })
+
+  it('tolerates a tours-endpoint failure and still returns datasets', async () => {
+    const fetchStub = vi.fn(async (input: RequestInfo | URL | string) => {
+      const url = String(input)
+      if (url === '/api/v1/catalog') {
+        return new Response(JSON.stringify({ datasets: [] }), { status: 200 })
+      }
+      if (url === '/api/v1/tours') {
+        return new Response('boom', { status: 500 })
+      }
+      throw new Error(`Unexpected fetch URL: ${url}`)
+    }) as unknown as typeof fetch
+    vi.stubGlobal('fetch', fetchStub)
+    const svc = new DataService()
+    // No throw — the dataset path is intact even though tours
+    // failed. Sample tours still injected.
+    const datasets = await svc.fetchDatasets()
+    expect(datasets.map(d => d.id)).toContain('SAMPLE_TOUR')
+  })
+
   it('filters hidden datasets and HIDDEN_TOUR_IDS', async () => {
     vi.stubGlobal(
       'fetch',
@@ -158,100 +261,12 @@ describe('DataService — node-mode', () => {
     const svc = new DataService()
     await svc.fetchDatasets()
     await svc.fetchDatasets()
+    // Phase 3pt/G follow-up — node mode now hits two endpoints
+    // per fetch (catalog + tours). The cache wraps the merged
+    // result so the second fetchDatasets should re-hit neither.
     expect(fetchStub).toHaveBeenCalledTimes(2)
-  })
-
-  it('prefixes real-time DASH titles and marks them for default borders', async () => {
-    vi.stubGlobal(
-      'fetch',
-      mockNodeCatalog([], {
-        baseUrl: 'https://cdn.example.com/ayni/',
-        generatedAt: '2026-05-06T09:02:10Z',
-        datasets: [
-          {
-            id: 'rt001',
-            display_name: 'Lightning',
-            type: 'stream',
-            categories: ['atmosphere'],
-            mpd: 'realtime/provider/lightning/stream.mpd',
-          },
-          {
-            id: 'fc001',
-            display_name: 'Forecast: Sea Level',
-            type: 'forecast',
-            categories: ['hydrosphere'],
-            mpd: 'forecast/provider/sea_level/stream.mpd',
-          },
-        ],
-      }),
-    )
-
-    const svc = new DataService()
-    const datasets = await svc.fetchDatasets()
-    const realtime = datasets.find(d => d.id === 'R2_DASH_rt001')
-    const forecast = datasets.find(d => d.id === 'R2_DASH_fc001')
-
-    expect(realtime?.title).toBe('Real Time: Lightning')
-    expect(realtime?.realtimeKind).toBe('real-time')
-    expect(realtime?.defaultBordersVisible).toBe(true)
-    expect(realtime?.dataLink).toBe('https://cdn.example.com/ayni/realtime/provider/lightning/stream.mpd')
-    expect(forecast?.title).toBe('Forecast: Sea Level')
-    expect(forecast?.realtimeKind).toBe('forecast')
-    expect(forecast?.defaultBordersVisible).toBe(true)
-  })
-
-  it('detects forecast kind from schema 1.2 dataProductType + new R2 path layout', async () => {
-    // The pachamama-studios.stream index reorganised paths to
-    // `global|regional/<realtime|forecast>/<org-slug>/<name>/...` and
-    // replaced `type: 'forecast'` with `dataProductType`. The legacy
-    // `mpd.startsWith('forecast/')` check no longer matches, so the
-    // loader must read `dataProductType` (and tolerate `/forecast/`
-    // in the path) or every forecast row is mislabelled real-time.
-    vi.stubGlobal(
-      'fetch',
-      mockNodeCatalog([], {
-        schemaVersion: '1.2',
-        baseUrl: 'https://pachamama-studios.stream/',
-        generatedAt: '2026-06-22T19:45:28Z',
-        datasets: [
-          {
-            id: 'clouds_grouped',
-            display_name: 'Global Cloud Cover',
-            type: 'stream',
-            dataProductType: 'realtime',
-            organization: 'NOAA Science On a Sphere',
-            categories: ['atmosphere'],
-            units: '%',
-            mpd: 'global/realtime/noaa-sos/clouds_grouped/stream.mpd',
-          },
-          {
-            id: 'ecmwf_t2m_forecast',
-            display_name: 'Forecast: Surface Temperature (ECMWF)',
-            type: 'stream',
-            dataProductType: 'forecast',
-            organization: 'ECMWF Open Data',
-            categories: ['atmosphere'],
-            units: '°C',
-            mpd: 'global/forecast/ecmwf-open-data/ecmwf_t2m_forecast/stream.mpd',
-          },
-        ],
-      }),
-    )
-
-    const svc = new DataService()
-    const datasets = await svc.fetchDatasets()
-    const realtime = datasets.find(d => d.id === 'R2_DASH_clouds_grouped')
-    const forecast = datasets.find(d => d.id === 'R2_DASH_ecmwf_t2m_forecast')
-
-    expect(realtime?.realtimeKind).toBe('real-time')
-    expect(realtime?.title).toBe('Real Time: Global Cloud Cover')
-    expect(realtime?.organization).toBe('NOAA Science On a Sphere')
-    expect(realtime?.dataLink).toBe('https://pachamama-studios.stream/global/realtime/noaa-sos/clouds_grouped/stream.mpd')
-
-    expect(forecast?.realtimeKind).toBe('forecast')
-    expect(forecast?.title).toBe('Forecast: Surface Temperature (ECMWF)')
-    expect(forecast?.organization).toBe('ECMWF Open Data')
-    expect(forecast?.dataLink).toBe('https://pachamama-studios.stream/global/forecast/ecmwf-open-data/ecmwf_t2m_forecast/stream.mpd')
+    expect(fetchStub).toHaveBeenNthCalledWith(1, '/api/v1/catalog', expect.anything())
+    expect(fetchStub).toHaveBeenNthCalledWith(2, '/api/v1/tours', expect.anything())
   })
 
   it('preserves legacyId from the wire shape and falls back on lookup (1d/T)', async () => {

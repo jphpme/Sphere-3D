@@ -740,6 +740,712 @@ The Pages-owning account's subscription is what counts; upgrading
 a personal account doesn't help if the Pages project lives under
 an org. Settings → Billing → Subscriptions on the right account.
 
+### Migrating legacy Vimeo data refs to R2/HLS
+
+Phase 1d's bulk import of the legacy SOS catalog landed ~136
+video rows with `data_ref: vimeo:<id>` — playback proxied through
+`video-proxy.zyra-project.org`. Phase 3
+(`terraviz migrate-r2-hls`) walks those rows, FFmpeg-encodes each
+source into a multi-rendition HLS bundle (4K + 1080p + 720p at
+2:1 spherical aspect, 6-second segments), uploads the bundle to
+R2 under `videos/<dataset_id>/`, and PATCHes `data_ref` to
+`r2:videos/<dataset_id>/master.m3u8`. After the migration,
+playback runs through R2's edge serving via your custom domain;
+egress is free.
+
+**One-time, operator-driven.** This is not a CI job. Run it from
+your laptop (or a container with the catalog repo checked out)
+against the production deploy with a service-token configured.
+Encoding takes minutes per row, so plan an overnight session for
+a full ~136-row run.
+
+(Phase 2 originally targeted Cloudflare Stream for this
+migration. The standard Stream plan caps rendition output at
+1080p, which is a UX regression for spherical content where
+viewers zoom into features smaller than the equator. Phase 3
+ships the R2 + HLS alternative that preserves 4K renditions.
+See the Phase 2 → 3 transition note in `CHANGELOG.md`.)
+
+#### Pages-side prerequisites (do this BEFORE the first run)
+
+Three things need to be in place before the migration's PATCH
+step lands a working `r2:` data_ref:
+
+1. **A custom domain bound to the R2 bucket.** Cloudflare
+   dashboard → R2 → `terraviz-assets` → Settings → Connect Domain.
+   The reference deploy uses `video.zyra-project.org`. DNS
+   propagation can take a few minutes.
+
+2. **`R2_PUBLIC_BASE` env var on the Pages project**, set to the
+   custom domain's URL (e.g. `https://video.zyra-project.org`).
+   Set it on **both Production and Preview**. Redeploy after
+   saving so the manifest endpoint picks it up.
+
+3. **CORS policy on the R2 bucket**, allowing GET from every
+   origin the SPA actually runs from. Cloudflare dashboard → R2
+   → `terraviz-assets` → Settings → CORS Policy:
+   ```json
+   [{
+     "AllowedOrigins": [
+       "https://terraviz.zyra-project.org",
+       "https://*.terraviz.pages.dev",
+       "tauri://localhost",
+       "http://tauri.localhost",
+       "https://tauri.localhost"
+     ],
+     "AllowedMethods": ["GET"],
+     "AllowedHeaders": ["*"],
+     "MaxAgeSeconds": 3600
+   }]
+   ```
+   The three `tauri.localhost` entries cover the Tauri desktop
+   webview: macOS uses the custom scheme `tauri://localhost` and
+   Windows/Linux use `http(s)://tauri.localhost`. Mirrors the
+   allowlist already accepted by `functions/api/ingest.ts`.
+   Without these, HLS.js's internal XHR manifest fetch from the
+   desktop build fails with `manifestLoadError` and the playlist
+   request shows `Origin tauri://localhost is not allowed by
+   Access-Control-Allow-Origin` in the console — see the
+   "Tauri webview is not a CORS-free zone" troubleshooting note
+   below. Without CORS entirely (the original baseline before
+   any allowed origins), the SPA's HLS player can't load the
+   playlist cross-origin and playback fails with a console error
+   rather than a clear network error.
+
+Then verify the binding state:
+
+```sh
+CLOUDFLARE_API_TOKEN=... CLOUDFLARE_ACCOUNT_ID=... \
+  npm run check:pages-bindings
+```
+
+`R2_PUBLIC_BASE` should show as present in both environments
+before the migration is safe to run.
+
+#### Operator-side prerequisites
+
+- **FFmpeg ≥ 6** on `PATH` (or pass `--ffmpeg-bin=<path>`).
+  Apt: `apt-get update && apt-get install -y ffmpeg`. Static
+  binaries from John Van Sickle work on any glibc Linux without
+  apt dependencies.
+- **R2 S3-API credentials in your shell:** `R2_S3_ENDPOINT`,
+  `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` (same trio Phase 2's
+  audit added to `expected-bindings.ts`). Mint at Cloudflare
+  dashboard → R2 → Manage R2 API Tokens → Read+Write scoped to
+  the bucket.
+- **TERRAVIZ_ACCESS_CLIENT_ID / SECRET** for the publisher API
+  PATCH step (same service token used for `import-snapshot` /
+  `verify-deploy`).
+- **At least 256 MB free disk per concurrent row** for the
+  encode workdir (default `/tmp/terraviz-hls/<dataset_id>/`).
+  Migration is sequential, so peak usage is bounded to one row at
+  a time.
+
+#### Pre-flight (always run dry-run first)
+
+The migration is idempotent — re-runs skip rows already on
+`r2:videos/`. The first thing to verify is the storage estimate:
+
+```sh
+set -a; . ~/.terraviz/prod.env; set +a
+npm run terraviz -- migrate-r2-hls --dry-run
+```
+
+The dry-run output prints:
+
+- The migration plan (number of `vimeo:` rows + the first 5 by id).
+- The number of rows skipped by the **real-time guard** (default-on)
+  — see below.
+- A storage estimate computed by summing source durations from the
+  video-proxy metadata and multiplying by an ~244 MB/min ladder
+  constant calibrated to the 4K + 1080p + 720p renditions.
+  Order-of-magnitude only — actual bundle sizes vary with
+  content complexity (motion, scene cuts).
+- A monthly storage cost in $ at R2's $0.015/GB-month rate. The
+  ~136-row catalog typically estimates around 30-50 GB total →
+  ~$0.50/month flat; R2 egress is free so delivery costs nothing.
+
+#### Real-time row guard
+
+A handful of SOS rows are titled e.g. `Sea Surface Temperature -
+Real-time` — NOAA's automation re-uploads these to the same
+Vimeo IDs daily. Phase 3 is a one-shot encode, so the R2 copy
+goes stale within 24h for these rows. The migrator filters them
+out at plan time by default, matching the literal substring
+`real-time` (case-insensitive, hyphen / space / joined variants
+all caught) against the row title — the SOS catalog has no
+explicit `update_cadence` field so the title is the only
+reliable signal.
+
+The plan summary surfaces the skipped count + first 5 IDs so
+you can sanity-check the heuristic before the live run:
+
+```
+Migration plan:
+  vimeo: rows on video/mp4:   136
+  skipped (real-time guard):  42 (Vimeo source is updated daily; one-shot R2 copy would go stale)
+  will migrate this run:      94
+  Skipped real-time rows (--no-skip-realtime to override):
+    • DSXXXX...  vimeo:111  Sea Surface Temperature - Real-time
+    • ...
+```
+
+To migrate a real-time row anyway (e.g. you accept the staleness
+or are shipping a known-stale snapshot), pass
+`--no-skip-realtime` for the bulk path or `--id <row>` for
+single-row mode (the `--id` override prints a stderr warning
+when the targeted row matches the heuristic, so a slip-of-the-finger
+is still visible). A proper recurring-refresh mechanism is
+deferred to a Phase 3c follow-up.
+
+##### Triaging real-time rows that are already on r2:
+
+For rows that were migrated *before* the `--skip-realtime` guard
+landed (i.e. they're already serving a 24h-stale snapshot from
+R2), use `terraviz list-realtime-r2` to identify them and
+recover the original Vimeo id needed for rollback:
+
+```sh
+# NDJSON output — one row per match, ready to pipe.
+npm run terraviz -- list-realtime-r2
+
+# Human-readable inspection:
+npm run terraviz -- list-realtime-r2 --human
+```
+
+The lookup walks the catalog (`status=published`), filters to
+`r2:videos/` + `video/mp4` + the same title heuristic, and joins
+each match against `public/assets/sos-dataset-list.json` via
+`legacy_id` → `entry.id` to extract the Vimeo id from
+`dataLink`. Rows whose `legacy_id` isn't in the snapshot — or
+whose `dataLink` isn't a `vimeo.com` URL — surface to stderr
+without polluting the NDJSON stream; recover those IDs from
+Grafana's `migration_r2_hls` events (the `vimeo_id` is on
+`blob9`) or the Vimeo dashboard, then call `rollback-r2-hls`
+manually.
+
+To bulk-roll-back the matched rows:
+
+```sh
+npm run terraviz -- list-realtime-r2 \
+  | npm run terraviz -- rollback-r2-hls --from-stdin
+```
+
+See the `rollback-r2-hls` runbook below for the per-row
+rollback semantics (PATCH-then-DELETE, commit-point ordering).
+
+#### Live migration
+
+Once the dry-run looks right:
+
+```sh
+# Sanity batch — migrate 1 row, verify playback in the SPA, then continue.
+npm run terraviz -- migrate-r2-hls --limit=1
+
+# Small batch — 5 more rows; watch the Grafana migration row populate.
+npm run terraviz -- migrate-r2-hls --limit=5
+
+# Full run — sequential, paced 1 s between rows. ~5-15 minutes
+# of encode time per row × 130 remaining ≈ many hours.
+npm run terraviz -- migrate-r2-hls
+```
+
+Per-row stdout shows `[<dataset_id>] vimeo:<vimeo_id> →
+r2:<key> (<bytes>, encode <ms>, upload <ms>, total <ms>)`.
+Failures go to stderr with the outcome (`vimeo_fetch_failed`,
+`encode_failed`, `r2_upload_failed`, `data_ref_patch_failed`).
+
+The telemetry session id printed at the start of each run lets
+you correlate per-row events on the Grafana migration row.
+
+#### What the commit point is
+
+The `data_ref` PATCH (step 4 of each row) is the migration's
+commit point. Before it: the row stays on `vimeo:` and playback
+runs through the proxy unchanged. After it: the SPA's manifest
+endpoint resolves `r2:videos/<id>/master.m3u8` to your custom
+domain's URL and HLS playback engages.
+
+Failure modes:
+
+- `vimeo_fetch_failed` — source URL not resolvable (deleted from
+  Vimeo, proxy down). Row unchanged. No encode / upload attempted.
+- `encode_failed` — FFmpeg crashed. Workdir retained at
+  `/tmp/terraviz-hls/<dataset_id>/` for operator inspection.
+  Row unchanged.
+- `r2_upload_failed` — at least one R2 PUT failed mid-bundle.
+  Some segments may already be on R2 as an orphan partial
+  upload; the next migration retry overwrites them.
+- `data_ref_patch_failed` — bundle fully uploaded but the
+  publisher API rejected the PATCH. The orphan R2 prefix is
+  captured in the `migration_r2_hls.r2_key` telemetry field
+  for `terraviz rollback-r2-hls` cleanup.
+
+#### Recovery from partial failures
+
+Re-running `terraviz migrate-r2-hls` is the recovery path.
+The plan-time filter skips rows already on `r2:` so already-
+migrated rows are no-ops. Failed rows attempt fresh.
+
+For `r2_upload_failed` rows specifically: the next attempt
+overwrites any partial uploads under the same prefix, so the
+state converges naturally.
+
+#### Memory + disk ceilings
+
+The encode workdir holds 4K + 1080p + 720p segment files for one
+row at a time. Typical legacy SOS row: 200-400 MB of segments per
+encode. The `--workdir=<path>` flag overrides the default
+`/tmp/terraviz-hls`; `--keep-workdir` skips cleanup on success
+(failed rows always retain their workdir for inspection).
+
+#### Rollback
+
+Single-row rollback is automated via `terraviz rollback-r2-hls`:
+
+```sh
+npm run terraviz -- rollback-r2-hls <dataset_id> --to-vimeo=<original_id> --dry-run
+npm run terraviz -- rollback-r2-hls <dataset_id> --to-vimeo=<original_id>
+```
+
+The tool PATCHes `data_ref` back to `vimeo:<id>` first (commit
+point — once it lands, the SPA resolves through the proxy
+again), then deletes the R2 bundle (cleanup; non-fatal).
+If the DELETE fails, the row is still correctly back on
+`vimeo:` and only an orphan R2 prefix is left for manual
+cleanup.
+
+The operator provides the original `vimeo:<id>` explicitly. To
+find it: grep the migration's stdout log, look up the
+dataset's `legacy_id` in `public/assets/sos-dataset-list.json`,
+or query Grafana's `migration_r2_hls` events (the `vimeo_id`
+is on `blob9`).
+
+For bulk rollback (e.g. cleaning up the real-time rows
+identified by `terraviz list-realtime-r2`), pipe NDJSON in via
+`--from-stdin`:
+
+```sh
+# Bulk rollback every real-time row currently on r2:
+npm run terraviz -- list-realtime-r2 \
+  | npm run terraviz -- rollback-r2-hls --from-stdin
+
+# Confirm first with a dry-run:
+npm run terraviz -- list-realtime-r2 \
+  | npm run terraviz -- rollback-r2-hls --from-stdin --dry-run
+
+# Roll back an arbitrary set that the operator curated by hand:
+cat my-rollback-list.ndjson \
+  | npm run terraviz -- rollback-r2-hls --from-stdin
+```
+
+Each NDJSON line must be a JSON object with `dataset_id` and
+`vimeo_id` fields (extra fields like `title` and `legacy_id`
+are tolerated, so the `list-realtime-r2` output pipes
+through directly). The bulk path runs the same per-row
+pipeline as the single-row mode (GET → PATCH → DELETE),
+continues past per-row failures rather than aborting on
+the first one, and prints an aggregate summary at the end:
+
+```
+Bulk rollback complete:
+  ok:                       18
+  ok (orphan R2 prefix):    1     ← PATCH committed, R2 DELETE failed or was skipped (creds unset)
+  patch_failed:             1
+```
+
+Exit code: 0 when every row's PATCH succeeded (orphan R2
+prefixes are non-fatal — the catalog is correct, just storage
+to clean up later), 1 if any row had a hard failure
+(`parse_failed`, `get_failed`, `wrong_scheme`, `patch_failed`,
+or `malformed_ref`).
+
+#### Observation window
+
+The Vimeo proxy stays running until the migration is 100%
+complete AND has been observed for ≥1 month. The Grafana
+migration row (commit 3/G — three panels under "Product Health")
+is the headline observation surface — "% video/mp4 rows still
+on `vimeo:`" should be 0 by the end of the run and remain 0 in
+steady state. A non-zero reading after the fact means a stray
+legacy row was re-imported (re-run the migration) or the
+manifest endpoint regressed somehow.
+
+### Migrating auxiliary asset URLs to R2
+
+Phase 3b extends the asset-hosting story to the per-row
+auxiliary asset columns: `thumbnail_ref`, `legend_ref`,
+`caption_ref`, and the new `color_table_ref`. Each row's
+`<asset>_ref` flips from a NOAA CloudFront URL (e.g.
+`https://d3sik7mbbzunjo.cloudfront.net/atmosphere/.../thumb.jpg`)
+to an R2 reference (`r2:datasets/<id>/<asset>.<ext>`). After
+3b ships, the catalog is fully self-hosted and federation peers
+can mirror without reaching back to noaa.gov.
+
+The runbook mirrors the Phase 3 video migration's shape, but
+the per-row pipeline is one PATCH covering up to four asset
+columns and one telemetry event per (row, asset_type) pair.
+
+#### Prerequisites
+
+Same R2 credentials as Phase 3 (`R2_S3_ENDPOINT` /
+`R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` in the operator's
+shell), same `R2_PUBLIC_BASE` on Pages — used by the publisher
+API's dataset serializer (`functions/api/v1/_lib/dataset-serializer.ts`,
+through the `resolveAssetRef` callback) to flip the `r2:<key>`
+values that 3b writes into the `*_ref` columns back to the
+public HTTPS form the SPA renders. (Note: the manifest
+endpoint at `/api/v1/datasets/<id>/manifest` only resolves
+`data_ref` for video / image playback — the auxiliary asset
+columns are surfaced via the row's serializer, not the
+manifest, so it's the regular dataset GET path that needs
+`R2_PUBLIC_BASE` to do the right thing for thumbnails,
+legends, captions, and color tables.) The migration uses the
+same custom-domain origin Phase 3 set up — no new env vars,
+no new Cloudflare configuration.
+
+One prerequisite specific to 3b: **back-fill the three new
+catalog columns** (`color_table_ref`, `probing_info`,
+`bounding_variables`) onto rows that were imported under
+Phase 1d. Without the back-fill, `color_table_ref` will be
+NULL on every row even though the SOS snapshot has the data.
+
+```sh
+# Confirm the plan — should report `rows to backfill: N`.
+set -a; . ~/.terraviz/prod.env; set +a
+npm run terraviz -- import-snapshot --update-existing --dry-run
+
+# Run for real (writes the three new columns; never touches
+# title / abstract / publisher-edited fields).
+npm run terraviz -- import-snapshot --update-existing
+```
+
+The flag is idempotent — re-running on already-backfilled
+rows reports them under `backfill_noop` and issues no PATCH.
+
+#### Pre-flight dry-run
+
+```sh
+npm run terraviz -- migrate-r2-assets --dry-run
+```
+
+Sample output:
+
+```
+Asset migration plan:
+  rows scanned:                  204
+  rows with at least one asset:  152
+  will migrate this run:         152
+  total asset uploads:           372
+  types: thumbnail, legend, caption, color_table
+    thumbnail      135
+    legend         119
+    caption        35
+    color-table    15
+
+  • DSXXXX...  thumbnail+legend+caption  Sea Surface Salinity
+  • …
+```
+
+Per-type counts confirm the four-class breakdown; the per-row
+sample lists which assets are eligible on each row (skipping
+columns already on `r2:` or null). The migration is idempotent:
+re-running picks up only rows whose `<asset>_ref` is still on a
+NOAA URL.
+
+#### Live migration
+
+```sh
+# Sanity batch — migrate 5 rows, verify in Grafana / SPA.
+npm run terraviz -- migrate-r2-assets --limit=5
+
+# Full run — sequential, paced 200 ms between rows. Each row
+# processes up to 4 asset uploads + 1 PATCH. Captions
+# auto-convert SRT → VTT inline so every caption in R2 ends
+# up as `.vtt` regardless of upstream format.
+npm run terraviz -- migrate-r2-assets
+
+# Per-type rollout — do thumbnails first to verify the
+# end-to-end pipeline on the most-trafficked asset class
+# before broadening:
+npm run terraviz -- migrate-r2-assets --types=thumbnail
+npm run terraviz -- migrate-r2-assets --types=legend,color_table
+npm run terraviz -- migrate-r2-assets --types=caption
+```
+
+Per-asset stdout shows `[<dataset_id>] <type> ok (<bytes>, <ms>)
+→ <r2_key>`. Failures go to stderr with the outcome
+(`fetch_failed` / `upload_failed` / `patch_failed`).
+
+The telemetry session id printed at the start of each run lets
+you correlate per-asset events on the Grafana asset-migration
+row (Phase 3b commit J — three panels alongside the video
+migration row at y=42).
+
+#### What the commit point is
+
+The per-row PATCH (step 7 of `migrateOne`) is the migration's
+commit point. Failures before the PATCH leave the row's
+`<asset>_ref` columns unchanged (the SPA keeps fetching from
+NOAA). A PATCH that fails AFTER R2 PUTs succeeded promotes
+every successful asset's telemetry from `ok` to `patch_failed`
+so the orphan R2 objects show up in the Grafana failure
+breakdown — operator cleans up via `rollback-r2-assets`.
+
+Re-running `migrate-r2-assets` after any failure is the
+recovery path. Already-migrated assets skip (idempotency);
+failed assets retry. The R2 PUT is overwrite-on-key, so a
+partial upload from a previous run is safely clobbered.
+
+#### Rollback
+
+Per-row rollback (single asset):
+
+```sh
+npm run terraviz -- rollback-r2-assets <dataset_id> \
+  --types=thumbnail --dry-run
+npm run terraviz -- rollback-r2-assets <dataset_id> --types=thumbnail
+```
+
+The tool recovers the original NOAA URL by indexing the row's
+`legacy_id` against the SOS snapshot's matching link field
+(`thumbnailLink` / `legendLink` / `closedCaptionLink` /
+`colorTableLink`). If the row has no `legacy_id` (publisher-
+portal row, not SOS-imported), pass `--to-url=<url>` to name
+the target explicitly:
+
+```sh
+npm run terraviz -- rollback-r2-assets <dataset_id> \
+  --types=thumbnail --to-url=https://example.org/thumb.png
+```
+
+For bulk rollback (e.g. backing out a botched asset_type after
+a Grafana review), pipe NDJSON in via `--from-stdin`. Each
+line is `{ "dataset_id": "...", "asset_type": "..." }` — the
+same shape `migration_r2_assets` events carry, so a
+telemetry-filtered subset pipes through directly:
+
+```sh
+# Roll back every patch_failed thumbnail in this hour. The
+# Grafana datasource → "view data" → "Export CSV" path lets
+# you derive the NDJSON for the failed subset.
+cat patch-failed.ndjson \
+  | npm run terraviz -- rollback-r2-assets --from-stdin --dry-run
+cat patch-failed.ndjson \
+  | npm run terraviz -- rollback-r2-assets --from-stdin
+```
+
+Per-asset pipeline: PATCH `<asset>_ref` back to the recovered
+URL (commit point), then DELETE the R2 object (cleanup;
+non-fatal — orphan storage left on DELETE failure is
+operator-visible as "ok (orphan R2 object)" in the bulk summary).
+
+#### Observation window
+
+Same shape as the video migration: the Phase 3b Grafana row
+(commit 3b/J) shows "cumulative ok by asset_type" — after a
+complete run the four rows should land near (thumbnail: ~135,
+legend: ~119, caption: ~35, color_table: ~15). The exact
+numbers depend on how many rows have each asset populated in
+the snapshot; the dry-run plan summary is authoritative for
+the targets.
+
+A clean migration is signalled by the failure-breakdown table
+going empty. NOAA CloudFront URLs serve indefinitely so
+there's no hard deadline to flip the `*_ref` columns — but
+the federation work (peer mirroring) and `/publish` endpoint's
+single-origin guarantee depend on this being done.
+
+### Migrating tour.json files to R2
+
+Phase 3c migrates the per-row `run_tour_on_load` column and the
+sibling overlay / audio / 360-pano assets each tour.json
+references. Each row's `run_tour_on_load` flips from a NOAA
+CloudFront URL to an R2 reference (`r2:tours/<id>/tour.json`);
+the siblings the parser surfaces as `relative` get fetched from
+NOAA and uploaded to `tours/<id>/<sibling-path>` under the same
+prefix. External URLs in the tour file (YouTube embeds, Vimeo,
+popup web links) are left verbatim — the operator can't legally
+re-host them and they're not migratable assets anyway.
+
+The runbook mirrors the Phase 3b shape with one key shift: the
+3c pipeline is **per-row atomic**, not per-asset. A row's
+tour.json is only PATCHed onto R2 after every sibling has
+uploaded successfully — so a partial 3c run never leaves a tour
+playing 404s at runtime.
+
+#### Prerequisites
+
+Same R2 credentials as Phase 3 / 3b (`R2_S3_ENDPOINT` /
+`R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` in the operator's
+shell), same `R2_PUBLIC_BASE` on Pages — used by the dataset
+serializer (`functions/api/v1/_lib/dataset-serializer.ts`,
+through `resolveAssetRefStrict`) to flip `r2:tours/<id>/tour.json`
+into the public HTTPS form the SPA's tour engine actually
+fetches. No new env vars, no new Cloudflare configuration.
+
+One optional prerequisite: run the parser sweep against
+production tour.json files first to catch any task-type
+blind spots that a future SOS authoring change might have
+introduced since 3c shipped. The sweep is read-only and only
+takes ~30 s:
+
+```sh
+npx tsx scripts/sweep-tour-parser.ts
+```
+
+Expected output: "No unknown task types across the sweep —
+parser covers every task name seen." If a new unknown task
+shows up, file an issue before running the migration — the
+sweep is the canary for SOS author-side changes that would
+silently drop URLs.
+
+#### Pre-flight dry-run
+
+```sh
+npm run terraviz -- migrate-r2-tours --dry-run
+```
+
+Sample output:
+
+```
+Tour migration plan:
+  rows scanned:                          195
+  rows with run_tour_on_load:            193
+  already on r2: (will skip):            0
+  eligible (NOAA / external URLs):       193
+  will migrate this run:                 193
+  • 01KQG610X12B1DMN7YEYDRM9WS  Drought Risk - 2015-2020
+      https://d3sik7mbbzunjo.cloudfront.net/land/drought_2015-2020/tour.json
+  • …
+```
+
+The migration is idempotent: re-running picks up only rows whose
+`run_tour_on_load` is still on a NOAA URL. Rows already on
+`r2:` skip from the eligible set.
+
+#### Live migration
+
+```sh
+# Sanity batch — migrate 5 rows, verify in Grafana / SPA.
+npm run terraviz -- migrate-r2-tours --limit=5
+
+# Full run — sequential, paced 200 ms between rows.
+npm run terraviz -- migrate-r2-tours
+
+# Single-row mode for surgical migration / re-try:
+npm run terraviz -- migrate-r2-tours --id=<dataset_id>
+```
+
+Per-row stdout shows `[<dataset_id>] ok (tour.json + N siblings,
+<bytes>, <ms>) → tours/<id>/tour.json`. Failures go to stderr
+with the outcome:
+
+  - **`dead_source`** — NOAA returned 404 on the tour.json URL
+    itself. The row was already broken pre-migration; migration
+    leaves it untouched and exits 0 for this row. Operator
+    decides whether to delete the catalog row or replace the
+    tour.
+  - **`fetch_failed`** — transient network failure on the
+    tour.json fetch. Re-run; idempotent.
+  - **`parse_failed`** — tour.json bytes didn't decode as JSON.
+    Investigate the source manually; rare.
+  - **`sibling_fetch_failed`** — at least one relative sibling
+    failed to fetch. The row's tour.json is NOT uploaded
+    (atomic per row), so the row stays on NOAA. Re-run after
+    investigating the failing sibling URL in the error message.
+  - **`upload_failed`** — an R2 PUT failed. Partial uploads
+    are R2 orphans; the row still works via NOAA because the
+    PATCH never ran. Re-run is the cheapest recovery (R2 PUTs
+    are overwrite-on-key, so the same bytes clobber cleanly).
+  - **`patch_failed`** — every R2 PUT succeeded but the D1
+    PATCH on `run_tour_on_load` failed. Worst case: every R2
+    object from this row is an orphan AND the row still points
+    at NOAA. Recovery: re-run the migration (idempotent — the
+    same bytes hash to the same keys, so the next PATCH attempt
+    just retries against an already-correct R2 state).
+    Alternatively `rollback-r2-tours <id>` cleans up the orphan
+    and leaves the row on NOAA.
+
+The telemetry session id printed at the start of each run lets
+you correlate per-row events on the Grafana tour-migration row
+(3c/F — three panels alongside the 3b asset-migration row at
+y=50).
+
+#### What the commit point is
+
+The per-row PATCH (step 6 of `migrateOne`) is the migration's
+commit point. Failures before the PATCH leave the row's
+`run_tour_on_load` unchanged (the SPA keeps fetching the tour
+from NOAA). The atomic per-row design is deliberate: a tour is
+a single addressable resource, so a "tour.json on R2 but
+siblings still on NOAA" intermediate state would 404 in the
+browser. By only PATCHing after every upload succeeds, the
+operator's worst case is "row still on NOAA + a few R2 orphans"
+— never "row on R2 + missing siblings."
+
+Re-running `migrate-r2-tours` after any failure is the
+recovery path. Already-migrated rows skip (idempotency on the
+`r2:` prefix). The R2 PUT is overwrite-on-key, so a partial
+upload from a previous run is safely clobbered.
+
+#### Rollback
+
+Per-row rollback (single dataset):
+
+```sh
+npm run terraviz -- rollback-r2-tours <dataset_id> --dry-run
+npm run terraviz -- rollback-r2-tours <dataset_id>
+```
+
+The tool recovers the original NOAA URL by indexing the row's
+`legacy_id` against the SOS snapshot's `runTourOnLoad` field.
+If the row has no `legacy_id` (publisher-portal row, not
+SOS-imported), pass `--to-url=<url>` to name the target
+explicitly:
+
+```sh
+npm run terraviz -- rollback-r2-tours <dataset_id> \
+  --to-url=https://example.org/my-tour.json
+```
+
+For bulk rollback (e.g. backing out a botched window after a
+Grafana review), pipe NDJSON in via `--from-stdin`. Each line
+is `{ "dataset_id": "..." }` — simpler than 3b's per-asset
+shape because tours are atomic per row:
+
+```sh
+# Roll back every patch_failed row in this hour. The Grafana
+# datasource → "view data" → "Export CSV" path lets you derive
+# the NDJSON for the failed subset.
+cat patch-failed.ndjson \
+  | npm run terraviz -- rollback-r2-tours --from-stdin --dry-run
+cat patch-failed.ndjson \
+  | npm run terraviz -- rollback-r2-tours --from-stdin
+```
+
+Per-row pipeline: PATCH `run_tour_on_load` back to the
+recovered URL (commit point), then DELETE the entire
+`tours/<id>/` R2 prefix in one list+parallel-DELETE pass.
+The DELETE step is non-fatal — a `delete_failed` outcome means
+the catalog is correct (row back on NOAA) but the R2 prefix is
+orphaned; clean up via the Cloudflare dashboard if needed.
+Bulk-summary output surfaces this as "ok (orphan R2 prefix)".
+
+#### Observation window
+
+The Phase 3c Grafana row (commit 3c/F) shows "cumulative ok
+rows" — after a complete run this should approach the
+planner's dry-run eligible count (~198 at cut-over; 1 row
+stays `dead_source` so ok caps just below the total).
+A clean migration is signalled by the non-ok outcome
+breakdown table going empty.
+
+NOAA CloudFront URLs serve indefinitely so there's no hard
+deadline to flip `run_tour_on_load` — but the federation work
+(peer mirroring) depends on this being done, just like 3b's
+auxiliary asset migration.
+
 ## Stack
 
 - **Wrangler** (`wrangler pages dev`) is the runner. It loads the
@@ -913,8 +1619,23 @@ matter which route surfaced it.
 - **CORS in local mode.** The Pages Function returns
   `Access-Control-Allow-Origin: http://localhost:5173` for the
   Vite dev server. Serve the frontend on a different port and
-  you must set `FRONTEND_ORIGIN` in `.dev.vars`. Tauri webviews
-  bypass CORS entirely — desktop dev never sees this.
+  you must set `FRONTEND_ORIGIN` in `.dev.vars`. For the Tauri
+  desktop build, `apiFetch` (`src/services/catalogSource.ts`)
+  routes `/api/*` calls through the Tauri HTTP plugin so the
+  Rust side issues the request and webview CORS doesn't apply —
+  desktop dev never sees CORS errors *on Pages Function calls*.
+- **Tauri webview is not a CORS-free zone.** The bypass above
+  only covers paths that explicitly use the Tauri HTTP plugin
+  (`apiFetch`, `llmProvider`, `downloadService`). Everything
+  else — `fetch()` calls in services, `<img>`/`<video>` element
+  loads, HLS.js's internal XHR loader for `.m3u8` and `.ts`
+  segments — runs inside the webview and *is* subject to
+  standard CORS. If a Tauri build fails with `Origin
+  tauri://localhost is not allowed by Access-Control-Allow-Origin`,
+  the fix is on the origin server: add `tauri://localhost`,
+  `http://tauri.localhost`, and `https://tauri.localhost` to its
+  CORS allowlist (the R2 bucket section above is the canonical
+  example).
 - **`MOCK_STREAM` flips silently.** Setting `MOCK_STREAM=true`
   requires a Wrangler restart to pick up; the binding is read
   once at startup. Symptom is a manifest endpoint returning real

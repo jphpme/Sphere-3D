@@ -13,14 +13,23 @@ import { ViewportManager, type ViewLayout } from './services/viewportManager'
 import './styles/index.css'
 
 import { HLSService } from './services/hlsService'
-import { dataService } from './services/dataService'
+import { dataService, PreviewFetchError } from './services/dataService'
 import { formatDate, videoTimeToDate, dateToVideoTime, isSubDailyPeriod, getSunPosition, inferDisplayInterval } from './utils/time'
 import { logger } from './utils/logger'
 import type { AppState, VideoTextureHandle, TourFile, Dataset, GlobeRenderer } from './types'
 
 // Extracted modules
-import { showBrowseUI, hideBrowseUI, collapseBrowseUI, notifyBrowseOpened } from './ui/browseUI'
+import { showBrowseUI, hideBrowseUI, collapseBrowseUI, notifyBrowseOpened, refreshBrowseNewSinceBadge } from './ui/browseUI'
 import { initDownloadUI } from './ui/downloadUI'
+import { initDownloadDialogUI } from './ui/downloadDialogUI'
+import { initPlaylistUI } from './ui/playlistUI'
+import {
+  getActive as getActivePlaylistPlayback,
+  initPlaylistPlayback,
+  notifyTourEnded as notifyPlaylistTourEnded,
+  onPlaybackChange as onPlaylistPlaybackChange,
+  skipNext as skipNextPlaylistEntry,
+} from './services/playlistPlayback'
 import { updateMapControlsPosition } from './ui/mapControlsUI'
 import { initToolsMenu, syncToolsMenuState, syncToolsMenuLayout, pulseBrowseButton } from './ui/toolsMenuUI'
 import { openCreditsPanel } from './ui/creditsPanel'
@@ -44,16 +53,25 @@ import {
   togglePlayPause, rewind, fastForward, stepFrame, onScrub,
   updatePlayButton, toggleCaptions, resetPlaybackState, initPlaybackPositioning,
   seekToDate,
+  checkSeekToDate,
   type PlaybackState,
 } from './ui/playbackController'
 import {
   loadImageDataset, loadVideoDataset, displayDatasetInfo,
 } from './services/datasetLoader'
-import { TourEngine } from './services/tourEngine'
+import { TourEngine, type TourTelemetryMeta } from './services/tourEngine'
 import { showTourControls, hideTourControls, hideAllTourTextBoxes, hideAllTourImages, hideAllTourVideos, hideAllTourPopups, hideAllTourQuestions } from './ui/tourUI'
 import { initLegendForDataset, clearLegendCache, loadConfig } from './services/docentService'
 import { isMobile, IS_MOBILE_NATIVE, getCloudTextureUrl } from './utils/deviceCapability'
 import { initDeepLinks } from './services/deepLinkService'
+import { recordVisit, writeLastSession } from './services/visitMemory'
+import { getCatalogMode, setCatalogMode } from './utils/catalogMode'
+import {
+  hideCatalogTabs,
+  initCatalogTabs,
+  setActiveCatalogTab,
+  showCatalogTabs,
+} from './ui/catalogTabsUI'
 import {
   applyPosterDeepLinks,
   parseInitialLayout,
@@ -61,6 +79,37 @@ import {
 import { initVrButton } from './ui/vrButton'
 import { flyToOnGlobe, isVrActive } from './services/vrSession'
 import type { VrDatasetTexture } from './services/vrScene'
+import { overlayOptionsFromDataset } from './services/datasetOverlayOptions'
+import { resolveFrameQuery } from './utils/frames'
+import { initTourAuthoring } from './ui/tourAuthoring'
+import { bootstrapI18n } from './i18n/bootstrap'
+import { initUiScale } from './services/uiScaleService'
+import { initShaderSettings } from './services/shaderSettingsService'
+import { maybeInitShaderTuner } from './ui/shaderTunerUI'
+
+// Apply the persisted UI-scale to `:root` at module-evaluation
+// time — before DOMContentLoaded, before any UI renders, before
+// the loading screen's first paint cycle completes. Waiting for
+// the DOMContentLoaded handler would let the loading screen
+// paint once at `--ui-scale: 1` and then snap to the user's
+// preset, producing a visible flash on every reload for visitors
+// who pick a non-default size. Module-eval is the earliest hook
+// the bundle gives us short of an inline <script> in <head>.
+// SSR-safe (the service no-ops when `document` is undefined).
+// See docs/WEB_CATALOG_FEATURES_PLAN.md §7.1.
+initUiScale()
+
+// Apply persisted shader settings (§7.2) — currently the specular-
+// strength preset. Contrast / saturation / bump are dev-tuned and
+// ship via SHADER_DEFAULTS. The earth-tile-layer + photoreal Earth
+// read getShaderSettings() per-frame, so this just primes the
+// snapshot.
+initShaderSettings()
+
+// Mount the §7.2 shader-tuner panel — no-op unless the URL carries
+// `?tune=shader`. Dev surface for picking the shipped SHADER_DEFAULTS
+// values; never reaches end-users via the Tools menu.
+maybeInitShaderTuner()
 
 // Phase 5: set a body class so CSS can target mobile-native adaptations
 // (larger touch targets, bottom sheets, etc.) without JS per-component.
@@ -116,6 +165,57 @@ function triggerToTourSource(
   if (trigger === 'orbit') return 'orbit'
   if (trigger === 'url') return 'deeplink'
   return 'browse'
+}
+
+/**
+ * Map a `PreviewFetchError` code to a user-facing message for the
+ * boot-time error overlay. The codes mirror the typed envelopes on
+ * the server preview endpoints (`functions/api/v1/datasets/[id]/
+ * preview/[token].ts` and its `/manifest` sibling). Anything we
+ * don't recognise falls through to a generic message so a new code
+ * landing server-side doesn't surface as an empty banner.
+ */
+/**
+ * Phase 3pg/C — derive an image MIME type from a frame URL's
+ * extension. The server allows `png` / `jpg` / `jpeg` / `webp`
+ * frame sequences (per `buildFrameKey`'s `[a-z0-9]+` extension
+ * rule), so the synthetic single-frame dataset built by
+ * `loadFrameFromChat` needs a `format` that matches the actual
+ * bytes the URL points at. Falls back to `image/png` for
+ * unknown extensions — same shape the per-frame HEAD handler
+ * uses for the `Content-Type` header.
+ */
+function mimeForFrameUrl(url: string): string {
+  const ext = /\.([a-z0-9]+)(?:\?|#|$)/i.exec(url)?.[1]?.toLowerCase()
+  switch (ext) {
+    case 'png':
+      return 'image/png'
+    case 'jpg':
+    case 'jpeg':
+      return 'image/jpeg'
+    case 'webp':
+      return 'image/webp'
+    default:
+      return 'image/png'
+  }
+}
+
+function previewErrorMessage(code: string): string {
+  switch (code) {
+    case 'invalid_token':
+      return 'This preview link is invalid or has expired. Ask the publisher to mint a new one.'
+    case 'token_id_mismatch':
+      return 'This preview link is for a different dataset. Ask the publisher to mint a new one.'
+    case 'not_found':
+      return 'The dataset this preview points at no longer exists.'
+    case 'preview_unconfigured':
+      return 'Preview links are not configured on this deployment.'
+    case 'binding_missing':
+    case 'identity_missing':
+      return 'The catalog backend is unavailable. Try again in a moment.'
+    default:
+      return 'Could not load this preview.'
+  }
 }
 
 class InteractiveSphere {
@@ -197,6 +297,16 @@ class InteractiveSphere {
       this.setLoading(true)
       this.setLoadingStatus('Starting up\u2026', 5)
 
+      // Catalog mode (`?catalog=true`) inverts the default surface:
+      // the dataset browser becomes primary and the globe stays
+      // hidden until selection. Apply the body class before any UI
+      // renders so the CSS surface decision (full-width browse vs.
+      // overlay browse) is made on the first paint, not after a
+      // flash of the globe-first layout. See
+      // `docs/WEB_CATALOG_FEATURES_PLAN.md` \u00a73.
+      const catalogModeActive = getCatalogMode()
+      if (catalogModeActive) document.body.classList.add('catalog-mode')
+
       if (!this.checkWebGLSupport()) return
 
       const container = document.getElementById('container')
@@ -225,6 +335,17 @@ class InteractiveSphere {
         announce: (msg) => this.announce(msg),
         getCurrentDataset: () => this.appState.currentDataset ?? null,
       })
+      // Catalog ↔ sphere tab control — only becomes visible when
+      // `?catalog=true` is in the URL (see the show/hide calls in
+      // the boot branches further below and in
+      // `wireCatalogModePopstate` for history navigation). The
+      // control is mounted unconditionally so the popstate handler
+      // can flip its visibility without re-wiring listeners.
+      initCatalogTabs({
+        onSelectCatalog: () => this.enterCatalogTab(),
+        onSelectSphere: () => this.enterSphereTab(),
+      })
+      this.wireCatalogModePopstate()
       // Apply persisted view prefs to the toolbar button state now
       // that the toolbar exists.
       syncToolsMenuState({
@@ -232,7 +353,35 @@ class InteractiveSphere {
         legend: this.viewPrefs.legendVisible,
       })
       initDownloadUI().catch(err => logger.warn('[App] Download UI init failed:', err))
+      // Web-only zip-download dialog (§8.2). Mounting is cheap and
+      // safe on desktop too; the opener affordances are the gate.
+      initDownloadDialogUI({ announce: (msg) => this.announce(msg) })
       initHelpUI()
+      // Playlists — mount the manager panel host and wire the
+      // playback state machine to the regular loadDataset flow.
+      // hasTourOnLoad probes dataset metadata so the playback
+      // module can defer its auto-advance timer while a tour is
+      // running. notifyPlaylistTourEnded fires from endTour() below.
+      initPlaylistUI({ announce: (msg) => this.announce(msg) })
+      initPlaylistPlayback({
+        loadDataset: async (id) => {
+          await this.loadDataset(id, 'url')
+        },
+        hasTourOnLoad: (id) => {
+          const dataset = dataService.getDatasetById(id)
+          return !!dataset?.runTourOnLoad
+        },
+      })
+      // Toggle the transport "Skip to next playlist item" button as
+      // a playlist becomes active / inactive. Lives at boot so the
+      // listener survives every dataset swap.
+      const syncPlaylistNextBtn = () => {
+        const btn = document.getElementById('playlist-next-btn')
+        if (!btn) return
+        btn.classList.toggle('hidden', !getActivePlaylistPlayback())
+      }
+      onPlaylistPlaybackChange(syncPlaylistNextBtn)
+      syncPlaylistNextBtn()
       // First-session privacy disclosure. No-ops on every launch
       // after the user dismisses it.
       showDisclosureBannerIfNeeded()
@@ -268,12 +417,62 @@ class InteractiveSphere {
       // Initialize digital docent chat (available on all views)
       this.initChat()
 
+      // Tour-authoring dock — mounts only when the URL carries
+      // `?tourEdit=<id>`. Phase 3pt/A. Idempotent; the dock owns
+      // its own DOM and dispose lifecycle.
+      this.initTourAuthoring()
+
       // Enter VR button — feature-gated internally; hides itself on
       // non-WebXR browsers and warm-loads Three.js in the background
       // on devices that can enter VR.
       void this.wireVrButton()
 
-      const datasetId = this.getDatasetIdFromUrl()
+      // Preview deeplink: `?preview=<token>&dataset=<id>` lands a
+      // draft dataset on the globe by fetching the token-gated
+      // metadata + manifest endpoints (3pe/A + 3pe/B). The boot
+      // flow runs *after* loadDatasets so the regular catalog is
+      // still populated \u2014 the preview row is injected alongside,
+      // not in place of, the public catalog. On error we surface
+      // a typed message via setError and fall through to the
+      // empty-globe path so the visitor isn't left staring at a
+      // blank loading overlay with no globe and no browse panel.
+      // Falling through bypasses the `?dataset=` branch below
+      // because that id won't be in the public catalog (it's the
+      // draft we just failed to fetch) \u2014 re-attempting it would
+      // overwrite our typed preview error with a generic
+      // "Dataset not found".
+      const previewParams = this.getPreviewParamsFromUrl()
+      let previewFailed = false
+      if (previewParams) {
+        this.setLoadingStatus('Loading preview\u2026', 50)
+        try {
+          const preview = await dataService.fetchPreviewDataset(
+            previewParams.datasetId,
+            previewParams.token,
+          )
+          // Inject into the dataService cache so the existing
+          // loadDataset path (which resolves by id via
+          // getDatasetById) finds the draft. appState.datasets is
+          // left as the public catalog snapshot \u2014 the browse panel
+          // continues to show what an unauthenticated visitor
+          // would see; only the active globe shows the draft.
+          dataService.injectDataset(preview)
+          await this.loadDataset(preview.id, 'url')
+          this.setLoading(false)
+          this.runUrlLoadUiSync()
+          return
+        } catch (err) {
+          const message = err instanceof PreviewFetchError
+            ? previewErrorMessage(err.code)
+            : err instanceof Error
+              ? err.message
+              : 'Failed to load preview.'
+          this.setError(message)
+          previewFailed = true
+        }
+      }
+
+      const datasetId = previewFailed ? null : this.getDatasetIdFromUrl()
       if (datasetId) {
         this.setLoadingStatus('Loading dataset\u2026', 50)
         await this.loadDataset(datasetId, 'url')
@@ -284,7 +483,12 @@ class InteractiveSphere {
         // into the remaining panels, and pulse the Browse button so
         // they notice where to click. In single-view mode we don't —
         // the URL-specified dataset is the only thing the user wanted.
-        if (this.viewports.getPanelCount() > 1) {
+        //
+        // Catalog mode (`?catalog=true&dataset=<id>`) gets the same
+        // treatment as multi-viewport: render the browse panel
+        // collapsed so the tab control's "back to catalog" affordance
+        // has something to expand. Plan §3.1 case 2.
+        if (this.viewports.getPanelCount() > 1 || catalogModeActive) {
           showBrowseUI(this.appState.datasets, {
             onSelectDataset: (id) => this.selectDatasetFromBrowse(id),
             announce: (msg) => this.announce(msg),
@@ -292,8 +496,40 @@ class InteractiveSphere {
             onOpenChat: (query) => this.openChatWithQuery(query),
           })
           collapseBrowseUI()
-          pulseBrowseButton()
+          if (!catalogModeActive) pulseBrowseButton()
         }
+        if (catalogModeActive) {
+          showCatalogTabs()
+          setActiveCatalogTab('sphere')
+        }
+      } else if (catalogModeActive) {
+        // Catalog-mode no-dataset boot: the browse panel is the
+        // primary surface and the globe stays hidden until the
+        // visitor picks a dataset. Skip the Earth-textures load
+        // since nothing is going to show them; the regular
+        // dataset-load path runs them on demand when the visitor
+        // exits catalog mode by selecting something.
+        //
+        // `catalog-empty` is the CSS hook for "globe hidden,
+        // browse full-surface"; it stays set until the first
+        // dataset loads (cleared in `selectDatasetFromBrowse`).
+        // `catalog-mode` is the sticky session marker \u2014 set once
+        // when the visitor entered via `?catalog=true` and never
+        // removed within the session so the catalog\u2194sphere tab
+        // control stays visible even after they flip to Sphere.
+        document.body.classList.add('catalog-empty')
+        this.setLoading(false)
+        showBrowseUI(this.appState.datasets, {
+          onSelectDataset: (id) => this.selectDatasetFromBrowse(id),
+          announce: (msg) => this.announce(msg),
+          isMobile: this.isMobile,
+          onOpenChat: (query) => this.openChatWithQuery(query),
+        })
+        // No collapse, no hide, no pulse \u2014 the browse panel is
+        // the visible surface, not an overlay competing with the
+        // globe for attention.
+        showCatalogTabs()
+        setActiveCatalogTab('catalog')
       } else {
         this.setLoadingStatus('Loading Earth textures\u2026', 20)
         const cloudUrl = CLOUD_TEXTURE_URL
@@ -416,12 +652,47 @@ class InteractiveSphere {
       notifyDatasetChanged(dataset)
       setHelpActiveDataset(dataset.id)
     }
+    // Catalog-mode integration — a URL-driven load just resolved
+    // (dataset, preview, tour, or native deep-link), which means
+    // the globe is now the active surface. Drop the
+    // `catalog-empty` flag so the CSS rule that hides `#map-grid`
+    // releases, and (if we're still in catalog mode) flip the
+    // tab control to Sphere active. Mirrors the inline sync that
+    // `selectDatasetFromBrowse` does for browse-driven loads.
+    //
+    // Plan §3.5 explicitly required this for the tour-in-catalog
+    // path ("tours assume globe is mounted; if a tour starts in
+    // catalog mode, it must implicitly flip to sphere mode") and
+    // the `?catalog=true&preview=…` consumer would otherwise
+    // load the draft dataset to an invisible canvas. Centralising
+    // the sync here covers every URL-driven entry point through
+    // a single hook.
+    document.body.classList.remove('catalog-empty')
+    if (getCatalogMode()) {
+      showCatalogTabs()
+      setActiveCatalogTab('sphere')
+    }
   }
 
   /** Extract the `dataset` query parameter from the current URL. */
   private getDatasetIdFromUrl(): string | null {
     const params = new URLSearchParams(window.location.search)
     return params.get('dataset')
+  }
+
+  /**
+   * Extract `?preview=<token>&dataset=<id>` from the current URL.
+   * Returns null when either is missing — both are required for the
+   * preview consumer to know what to fetch and which token to
+   * present. Short-circuits early so the regular `?dataset=` path
+   * (without a token) keeps working unchanged.
+   */
+  private getPreviewParamsFromUrl(): { token: string; datasetId: string } | null {
+    const params = new URLSearchParams(window.location.search)
+    const token = params.get('preview')
+    const datasetId = params.get('dataset')
+    if (!token || !datasetId) return null
+    return { token, datasetId }
   }
 
   /**
@@ -441,6 +712,11 @@ class InteractiveSphere {
   private async loadDatasets(): Promise<void> {
     const datasets = await dataService.fetchDatasets()
     this.appState.datasets = datasets
+    // §9.2 — once the catalog is in hand, light the "new since your
+    // last visit" badge on the Browse trigger if anything was added
+    // after the previous session ended. No-op on a first-ever visit
+    // (no stored lastSession) — fail-closed in countNewSince.
+    refreshBrowseNewSinceBadge(datasets)
   }
 
   /**
@@ -536,6 +812,18 @@ class InteractiveSphere {
   ): Promise<void> {
     const dataset = dataService.getDatasetById(datasetId)
     if (!dataset) throw new Error(`Dataset not found: ${datasetId}`)
+
+    // §9.2 — count a user-initiated open as a visit for the
+    // Continue-exploring row. Tours never reach this path (they go
+    // through loadDatasetForTour), so they're excluded for free.
+    // Playlist auto-advance shares the 'url' trigger with deep links,
+    // so exclude it explicitly: an auto-advanced dataset isn't a
+    // deliberate "I opened this" signal. viewSeconds still accrues
+    // separately from info-panel reading time (datasetLoader).
+    const isPlaylistAutoAdvance = trigger === 'url' && getActivePlaylistPlayback() != null
+    if (!isPlaylistAutoAdvance) {
+      recordVisit(dataset.id)
+    }
 
     // Pin the target slot + its renderer once, at the very start. Both
     // must stay fixed for the lifetime of this call — the awaits below
@@ -657,13 +945,21 @@ class InteractiveSphere {
       try {
         if (ref.startsWith('http://') || ref.startsWith('https://') || ref.endsWith('.json')) {
           logger.info('[App] Auto-starting tour from runTourOnLoad URL:', ref)
-          await this.startTour(ref, gen, targetSlot)
+          await this.startTour(ref, gen, targetSlot, {
+            tourId: dataset.id,
+            tourTitle: dataset.title,
+            source: 'auto',
+          })
         } else {
           const tourDataset = dataService.getDatasetById(ref)
           if (tourDataset && tourDataset.format === 'tour/json') {
             logger.info('[App] Auto-starting tour from runTourOnLoad dataset:', tourDataset.id)
             const tourUrl = tourDataset.tourJsonUrl ?? tourDataset.dataLink
-            await this.startTour(tourUrl, gen, targetSlot)
+            await this.startTour(tourUrl, gen, targetSlot, {
+              tourId: tourDataset.id,
+              tourTitle: tourDataset.title,
+              source: 'auto',
+            })
           } else {
             logger.warn('[App] runTourOnLoad references unknown dataset:', ref)
           }
@@ -835,7 +1131,7 @@ class InteractiveSphere {
     dataLink: string,
     gen: number,
     anchorSlot: number | null = null,
-    meta?: { tourId: string; tourTitle: string; source: 'browse' | 'orbit' | 'deeplink' },
+    meta?: TourTelemetryMeta,
   ): Promise<void> {
     // Stop any previous tour
     this.stopTour()
@@ -850,7 +1146,27 @@ class InteractiveSphere {
     // This handles redirects and ensures relative URLs work even when dataLink
     // is a relative path (e.g. /assets/test-tour.json).
     const tourBaseUrl = resp.url || new URL(dataLink, window.location.href).toString()
+    this.runTourFromFile(tourFile, tourBaseUrl, anchorSlot, meta)
+  }
 
+  /**
+   * Phase 3pt-review/J — shared engine + chrome startup, factored
+   * out of `startTour` so `playInlineTour` can skip the fetch
+   * round-trip. The original blob-URL approach tripped CSP in
+   * Firefox (the page can't `fetch()` a `blob:` of itself when
+   * `connect-src` doesn't list blob:), so preview now hands the
+   * in-memory TourFile straight to the engine. Standalone tours
+   * (`startTour` from a URL) still go through the fetch path so
+   * `tourBaseUrl` is the real response URL for relative-media-
+   * path resolution; preview passes `window.location.href` since
+   * draft tours shouldn't carry relative paths.
+   */
+  private runTourFromFile(
+    tourFile: TourFile,
+    tourBaseUrl: string,
+    anchorSlot: number | null = null,
+    meta?: TourTelemetryMeta,
+  ): void {
     this.tourEngine = new TourEngine(tourFile, {
       loadDataset: async (id, opts) => {
         await this.loadDatasetForTour(id, opts?.slot)
@@ -875,7 +1191,13 @@ class InteractiveSphere {
         if (this.hlsService) this.hlsService.playbackRate = rate
       },
       onTourEnd: () => this.endTour(),
-      onStop: () => this.stopTour(),
+      onStop: () => {
+        // User-initiated stop. Release a playlist that was waiting
+        // for this tour to finish so it advances on the per-entry
+        // timer rather than hanging in waitingForTour state.
+        this.stopTour()
+        notifyPlaylistTourEnded()
+      },
       announce: (msg) => this.announce(msg),
       resolveMediaUrl: (filename) => {
         try {
@@ -886,7 +1208,10 @@ class InteractiveSphere {
       },
     }, { anchorSlot, meta })
 
-    showTourControls(this.tourEngine, () => this.stopTour())
+    showTourControls(this.tourEngine, () => {
+      this.stopTour()
+      notifyPlaylistTourEnded()
+    })
     this.showPlaybackControls(false)
     hideBrowseUI()
     closeChat()
@@ -916,6 +1241,10 @@ class InteractiveSphere {
       // runTourOnLoad tour — stay on the current dataset, restore playback UI
       this.restorePostTourUI()
     }
+    // Playlist auto-advance — if a playlist entry was waiting for
+    // the tour to finish, advance to the next entry. No-op when
+    // the tour wasn't triggered from a playlist.
+    notifyPlaylistTourEnded()
   }
 
   /** Stop any active tour without triggering goHome. */
@@ -1216,7 +1545,13 @@ class InteractiveSphere {
   }
 
   private dismissBrowseAfterLoad(): void {
-    if (this.viewports.getPanelCount() > 1) {
+    // Multi-viewport mode keeps the browse panel around so the
+    // visitor can load datasets into the remaining panels.
+    // Catalog mode (`?catalog=true`) keeps it around for the same
+    // reason — the catalog↔sphere tab control treats the
+    // collapsed browse panel as the "back to catalog" affordance.
+    // Single-viewport sphere mode hides the panel outright.
+    if (this.viewports.getPanelCount() > 1 || getCatalogMode()) {
       collapseBrowseUI()
     } else {
       hideBrowseUI()
@@ -1264,6 +1599,91 @@ class InteractiveSphere {
     }
   }
 
+  /**
+   * Catalog tab clicked. Re-add `?catalog=true` to the URL (if it
+   * was dropped by a previous Sphere click), expand the browse
+   * panel, and flip the tab to Catalog-active. Body class
+   * `catalog-mode` is sticky for the session — this handler just
+   * re-asserts it in case something else cleared it.
+   */
+  private enterCatalogTab(): void {
+    if (!getCatalogMode()) setCatalogMode(true)
+    document.body.classList.add('catalog-mode')
+    if (!this.appState.currentDataset) {
+      document.body.classList.add('catalog-empty')
+    }
+    this.openBrowsePanel()
+    setActiveCatalogTab('catalog')
+  }
+
+  /**
+   * Sphere tab clicked. Drop `?catalog=true` from the URL,
+   * collapse (or hide, when no dataset is loaded) the browse
+   * panel, and flip the tab to Sphere-active. The
+   * `catalog-mode` body class stays set so the tab control
+   * remains visible — Plan §3.2's "shared MapRenderer between
+   * tabs" pattern means we never tear catalog mode down within
+   * a session, only on a fresh page load.
+   */
+  private enterSphereTab(): void {
+    if (getCatalogMode()) setCatalogMode(false)
+    document.body.classList.remove('catalog-empty')
+    if (this.appState.currentDataset) {
+      collapseBrowseUI()
+    } else {
+      hideBrowseUI()
+    }
+    setActiveCatalogTab('sphere')
+  }
+
+  /**
+   * Wire a popstate handler so browser back/forward syncs the
+   * catalog-mode UI with whatever the new URL says. Dataset
+   * loads on popstate are out of scope (a pre-existing gap in
+   * the app, not specific to catalog mode); the visitor sees
+   * the URL flip and the browse-panel/tab visibility update but
+   * the loaded dataset doesn't change without a refresh.
+   */
+  private wireCatalogModePopstate(): void {
+    window.addEventListener('popstate', () => {
+      const onCatalog = getCatalogMode()
+      const datasetLoaded = this.appState.currentDataset !== null
+      if (onCatalog) {
+        document.body.classList.add('catalog-mode')
+        showCatalogTabs()
+        if (datasetLoaded) {
+          // `?catalog=true&dataset=<id>` — case 2 from §3.1:
+          // globe visible, browse panel collapsed as the "back to
+          // catalog" affordance, Sphere tab active. Mirrors the
+          // boot-path branch that handles the same URL shape.
+          document.body.classList.remove('catalog-empty')
+          collapseBrowseUI()
+          setActiveCatalogTab('sphere')
+        } else {
+          // `?catalog=true` (no dataset) — case 1: browse panel
+          // full-surface, globe hidden, Catalog tab active.
+          document.body.classList.add('catalog-empty')
+          this.openBrowsePanel()
+          setActiveCatalogTab('catalog')
+        }
+      } else {
+        document.body.classList.remove('catalog-empty')
+        if (document.body.classList.contains('catalog-mode')) {
+          // Sticky body class means tabs stay visible — just flip
+          // active to Sphere.
+          setActiveCatalogTab('sphere')
+          if (datasetLoaded) {
+            collapseBrowseUI()
+          } else {
+            hideBrowseUI()
+          }
+        } else {
+          hideCatalogTabs()
+        }
+      }
+    })
+  }
+
   /** Detect WebGL support. If unavailable, display troubleshooting instructions and return false. */
   private checkWebGLSupport(): boolean {
     const canvas = document.createElement('canvas')
@@ -1280,9 +1700,9 @@ class InteractiveSphere {
             This application requires WebGL to render the interactive globe.
             Your browser's GPU acceleration appears to be disabled.
           </p>
-          <details style="text-align:left;font-size:0.75rem;color:#999;line-height:1.6;">
+          <details style="text-align:start;font-size:0.75rem;color:#999;line-height:1.6;">
             <summary style="cursor:pointer;color:#4da6ff;margin-bottom:0.5rem;">How to fix this</summary>
-            <ol style="padding-left:1.25rem;margin:0;">
+            <ol style="padding-inline-start:1.25rem;margin:0;">
               <li>Open <strong style="color:#fff;">chrome://flags</strong> in your address bar</li>
               <li>Search for <strong style="color:#fff;">Override software rendering list</strong></li>
               <li>Set it to <strong style="color:#fff;">Enabled</strong> and relaunch Chrome</li>
@@ -1447,14 +1867,56 @@ class InteractiveSphere {
     // dataset + HLS service + decoded image). This is the
     // multi-panel foundation; the single-panel getters below are
     // just convenience wrappers that call it for the primary slot.
+    // Per-slot memoization. `vrSession` polls `getPanelTexture` at
+    // XR frame rate (~90 Hz on Quest); recomputing the spec —
+    // including `overlayOptionsFromDataset` which allocates a fresh
+    // options object for datasets with any Phase 3d field set —
+    // would burn ~5400 allocations/min for no behavioural reason.
+    // Cache on input-reference identity: as long as the panel's
+    // dataset, image, and video references are stable, the spec is
+    // the same object. Dataset metadata mutated in place would
+    // bypass this cache; the codebase replaces dataset objects on
+    // load rather than mutating, and `photorealEarth.setTexture`
+    // re-applies overlay options on every call regardless of
+    // memoization so a stale spec is at most one frame visible.
+    const specCache: Array<{
+      dataset: Dataset | null
+      image: HTMLImageElement | null
+      video: HTMLVideoElement | null
+      spec: VrDatasetTexture | null
+    } | undefined> = []
     const getPanelTexture = (slot: number): VrDatasetTexture | null => {
       const panel = this.panelStates[slot]
-      if (!panel?.dataset) return null
-      if (dataService.isImageDataset(panel.dataset)) {
-        return panel.image ? { kind: 'image', element: panel.image } : null
+      const dataset = panel?.dataset ?? null
+      const image = dataset && dataService.isImageDataset(dataset)
+        ? (panel?.image ?? null)
+        : null
+      const video = dataset && !dataService.isImageDataset(dataset)
+        ? (panel?.hlsService?.getVideo() ?? null)
+        : null
+      const cached = specCache[slot]
+      if (
+        cached
+        && cached.dataset === dataset
+        && cached.image === image
+        && cached.video === video
+      ) {
+        return cached.spec
       }
-      const video = panel.hlsService?.getVideo()
-      return video ? { kind: 'video', element: video } : null
+      // Phase 3h: forward the same overlay options the 2D renderer
+      // consumes (bbox / lonOrigin / flipY / celestialBody) so the
+      // VR Phong material can clip regional datasets to their bbox
+      // and reveal an Earth base diffuse outside. `undefined` for
+      // datasets at all defaults — keeps legacy globals on the fast
+      // path through the shader.
+      let spec: VrDatasetTexture | null = null
+      if (dataset) {
+        const options = overlayOptionsFromDataset(dataset)
+        if (image) spec = { kind: 'image', element: image, options }
+        else if (video) spec = { kind: 'video', element: video, options }
+      }
+      specCache[slot] = { dataset, image, video, spec }
+      return spec
     }
 
     await initVrButton({
@@ -1654,6 +2116,7 @@ class InteractiveSphere {
     initPlaybackPositioning()
     initChatUI({
       onLoadDataset: (id) => { void this.selectDatasetFromChat(id) },
+      onLoadFrame: (id, frameQuery) => { void this.loadFrameFromChat(id, frameQuery) },
       onFlyTo: (lat, lon, altitude) => {
         void this.renderer?.flyTo(lat, lon, altitude)
         // Also rotate the VR globe if a session is live. Fire-and-
@@ -1663,6 +2126,7 @@ class InteractiveSphere {
         if (isVrActive()) void flyToOnGlobe(lat, lon)
       },
       onSetTime: (isoDate) => seekToDate(isoDate, this.hlsService, this.appState, this.playback),
+      canSetTime: (isoDate) => checkSeekToDate(isoDate, this.hlsService, this.appState),
       onFitBounds: (bounds, _label) => { this.renderer?.fitBounds(bounds) },
       onAddMarker: (lat, lng, label) => { this.renderer?.addMarker(lat, lng, label) },
       onToggleLabels: (visible) => {
@@ -1674,7 +2138,95 @@ class InteractiveSphere {
       getCurrentDataset: () => this.appState.currentDataset,
       announce: (msg) => this.announce(msg),
       onOpenBrowse: () => this.openBrowsePanel(),
+      onVoiceAudioFocus: (active) => this.duckDatasetAudio(active),
     })
+  }
+
+  /**
+   * Phase 3 hands-free — duck the loaded dataset's audio during a voice
+   * turn so the mic doesn't transcribe it and TTS doesn't compete (§9.1).
+   * The HLS `<video>` is muted by default; this only has an audible
+   * effect once the user has unmuted via the transport mute button. We
+   * lower the volume rather than toggling `.muted`, so the user's mute
+   * choice is preserved, and restore the prior volume afterward.
+   */
+  private duckPrevVolume: number | undefined = undefined
+
+  private duckDatasetAudio(active: boolean): void {
+    const video = this.hlsService?.video
+    if (!video) return
+    if (active) {
+      if (this.duckPrevVolume === undefined) this.duckPrevVolume = video.volume
+      video.volume = Math.min(video.volume, 0.12)
+    } else if (this.duckPrevVolume !== undefined) {
+      video.volume = this.duckPrevVolume
+      this.duckPrevVolume = undefined
+    }
+  }
+
+  /**
+   * Phase 3pt/A — mount the tour-authoring dock when the URL
+   * carries `?tourEdit=<id>` (or `=new` for a fresh draft).
+   * No-op on regular page loads. The dock reads from the primary
+   * renderer's view context to compose camera-step tasks; its
+   * "Discard" button strips the URL param and routes back to
+   * the publisher tour list.
+   */
+  private initTourAuthoring(): void {
+    initTourAuthoring({
+      getMapView: () => this.renderer?.getViewContext() ?? null,
+      getCurrentDataset: () => this.appState.currentDataset,
+      onDiscard: () => {
+        // Clear the query string and go to the publisher portal's
+        // tour list. Using `location.assign` so the back-button
+        // history stays clean (a tour-edit URL bouncing in the
+        // history is more confusing than the simple linear path).
+        window.location.assign('/publish/tours')
+      },
+      onPreview: (tourFile) => {
+        this.playInlineTour(tourFile)
+      },
+    })
+  }
+
+  /**
+   * Phase 3pt-review/G — preview the in-memory tour draft.
+   * Pre-fix (review/G + /I) this wrapped the TourFile in a
+   * blob URL and routed through `playTour`, but Firefox + a
+   * strict `connect-src` CSP refuses to let the page `fetch()`
+   * a `blob:` of itself ("Content at ... may not load data
+   * from blob:..."). The fetch was pure overhead anyway — the
+   * TourFile is already in memory. Now hands the file straight
+   * to `runTourFromFile`, which is the post-fetch half of the
+   * old `startTour`. Standalone (`playTour`) still fetches
+   * because it gets a real URL and needs `tourBaseUrl` for
+   * relative-media-path resolution. Phase 3pt-review/J —
+   * follow-up after the published bundle hit the CSP bug in
+   * the wild.
+   *
+   * Preview is deliberately NOT standalone: `endTour` calls
+   * `goHome()` for standalone tours, which would strip
+   * `?tourEdit=` from the URL and unmount the dock when a
+   * preview finishes naturally. Bumping `loadGeneration`
+   * matches the supersede-in-flight-loads behaviour from the
+   * old `playTour` (the previous call ran
+   * `++this.loadGeneration` before `startTour`; we replicate
+   * it here so a dataset load in flight when Preview fires
+   * can't land mid-tour and clobber state). Copilot
+   * discussion_r3293605064.
+   */
+  playInlineTour(tourFile: TourFile): void {
+    this.stopTour()
+    // Defensive — `stopTour` only clears `tourIsStandalone` when
+    // `this.tourEngine` is non-null. If a `playTour` is mid-fetch
+    // (engine not yet created), the flag from that call would
+    // leak into the preview and trip the goHome branch in
+    // `endTour`. The loadGeneration bump below supersedes the
+    // in-flight fetch, but we still need to clear the flag the
+    // bumped fetch already set. Copilot discussion_r3293611214.
+    this.tourIsStandalone = false
+    ++this.loadGeneration
+    this.runTourFromFile(tourFile, window.location.href)
   }
 
   /** Open the chat panel and optionally pre-fill the input with a query string. */
@@ -1694,6 +2246,130 @@ class InteractiveSphere {
   /** Load a dataset selected via the chat panel, updating URL and notifying chat of the change. */
   /** Orbit-driven dataset load. Tags the layer_loaded trigger so we
    * can tell chat-initiated loads apart from browse/url/tour. */
+  /**
+   * Phase 3pg/C — resolve a frame query against the parent
+   * sequence dataset and load the resulting image. Falls back to
+   * loading the parent dataset (HLS) if the row has no frames
+   * envelope, so the user always gets something useful even if
+   * the LLM emitted a load_frame against a non-sequence row.
+   *
+   * The frame is rendered as a one-off image overlay on the
+   * globe — same code path the existing image-dataset loader
+   * uses. The parent sequence is not modified; clicking a
+   * different frame later re-renders against the same dataset
+   * row.
+   */
+  private async loadFrameFromChat(datasetId: string, frameQuery: string): Promise<void> {
+    const dataset = this.appState.datasets.find(d => d.id === datasetId)
+    if (!dataset) {
+      logger.warn('[App] loadFrameFromChat: unknown dataset', datasetId)
+      return
+    }
+    if (!dataset.frames) {
+      // Non-sequence row — chat UI shouldn't have emitted a
+      // load-frame for this, but defend against a stale catalog /
+      // race between manifest refresh and click.
+      logger.warn('[App] loadFrameFromChat: dataset has no frames envelope; falling back to dataset load.')
+      void this.selectDatasetFromChat(datasetId)
+      return
+    }
+    const resolved = resolveFrameQuery(dataset, frameQuery)
+    if (!resolved) {
+      logger.warn('[App] loadFrameFromChat: could not resolve frame query', { datasetId, frameQuery })
+      return
+    }
+    this.announce(`Loading frame: ${resolved.displayName}`)
+    // Build a synthetic single-frame dataset off the parent's
+    // metadata. Format is `image/*` so the loader picks the image
+    // render path (rather than HLS). Title carries the display
+    // name so the info panel reads cleanly.
+    //
+    // Derive the format from the resolved URL's extension rather
+    // than hard-coding `image/png` — the server allows `jpg` /
+    // `webp` sequences too and bakes the extension into
+    // `frames.urlTemplate`. A hard-coded PNG would mislead any
+    // downstream logic that branches on `dataset.format`. Phase
+    // 3pg-review/C — Copilot discussion_r3277396472.
+    const format = mimeForFrameUrl(resolved.url)
+    const frameDataset: Dataset = {
+      ...dataset,
+      id: `${dataset.id}#frame=${resolved.index}`,
+      title: `${dataset.title} — ${resolved.displayName}`,
+      format: format as Dataset['format'],
+      dataLink: resolved.url,
+      // Drop the parent's time controls; a single frame is a
+      // still image, not a playback target.
+      startTime: undefined,
+      endTime: undefined,
+      period: undefined,
+      frames: undefined,
+    }
+    const primary = this.viewports.getPrimary()
+    if (!primary) {
+      logger.warn('[App] loadFrameFromChat: no primary renderer; cannot render frame')
+      return
+    }
+    // Mirror the normal `loadDataset` teardown order:
+    //   1. Stop playback + drop any active HLS / video texture on
+    //      the primary slot — otherwise a frame-load while a video
+    //      is playing leaves the playback loop running and the
+    //      HLS service downloading segments behind a hidden video
+    //      element. The time label would also keep ticking against
+    //      a dataset that's no longer displayed. Phase 3pg-review/D
+    //      — Copilot discussion_r3277695258.
+    //   2. Hide the visual overlays the regular dataset-load path
+    //      hides (cloud / day-night / sun). Phase 3pg-fix —
+    //      pass-1 follow-up.
+    //   3. Explicitly hide the playback transport + time label.
+    //      The `loaderCallbacks` below run AFTER `loadImageDataset`
+    //      decides what to show, so the loader-callback path can't
+    //      reliably tear down state already visible from a prior
+    //      video load. Calling these directly before the load is
+    //      what matches the normal flow's
+    //      `if (!isImageDataset) showPlaybackControls(true)`
+    //      logic — image datasets explicitly hide them, and frame
+    //      loads are image datasets. Phase 3pg-review/D — Copilot
+    //      discussion_r3277695282.
+    stopPlaybackLoop(this.playback)
+    this.appState.isPlaying = false
+    resetPlaybackState(this.playback)
+    this.cleanupPanelVideo()
+    primary.removeCloudOverlay?.()
+    primary.removeNightLights?.()
+    primary.disableSunLighting?.()
+    this.showPlaybackControls(false)
+    this.showTimeLabel(false)
+    // The loader callbacks stay as no-ops because the show/hide
+    // decisions are now made above; if a future loader change
+    // starts calling them mid-load they'd be the wrong side of
+    // the teardown. Match the rest of the no-op image paths.
+    const loaderCallbacks = {
+      showPlaybackControls: (_show: boolean) => { /* handled above */ },
+      showTimeLabel: (_show: boolean) => { /* handled above */ },
+    }
+    try {
+      // `directImageUrl: true` skips the loader's legacy `_4096` /
+      // `_2048` / `_1024` resolution-suffix probing — those would
+      // 404 against a per-frame R2 URL, adding three failed round-
+      // trips before the actual URL resolves. Phase 3pg/C — Copilot
+      // discussion_r3277041026.
+      await loadImageDataset(
+        frameDataset,
+        primary,
+        this.appState,
+        this.isMobile,
+        loaderCallbacks,
+        { directImageUrl: true },
+      )
+      this.appState.currentDataset = frameDataset
+      notifyDatasetChanged(frameDataset)
+      this.announce(`Loaded frame: ${resolved.displayName}`)
+    } catch (err) {
+      logger.error('[App] loadFrameFromChat failed:', err)
+      this.announce('Failed to load frame.')
+    }
+  }
+
   private async selectDatasetFromChat(id: string): Promise<void> {
     const gen = ++this.loadGeneration
     logger.debug('[App] selectDatasetFromChat:', id, 'gen:', gen)
@@ -1832,11 +2508,17 @@ class InteractiveSphere {
       updatePlayButton(newPrimaryPanel!.hlsService!.paused)
       // Recompute the display interval for the new primary's temporal
       // range so scrubber snapping and time label formatting are correct.
+      // Pass `period` and `frames.count` for an imagery-accurate cadence
+      // (Plan §5.1) — without these, multi-year climate datasets fall
+      // back to the snap-list estimate and tick the label too fast.
       if (hasTemporalRange && newPrimaryPanel!.hlsService) {
         const start = new Date(newDataset!.startTime!)
         const end = new Date(newDataset!.endTime!)
         const videoDuration = newPrimaryPanel!.hlsService!.duration ?? 1
-        this.playback.displayInterval = inferDisplayInterval(start, end, videoDuration)
+        this.playback.displayInterval = inferDisplayInterval(start, end, videoDuration, {
+          period: newDataset!.period,
+          frameCount: newDataset!.frames?.count,
+        })
       }
       this.attachPrimaryVideoSync()
       this.doStartPlaybackLoop()
@@ -2259,6 +2941,12 @@ class InteractiveSphere {
       fastForward(this.hlsService, this.appState, this.playback, (m) => this.announce(m))
       this.emitPlaybackAction('seek')
     })
+    // "Next in playlist" — only visible while a playlist is active
+    // (see the onPlaybackChange wiring in init above). Bypasses the
+    // per-entry timer and the tour-deferral wait alike.
+    document.getElementById('playlist-next-btn')?.addEventListener('click', () => {
+      skipNextPlaylistEntry()
+    })
     document.getElementById('cc-btn')?.addEventListener('click', () =>
       toggleCaptions(this.playback))
 
@@ -2320,7 +3008,26 @@ class InteractiveSphere {
     closeChat()
     this.announce('Loading dataset\u2026')
     this.showLoadingScreen('Loading dataset\u2026', 20)
-    window.history.pushState({}, '', `?dataset=${encodeURIComponent(id)}`)
+    // Preserve `?catalog=true` across the dataset-load URL transition
+    // so the catalog↔sphere tab control (Phase 1 §3.2) can offer a
+    // "back to catalog" affordance. The body class stays set so CSS
+    // continues to recognise the catalog-mode surface; the regular
+    // load flow swaps the visible browse panel for the globe via
+    // `dismissBrowseAfterLoad()`. Read `getCatalogMode()` once so
+    // the URL state we observe and the tab state we update agree
+    // by construction.
+    const inCatalogMode = getCatalogMode()
+    const nextParams = new URLSearchParams()
+    if (inCatalogMode) nextParams.set('catalog', 'true')
+    nextParams.set('dataset', id)
+    window.history.pushState({}, '', `?${nextParams.toString()}`)
+    // The globe is now the active surface — drop the
+    // `catalog-empty` flag so CSS reveals `#map-grid`. The
+    // `catalog-mode` body class stays (sticky session marker).
+    // Flip the tab control to Sphere since the globe is what the
+    // visitor is now looking at.
+    document.body.classList.remove('catalog-empty')
+    if (inCatalogMode) setActiveCatalogTab('sphere')
     await this.loadDataset(id, 'orbit')
     if (gen !== this.loadGeneration) return // a newer load superseded this one
     this.setLoading(false)
@@ -2505,6 +3212,24 @@ async function checkForUpdates(): Promise<void> {
 
 // Initialize app on DOM ready
 document.addEventListener('DOMContentLoaded', async () => {
+  // Resolve user locale and apply data-i18n attributes before any
+  // UI module renders. English is bundled inline; non-English
+  // locales lazy-load here. See docs/I18N_PLAN.md.
+  await bootstrapI18n()
+
+  // Publisher portal route gate. Visits to `/publish/*` boot a
+  // separate admin UI (Cloudflare Access-protected in production)
+  // and skip the SPA's globe / dataset / chat boot entirely. The
+  // portal chunk is fetched only when this branch fires, so
+  // non-publisher visitors never pay its bundle cost. See
+  // docs/CATALOG_PUBLISHING_TOOLS.md §"Phase 3 implementation
+  // conventions" → "Lazy-load shape".
+  if (location.pathname.startsWith('/publish')) {
+    const { bootPublisherPortal } = await import('./ui/publisher')
+    await bootPublisherPortal()
+    return
+  }
+
   const app = new InteractiveSphere()
   app.setupEventListeners()
   await app.initialize()
@@ -2519,6 +3244,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     void initSession()
     startPerfSampler()
   }
+
+  // §9.2 — stamp the session-end timestamp on pagehide so the next
+  // visit can compute "new since your last visit" and (Phase 7 §9.3)
+  // the returning-user Orbit greeting trigger. This is a synchronous
+  // localStorage write, which is permitted from `pagehide` (unlike
+  // sendBeacon); it rides alongside the analytics session_end flush
+  // but is independent of the telemetry build flag — visit memory is
+  // a local convenience cache, never sent server-side.
+  window.addEventListener('pagehide', () => writeLastSession())
 
   // Non-blocking update check after app is ready
   checkForUpdates()

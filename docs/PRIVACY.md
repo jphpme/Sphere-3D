@@ -323,9 +323,9 @@ and enough text to identify it.
 
 Everything we store runs on **Cloudflare**:
 
-- **Analytics events**: Cloudflare Workers Analytics Engine (90-day
-  hot retention) and Cloudflare R2 object storage (long-term, Iceberg
-  format) for research analysis
+- **Analytics events**: Cloudflare Workers Analytics Engine (30–90 day
+  hot retention) and Cloudflare R2 object storage (long-term archive)
+  plus Cloudflare D1 aggregate tables for product analytics
 - **Feedback submissions and Orbit ratings**: Cloudflare D1 (a
   managed SQLite database)
 - **Crash reports**: Cloudflare D1, in a separate table from feedback
@@ -358,6 +358,13 @@ profiling.
 - On desktop, any offline datasets you download (kept in the app's
   local data folder until you delete them)
 - Your telemetry mode preference
+- **Visit memory** — the datasets you've opened, and roughly how
+  long you spent reading each one. This powers the "Continue
+  exploring" row and the "new since your last visit" badge in the
+  catalog. It is stored only in your browser (localStorage) and is
+  **never sent to our servers**. You can wipe it any time with
+  **Tools → Privacy → Clear visit history**, and clearing site data
+  removes it too.
 
 ---
 

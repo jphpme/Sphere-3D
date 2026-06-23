@@ -6,6 +6,7 @@ import Hls from 'hls.js'
 import { MediaPlayer, type MediaPlayerClass, type MediaPlayerEvent } from 'dashjs'
 import { logger } from '../utils/logger'
 import { reportError } from '../analytics'
+import { VIDEO_PROXY_BASE } from '../config/endpoints'
 
 export interface VideoProxyFile {
   quality: string
@@ -24,8 +25,6 @@ export interface VideoProxyResponse {
   dash?: string
   files: VideoProxyFile[]
 }
-
-const VIDEO_PROXY_BASE = 'https://video-proxy.zyra-project.org/video'
 
 // --- HLS buffer constants ---
 const MOBILE_BUFFER_LENGTH = 30

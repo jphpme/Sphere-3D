@@ -22,6 +22,11 @@ import { fetchModels } from '../services/llmProvider'
 import { isAvailable as isAppleIntelligenceAvailable } from '../services/appleIntelligenceProvider'
 import { setLogLevel, logger } from '../utils/logger'
 import { emit, startDwell, type DwellHandle } from '../analytics'
+import { enMessages, t, getLocale, type MessageKey } from '../i18n'
+import { resolveSttEngine, resolveTtsEngine, voiceSupportForLocale, splitIntoSpokenChunks, baseLanguage, listVoiceLanguageOptions, type SttSession, type TtsEngine } from '../services/voiceService'
+import { HandsFreeController } from './voiceHandsFree'
+import { registerBrowserVoiceEngines, primeBrowserTts, listBrowserVoices, curateVoices, onBrowserVoicesChanged } from '../services/voiceBrowserEngines'
+import { registerCloudVoiceEngines } from '../services/voiceCloudEngines'
 
 // --- Constants ---
 const SESSION_STORAGE_KEY = 'sos-docent-chat'
@@ -40,6 +45,15 @@ export interface ChatCallbacks {
   onLoadDataset: (id: string) => void
   onFlyTo: (lat: number, lon: number, altitude?: number) => void
   onSetTime: (isoDate: string) => { success: boolean; message: string }
+  /**
+   * Side-effect-free predicate: would `onSetTime(isoDate)` succeed
+   * right now? Used to surface set-time failures inline the moment
+   * the action streams in, rather than waiting for the deferred
+   * execution after a load-dataset click. Returning `null` means
+   * the host doesn't support eager checks — the SPA just renders
+   * the optimistic "Seeking to X" status as before.
+   */
+  canSetTime?: (isoDate: string) => { ok: true } | { ok: false; message: string }
   onFitBounds: (bounds: [number, number, number, number], label?: string) => void
   onAddMarker: (lat: number, lng: number, label?: string) => void
   onToggleLabels: (visible: boolean) => void
@@ -49,6 +63,24 @@ export interface ChatCallbacks {
   getCurrentDataset: () => Dataset | null
   announce: (message: string) => void
   onOpenBrowse?: () => void
+  /**
+   * Phase 3pg/C — load a single frame from an image-sequence
+   * dataset. `frameQuery` is the verbatim payload from the
+   * `<<LOAD_FRAME:DATASET_ID:query>>` marker; the host resolves it
+   * via `resolveFrameQuery` (or by calling the `/frames` endpoint)
+   * before rendering. Optional — chat UIs running against a host
+   * that doesn't ship the frame loader can leave it unbound, in
+   * which case frame-load buttons silently no-op.
+   */
+  onLoadFrame?: (datasetId: string, frameQuery: string) => void
+  /**
+   * Phase 3 hands-free — duck the loaded dataset's audio (the HLS
+   * `<video>`, when the user has unmuted it) while a voice turn is
+   * active, restoring it afterward. Prevents the mic transcribing
+   * dataset audio and TTS competing with it (§9.1). Optional; a host
+   * without dataset audio can leave it unbound.
+   */
+  onVoiceAudioFocus?: (active: boolean) => void
 }
 
 let callbacks: ChatCallbacks | null = null
@@ -77,6 +109,26 @@ let chatDwellHandle: DwellHandle | null = null
  * later clicks an inline load button in the docent's reply. */
 let lastUserSendAt: number | null = null
 
+/** Active speech-recognition session, or null when not listening (ORBIT_VOICE_PLAN §1). */
+let sttSession: SttSession | null = null
+/** Release handle for the `voiceschanged` subscription (re-init safe). */
+let voicesUnsub: (() => void) | null = null
+/** Set when a send terminates listening, so the session's `onEnd` doesn't re-send. */
+let sttSuppressAutoSend = false
+
+/** TTS (auto-speak) state for the in-flight reply (ORBIT_VOICE_PLAN §1.1, §2). */
+let ttsEngine: TtsEngine | null = null
+let spokenChunkCount = 0
+let ttsChain: Promise<void> = Promise.resolve()
+let speakingActive = false
+let ttsTrigger: 'autospeak' | 'replay' = 'autospeak'
+let ttsEmitted = false
+/** Monotonic id bumped when a new speaking session begins. Queued
+ * `ttsChain` callbacks capture it and bail if a newer session has
+ * started — otherwise a prior reply's pending promise could hide the
+ * Stop control or enqueue speech into the current session. */
+let ttsSessionId = 0
+
 /** Globe-control actions deferred until a load-dataset action in the same message completes. */
 let pendingGlobeActions: ChatAction[] = []
 
@@ -97,6 +149,7 @@ export function initChatUI(cb: ChatCallbacks): void {
   callbacks = cb
   restoreSession()
   wireEvents()
+  initVoiceInput()
   renderMessages()
   // Apply the persisted debug-prompt setting now, at boot — not just
   // when the settings panel is first opened. Otherwise the checkbox
@@ -151,7 +204,7 @@ function degradedBadgeText(reason: DegradedReason): string {
       // (quota *exhausted*, not "approaching"). The earlier
       // "approaching limit" copy implied a softer state than the
       // server signals.
-      return 'Reduced functionality — Workers AI quota reached. Suggestions are using offline matching until it recovers.'
+      return t('chat.degraded.quotaExhausted')
   }
 }
 
@@ -187,7 +240,7 @@ export function openChat(): void {
   scrollToBottom()
   const input = document.getElementById('chat-input') as HTMLTextAreaElement | null
   input?.focus()
-  callbacks?.announce('Chat opened')
+  callbacks?.announce(t('chat.announce.opened'))
 }
 
 /**
@@ -227,7 +280,7 @@ export function closeChat(): void {
   trigger?.setAttribute('aria-expanded', 'false')
   browseChatBtn?.classList.remove('chat-trigger-active')
   if (settingsOpen) toggleSettings()
-  callbacks?.announce('Chat closed')
+  callbacks?.announce(t('chat.announce.closed'))
 }
 
 /**
@@ -276,14 +329,46 @@ function executeGlobeAction(action: ChatAction): void {
     callbacks.onFlyTo(action.lat, action.lon, action.altitude)
   } else if (action.type === 'set-time') {
     const result = callbacks.onSetTime(action.isoDate)
+    // Find the rendered status span for THIS action. The eager
+    // dry-check at stream time may have stamped an `error` on
+    // the action and rendered it with failure styling; if the
+    // deferred execution now succeeds (user loaded a different
+    // time-enabled dataset), the stale error styling has to clear,
+    // and the underlying action's `error` field has to come off
+    // so a re-render (panel close + reopen) doesn't flash the
+    // failure state again.
+    //
+    // Match by ISO date substring across status spans — the
+    // optimistic "Seeking to {date}" badge embeds it, and the
+    // dry-check failure messages do too for date-out-of-range
+    // cases. For "no dataset loaded" failures the date isn't in
+    // the badge text, so substring match miss is acceptable: the
+    // execution path can only succeed once a dataset IS loaded,
+    // at which point the badge text will have been re-rendered
+    // through the action's updated `error`-cleared state.
+    const statusEls = document.querySelectorAll('.chat-action-status')
     if (!result.success) {
       callbacks.announce(result.message)
-      // Update the status indicator in the DOM to show the error
-      const statusEls = document.querySelectorAll('.chat-action-status')
+      action.error = result.message
       for (const el of statusEls) {
-        if (el.textContent?.includes(action.isoDate)) {
+        if (el.textContent?.includes(action.isoDate) || el.textContent === action.error) {
           el.textContent = result.message
           el.classList.add('chat-action-status-err')
+        }
+      }
+    } else {
+      // Successful execution clears any prior eager-dry-check
+      // error stamp so the action persists clean in message
+      // history (and re-renders without the failure styling).
+      delete action.error
+      const seeking = t('chat.action.seekingTo', { date: action.isoDate })
+      for (const el of statusEls) {
+        if (
+          el.classList.contains('chat-action-status-err')
+          && el.textContent?.includes(action.isoDate)
+        ) {
+          el.classList.remove('chat-action-status-err')
+          el.textContent = seeking
         }
       }
     }
@@ -626,8 +711,40 @@ function wireEvents(): void {
     new ResizeObserver(() => updateTriggerForInfoPanel()).observe(infoPanel)
   }
   document.getElementById('chat-close')?.addEventListener('click', closeChat)
-  document.getElementById('chat-send')?.addEventListener('click', () => { void handleSend() })
-  setupVoiceControl()
+  document.getElementById('chat-send')?.addEventListener('click', handleSend)
+  const micBtn = document.getElementById('chat-mic')
+  micBtn?.addEventListener('click', toggleListening)
+  // Push-to-talk: capture only while the mic is held down. Pointer
+  // events cover mouse, touch and pen; `pointerup`/`leave`/`cancel`
+  // all release so a turn can't get stuck capturing.
+  micBtn?.addEventListener('pointerdown', () => {
+    if ((loadConfig().voiceHandsFree ?? 'off') !== 'push-to-talk') return
+    primeBrowserTts()
+    void handsFree?.press()
+  })
+  const releasePtt = (): void => {
+    if ((loadConfig().voiceHandsFree ?? 'off') === 'push-to-talk') handsFree?.release()
+  }
+  micBtn?.addEventListener('pointerup', releasePtt)
+  micBtn?.addEventListener('pointerleave', releasePtt)
+  micBtn?.addEventListener('pointercancel', releasePtt)
+  document.getElementById('chat-stop-speaking')?.addEventListener('click', () => {
+    stopSpeaking()
+    // Hands-free interrupt: don't just stop Orbit's voice — hand the
+    // turn back to the user immediately by resuming the mic and
+    // restoring dataset audio, rather than waiting for the cancelled
+    // reply to drain. (§9.1 "Stop speaking" → "interrupt".)
+    if ((loadConfig().voiceHandsFree ?? 'off') !== 'off') {
+      handsFree?.setBusy(false)
+      setVoiceAudioFocus(false)
+    }
+    callbacks?.announce(t('chat.announce.voiceStopped'))
+  })
+  // Enabling auto-speak is a user gesture — prime iOS TTS here so the
+  // very next reply can be spoken without waiting for another tap.
+  document.getElementById('chat-settings-voice-autospeak')?.addEventListener('change', (e) => {
+    if ((e.target as HTMLInputElement | null)?.checked) primeBrowserTts()
+  })
   document.getElementById('chat-settings-btn')?.addEventListener('click', toggleSettings)
 
   // Prevent wheel events from bubbling to the globe's zoom handler
@@ -651,7 +768,7 @@ function wireEvents(): void {
 
   document.getElementById('chat-clear')?.addEventListener('click', () => {
     clearChat()
-    callbacks?.announce('Chat cleared')
+    callbacks?.announce(t('chat.announce.cleared'))
   })
 
   // Vision toggle — syncs with DocentConfig.visionEnabled
@@ -665,7 +782,7 @@ function wireEvents(): void {
       config.visionEnabled = !config.visionEnabled
       saveConfig(config)
       setVisionUI(config.visionEnabled)
-      callbacks?.announce(config.visionEnabled ? 'Vision mode enabled' : 'Vision mode disabled')
+      callbacks?.announce(t(config.visionEnabled ? 'chat.announce.visionEnabled' : 'chat.announce.visionDisabled'))
     })
   }
 
@@ -701,6 +818,392 @@ function setVisionUI(enabled: boolean): void {
   if (settingsCheck) settingsCheck.checked = enabled
 }
 
+// --- Voice input (STT) — ORBIT_VOICE_PLAN.md Phase 1 ---
+
+/**
+ * Register the browser speech engines this runtime supports and
+ * reveal the mic button when STT is actually available for the
+ * active locale. No-op (button stays hidden) otherwise, so the
+ * typed experience is unchanged where voice can't run.
+ */
+function initVoiceInput(): void {
+  registerBrowserVoiceEngines()
+  // Cloud engines register too but are opt-in (provider=cloud) — `auto`
+  // never picks them; web-only (no /api proxy in the desktop shell).
+  registerCloudVoiceEngines()
+  updateMicVisibility()
+  populateVoiceOptions()
+  // System voices load asynchronously — refresh the picker when they
+  // arrive. Release any prior subscription first so a re-init (hot
+  // reload / tests) doesn't accumulate duplicate listeners.
+  voicesUnsub?.()
+  voicesUnsub = onBrowserVoicesChanged(populateVoiceOptions)
+  // Phase 3 hands-free: bridge the realtime session to the input/send
+  // path. Inert until the user opts into a mode and a streaming engine
+  // resolves. Recreated on re-init (idempotent teardown).
+  handsFree?.teardown()
+  handsFree = new HandsFreeController({
+    onPartial: (text) => fillVoiceInput(text),
+    onTurn: (text) => { fillVoiceInput(text); void handleSend() },
+    onStateChange: (state) => {
+      setMicListening(state === 'capturing' || state === 'listening')
+      // Duck dataset audio the moment we start capturing a turn (kept
+      // ducked through send + reply; released at the resume point).
+      if (state === 'capturing') setVoiceAudioFocus(true)
+    },
+  })
+  syncHandsFree()
+}
+
+/** Module-level hands-free controller (null until init). */
+let handsFree: HandsFreeController | null = null
+
+/** Whether dataset audio is currently ducked for a voice turn. */
+let voiceAudioFocused = false
+
+/** Duck / restore the dataset audio for a voice turn (deduped). */
+function setVoiceAudioFocus(active: boolean): void {
+  if (voiceAudioFocused === active) return
+  voiceAudioFocused = active
+  callbacks?.onVoiceAudioFocus?.(active)
+}
+
+/** Fill the chat input with a (partial or final) transcript, resizing. */
+function fillVoiceInput(text: string): void {
+  const input = document.getElementById('chat-input') as HTMLTextAreaElement | null
+  if (!input) return
+  input.value = text
+  input.style.height = 'auto'
+  input.style.height = Math.min(input.scrollHeight, 96) + 'px'
+}
+
+/** (Re)configure the hands-free controller from the current config. */
+function syncHandsFree(): void {
+  const cfg = loadConfig()
+  handsFree?.sync({
+    mode: cfg.voiceHandsFree ?? 'off',
+    lang: cfg.voiceLang || getLocale(),
+    provider: cfg.voiceProvider ?? 'auto',
+  })
+  // If hands-free ended up inactive (turned off, or no streaming engine
+  // resolved), make sure any ducking from a prior turn is released — the
+  // send/drain path that normally un-ducks may never run again.
+  if (!handsFree?.isActive()) {
+    setMicListening(false)
+    setVoiceAudioFocus(false)
+  }
+}
+
+/** Show the mic only when an STT engine resolves for the active locale (§3 matrix). */
+function updateMicVisibility(): void {
+  const btn = document.getElementById('chat-mic')
+  if (!btn) return
+  const cfg = loadConfig()
+  const support = voiceSupportForLocale(cfg.voiceLang || getLocale(), cfg.voiceProvider ?? 'auto')
+  btn.style.display = support.stt ? 'flex' : 'none'
+}
+
+/**
+ * Fill the settings Voice picker with the system TTS voices,
+ * preferring those that match the active language. Voices load
+ * asynchronously, so this re-runs on `voiceschanged`.
+ */
+function populateVoiceOptions(): void {
+  const select = document.getElementById('chat-settings-voice-name') as HTMLSelectElement | null
+  if (!select) return
+  const cfg = loadConfig()
+  const lang = baseLanguage(cfg.voiceLang || getLocale())
+  // Curate first (drop Apple novelty voices, sort best-first), then
+  // prefer voices for the active language, falling back to all.
+  const all = curateVoices(listBrowserVoices())
+  const matching = all.filter(v => baseLanguage(v.lang) === lang)
+  const voices = matching.length ? matching : all
+  const selected = cfg.voiceName ?? ''
+  const defaultLabel = t('chat.settings.voiceName.default')
+  select.innerHTML = ''
+  const defaultOpt = document.createElement('option')
+  defaultOpt.value = ''
+  defaultOpt.textContent = defaultLabel
+  select.appendChild(defaultOpt)
+  for (const v of voices) {
+    const opt = document.createElement('option')
+    opt.value = v.name
+    opt.textContent = `${v.name} (${v.lang})` // i18n-exempt: system voice id + BCP-47 tag
+    select.appendChild(opt)
+  }
+  select.value = selected
+}
+
+/**
+ * Fill the recognition-language override picker. "Same as app" (value
+ * "") keeps voice tracking the UI locale; the rest are the BCP-47
+ * languages the voice stack can name (§8 Phase 3), labelled in the
+ * active locale via `Intl.DisplayNames` so no per-language i18n keys
+ * are needed. Selecting one decouples spoken language from UI locale.
+ */
+function populateVoiceLanguageOptions(): void {
+  const select = document.getElementById('chat-settings-voice-lang') as HTMLSelectElement | null
+  if (!select) return
+  const cfg = loadConfig()
+  const defaultLabel = t('chat.settings.voiceLang.auto')
+  let names: Intl.DisplayNames | null = null
+  try {
+    names = new Intl.DisplayNames([getLocale()], { type: 'language' })
+  } catch { /* DisplayNames unsupported — fall back to the raw tag */ }
+  select.innerHTML = ''
+  const defaultOpt = document.createElement('option')
+  defaultOpt.value = ''
+  defaultOpt.textContent = defaultLabel
+  select.appendChild(defaultOpt)
+  for (const code of listVoiceLanguageOptions()) {
+    const opt = document.createElement('option')
+    opt.value = code
+    opt.textContent = names?.of(code) ?? code // i18n-exempt: localized via Intl.DisplayNames or raw BCP-47 tag
+    select.appendChild(opt)
+  }
+  select.value = cfg.voiceLang ?? ''
+}
+
+function toggleListening(): void {
+  // The mic tap is a user gesture — prime iOS TTS now so a
+  // voice-initiated reply (which auto-sends later, off-gesture) can
+  // still be spoken aloud.
+  primeBrowserTts()
+  const mode = loadConfig().voiceHandsFree ?? 'off'
+  // Open-mic: the mic button is a mute toggle for the always-on session.
+  // Don't set the indicator here — unmute arms asynchronously and can
+  // fail (permission denied); the controller's state-change hook drives
+  // setMicListening so the UI never gets stuck showing "listening".
+  if (mode === 'open-mic' && handsFree?.isActive()) {
+    const muted = handsFree.toggleMute()
+    callbacks?.announce(t(muted ? 'chat.announce.voiceMuted' : 'chat.announce.voiceListening'))
+    return
+  }
+  // Push-to-talk is driven by pointer down/up (see wireEvents) — but
+  // only when a hands-free session is actually live. If none resolved,
+  // fall through to the Phase 1 single-tap path so the mic still works.
+  if (mode === 'push-to-talk' && handsFree?.isActive()) return
+  // Phase 1 single-tap path.
+  if (sttSession) stopListening()
+  else startListening()
+}
+
+function startListening(): void {
+  const input = document.getElementById('chat-input') as HTMLTextAreaElement | null
+  if (!input || isStreaming) return
+  // Barge-in: never capture while Orbit is speaking, or the mic would
+  // transcribe its own TTS (echo / self-trigger). (§9.1)
+  stopSpeaking()
+  const cfg = loadConfig()
+  const lang = cfg.voiceLang || getLocale()
+  const engine = resolveSttEngine(cfg.voiceProvider ?? 'auto', lang)
+  if (!engine) {
+    callbacks?.announce(t('chat.announce.voiceError'))
+    return
+  }
+  sttSuppressAutoSend = false
+  let sawFinal = false
+  let sttError = false
+  const startedAt = Date.now()
+  const provider = engine.provider
+  const langBase = baseLanguage(lang)
+  setMicListening(true)
+  callbacks?.announce(t('chat.announce.voiceListening'))
+  sttSession = engine.start({
+    lang,
+    interim: true,
+    // Fill the input live so the user sees what's being heard and
+    // can edit before it sends (conversational repair, §9.2).
+    onResult: (result) => {
+      input.value = result.transcript
+      input.style.height = 'auto'
+      input.style.height = Math.min(input.scrollHeight, 96) + 'px'
+      if (result.isFinal) sawFinal = true
+    },
+    onError: (err) => {
+      logger.warn('[voice] STT error', err)
+      sttError = true
+      endListening()
+      callbacks?.announce(t('chat.announce.voiceError'))
+    },
+    onEnd: () => {
+      const hadFinal = sawFinal
+      const suppressed = sttSuppressAutoSend
+      sttSuppressAutoSend = false
+      endListening()
+      // Tier B: no transcript text — only provider/lang/duration/success.
+      emit({
+        event_type: 'voice_interaction',
+        mode: 'stt',
+        provider,
+        trigger: 'mic',
+        duration_ms: Math.max(0, Date.now() - startedAt),
+        lang: langBase,
+        success: hadFinal && !sttError,
+      })
+      // Auto-send on a committed transcript (push-to-talk turn) —
+      // unless an error was reported (could be partial/wrong) or a
+      // manual send already terminated this session.
+      if (hadFinal && !sttError && !suppressed && input.value.trim()) void handleSend()
+    },
+  })
+}
+
+/** Stop capture; the engine's `onEnd` resets the UI (and may auto-send). */
+function stopListening(): void {
+  sttSession?.stop()
+}
+
+function endListening(): void {
+  sttSession = null
+  setMicListening(false)
+}
+
+function setMicListening(on: boolean): void {
+  const btn = document.getElementById('chat-mic')
+  if (!btn) return
+  btn.classList.toggle('listening', on)
+  btn.setAttribute('aria-pressed', String(on))
+  btn.title = on ? t('chat.voice.titleListening') : t('chat.voice.title')
+}
+
+// --- Voice output (TTS auto-speak) — ORBIT_VOICE_PLAN.md §1.1, §2 ---
+
+/**
+ * Start a fresh speaking session for a reply. Cancels any prior
+ * speech, then resolves a TTS engine only when auto-speak is on and
+ * one is available for the active locale. No engine → stays silent.
+ */
+function beginSpeaking(): void {
+  stopSpeaking()
+  ttsSessionId++
+  const cfg = loadConfig()
+  if (!cfg.voiceAutoSpeak) { ttsEngine = null; return }
+  // Runs in the send-click / Enter gesture task — unlock iOS audio
+  // before the (later, async) real speech fires.
+  primeBrowserTts()
+  ttsEngine = resolveTtsEngine(cfg.voiceProvider ?? 'auto', cfg.voiceLang || getLocale())
+  spokenChunkCount = 0
+  speakingActive = !!ttsEngine
+  ttsTrigger = 'autospeak'
+  ttsEmitted = false
+  if (speakingActive) setStopSpeakingVisible(true)
+}
+
+/**
+ * Emit the Tier B `voice_interaction` (TTS) event once per speaking
+ * session, the first time speech is actually produced. No text or
+ * audio — only provider / language / trigger. (ORBIT_VOICE_PLAN §6)
+ */
+function emitTtsOnce(): void {
+  if (ttsEmitted || !ttsEngine) return
+  ttsEmitted = true
+  emit({
+    event_type: 'voice_interaction',
+    mode: 'tts',
+    provider: ttsEngine.provider,
+    trigger: ttsTrigger,
+    duration_ms: 0,
+    lang: baseLanguage(loadConfig().voiceLang || getLocale()),
+    success: true,
+  })
+}
+
+/**
+ * Enqueue any newly-complete sentences for speech. Reads the
+ * spoken-form projection of the full message so far (markers /
+ * markdown / URLs stripped) and queues sentences past the cursor.
+ * While streaming, the last (possibly partial) sentence is held
+ * back; `final` flushes it. (§1.1 projection, §2 sentence-chunking)
+ */
+function pumpSpeech(fullText: string, final: boolean): void {
+  if (!speakingActive || !ttsEngine) return
+  const session = ttsSessionId
+  const sentences = splitIntoSpokenChunks(fullText)
+  const upto = final ? sentences.length : Math.max(0, sentences.length - 1)
+  const cfg = loadConfig()
+  const lang = cfg.voiceLang || getLocale()
+  const rate = cfg.voiceRate
+  const voice = cfg.voiceName
+  const engine = ttsEngine
+  for (let i = spokenChunkCount; i < upto; i++) {
+    const sentence = sentences[i]
+    if (!sentence) continue
+    emitTtsOnce()
+    ttsChain = ttsChain.then(() => (speakingActive && session === ttsSessionId ? engine.speak(sentence, { lang, rate, voice }) : undefined))
+  }
+  spokenChunkCount = Math.max(spokenChunkCount, upto)
+  if (final) {
+    // Hide the Stop control once the queued speech drains — but only
+    // if this is still the active session.
+    ttsChain = ttsChain.then(() => { if (speakingActive && session === ttsSessionId) setStopSpeakingVisible(false) })
+  }
+}
+
+/** Stop speech immediately (Stop control / barge-in / new reply). */
+function stopSpeaking(): void {
+  speakingActive = false
+  ttsEngine?.cancel()
+  ttsChain = Promise.resolve()
+  setStopSpeakingVisible(false)
+}
+
+function setStopSpeakingVisible(visible: boolean): void {
+  const btn = document.getElementById('chat-stop-speaking')
+  if (btn) btn.style.display = visible ? 'flex' : 'none'
+}
+
+/** Whether a TTS engine resolves for the active locale (gates the per-message Speak button). */
+function canSpeakReplies(): boolean {
+  const cfg = loadConfig()
+  return !!resolveTtsEngine(cfg.voiceProvider ?? 'auto', cfg.voiceLang || getLocale())
+}
+
+/**
+ * Speak a specific message on demand. The first chunk is spoken
+ * **synchronously** so this works when invoked from a tap — iOS
+ * Safari requires speech to originate inside a user gesture, which
+ * the streamed auto-speak path (microtask-queued) can't guarantee.
+ */
+function speakMessage(text: string): void {
+  const cfg = loadConfig()
+  const engine = resolveTtsEngine(cfg.voiceProvider ?? 'auto', cfg.voiceLang || getLocale())
+  if (!engine) return
+  const chunks = splitIntoSpokenChunks(text)
+  const first = chunks[0]
+  if (!first) return
+  stopSpeaking()
+  ttsSessionId++
+  const session = ttsSessionId
+  speakingActive = true
+  ttsEngine = engine
+  ttsTrigger = 'replay'
+  ttsEmitted = false
+  emitTtsOnce()
+  setStopSpeakingVisible(true)
+  const lang = cfg.voiceLang || getLocale()
+  const rate = cfg.voiceRate
+  const voice = cfg.voiceName
+  let chain = engine.speak(first, { lang, rate, voice })
+  for (let i = 1; i < chunks.length; i++) {
+    const sentence = chunks[i]
+    if (!sentence) continue
+    chain = chain.then(() => (speakingActive && session === ttsSessionId ? engine.speak(sentence, { lang, rate, voice }) : undefined))
+  }
+  ttsChain = chain.then(() => { if (speakingActive && session === ttsSessionId) setStopSpeakingVisible(false) })
+}
+
+function wireSpeakButtons(container: ParentNode): void {
+  container.querySelectorAll<HTMLButtonElement>('.chat-speak-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const msg = messages.find((m) => m.id === btn.dataset.msgId)
+      if (!msg?.text) return
+      primeBrowserTts()
+      speakMessage(msg.text)
+    })
+  })
+}
+
 // --- Settings panel ---
 
 function toggleSettings(): void {
@@ -723,16 +1226,26 @@ async function populateSettings(): Promise<void> {
   const readingLevelSelect = document.getElementById('chat-settings-reading-level') as HTMLSelectElement | null
   if (urlInput) {
     urlInput.value = config.apiUrl
-    if (IS_TAURI) urlInput.placeholder = 'https://api.openai.com/v1 or http://localhost:11434/v1'
+    if (IS_TAURI) urlInput.placeholder = t('chat.settings.url.tauri.placeholder')
   }
   if (keyInput) {
     keyInput.value = config.apiKey
-    if (IS_TAURI) keyInput.placeholder = 'Stored securely in OS keychain'
+    if (IS_TAURI) keyInput.placeholder = t('chat.settings.key.tauri.placeholder')
   }
   if (readingLevelSelect) readingLevelSelect.value = config.readingLevel
   if (enabledInput) enabledInput.checked = config.enabled
   if (visionInput) visionInput.checked = config.visionEnabled
   if (debugInput) debugInput.checked = config.debugPrompt ?? false
+  const autospeakInput = document.getElementById('chat-settings-voice-autospeak') as HTMLInputElement | null
+  if (autospeakInput) autospeakInput.checked = config.voiceAutoSpeak ?? false
+  populateVoiceOptions()
+  populateVoiceLanguageOptions()
+  const providerSelect = document.getElementById('chat-settings-voice-provider') as HTMLSelectElement | null
+  if (providerSelect) providerSelect.value = config.voiceProvider ?? 'auto'
+  const handsFreeSelect = document.getElementById('chat-settings-voice-handsfree') as HTMLSelectElement | null
+  if (handsFreeSelect) handsFreeSelect.value = config.voiceHandsFree ?? 'off'
+  const rateSelect = document.getElementById('chat-settings-voice-rate') as HTMLSelectElement | null
+  if (rateSelect) rateSelect.value = String(config.voiceRate ?? 1)
   // Apply saved debug log level on startup
   setLogLevel(config.debugPrompt ? 'debug' : null)
   // Seed the select with the saved model immediately, then refresh from API
@@ -764,7 +1277,7 @@ function addAppleIntelligenceOption(select: HTMLSelectElement, selected: string)
     if (Array.from(select.options).some(o => o.value === 'apple-intelligence')) return
     const opt = document.createElement('option')
     opt.value = 'apple-intelligence'
-    opt.textContent = 'Local (Apple Intelligence)'
+    opt.textContent = t('chat.settings.model.appleIntelligence')
     opt.selected = selected === 'apple-intelligence'
     select.insertBefore(opt, select.firstChild)
   }).catch(() => { /* not available, silently skip */ })
@@ -785,7 +1298,7 @@ async function refreshModelSelect(apiUrl: string, preferredModel?: string): Prom
     // Fallback: keep the current value as a manual entry
     const opt = document.createElement('option')
     opt.value = selected
-    opt.textContent = selected || 'No models found'
+    opt.textContent = selected || t('chat.settings.model.noneFound')
     select.appendChild(opt)
     select.disabled = false
     // Still check for Apple Intelligence — it's local and works offline
@@ -823,6 +1336,26 @@ function readSettingsForm(): DocentConfig {
   const enabledInput = document.getElementById('chat-settings-enabled') as HTMLInputElement | null
   const visionInput = document.getElementById('chat-settings-vision') as HTMLInputElement | null
   const debugInput = document.getElementById('chat-settings-debug') as HTMLInputElement | null
+  const autospeakInput = document.getElementById('chat-settings-voice-autospeak') as HTMLInputElement | null
+  const voiceNameSelect = document.getElementById('chat-settings-voice-name') as HTMLSelectElement | null
+  const voiceRateSelect = document.getElementById('chat-settings-voice-rate') as HTMLSelectElement | null
+  const voiceProviderSelect = document.getElementById('chat-settings-voice-provider') as HTMLSelectElement | null
+  const voiceLangSelect = document.getElementById('chat-settings-voice-lang') as HTMLSelectElement | null
+  const handsFreeSelect = document.getElementById('chat-settings-voice-handsfree') as HTMLSelectElement | null
+  const parsedRate = Number(voiceRateSelect?.value)
+  // Carry forward voice config not exposed in this form so a save
+  // doesn't wipe it.
+  const current = loadConfig()
+  const providerValue = voiceProviderSelect?.value
+  const voiceProvider = providerValue === 'browser' || providerValue === 'cloud' || providerValue === 'auto'
+    ? providerValue
+    : current.voiceProvider
+  // "" (Same as app) clears the override so voice tracks the UI locale.
+  const voiceLang = voiceLangSelect ? (voiceLangSelect.value || undefined) : current.voiceLang
+  const handsFreeValue = handsFreeSelect?.value
+  const voiceHandsFree = handsFreeValue === 'push-to-talk' || handsFreeValue === 'open-mic' || handsFreeValue === 'off'
+    ? handsFreeValue
+    : current.voiceHandsFree
   return {
     apiUrl: urlInput?.value.trim() || defaults.apiUrl,
     apiKey: keyInput?.value.trim() ?? '',
@@ -831,6 +1364,12 @@ function readSettingsForm(): DocentConfig {
     enabled: enabledInput?.checked ?? defaults.enabled,
     visionEnabled: visionInput?.checked ?? defaults.visionEnabled,
     debugPrompt: debugInput?.checked ?? defaults.debugPrompt,
+    voiceAutoSpeak: autospeakInput?.checked ?? current.voiceAutoSpeak,
+    voiceProvider,
+    voiceLang,
+    voiceHandsFree,
+    voiceName: voiceNameSelect ? (voiceNameSelect.value || undefined) : current.voiceName,
+    voiceRate: Number.isFinite(parsedRate) && parsedRate > 0 ? parsedRate : current.voiceRate,
   }
 }
 
@@ -841,13 +1380,20 @@ function handleSettingsSave(): void {
   setLogLevel(config.debugPrompt ? 'debug' : null)
   // Keep vision toggle button + hint banner in sync with settings checkbox
   setVisionUI(config.visionEnabled)
+  // Provider change can flip which engine resolves for the locale —
+  // refresh mic visibility + the voice picker.
+  updateMicVisibility()
+  populateVoiceOptions()
+  // Hands-free mode / language / provider may have changed — re-sync
+  // the realtime session (creates, tears down, or re-arms as needed).
+  syncHandsFree()
   const status = document.getElementById('chat-settings-status')
   if (status) {
-    status.textContent = 'Saved'
+    status.textContent = t('chat.settings.status.saved')
     status.className = 'chat-settings-status chat-settings-status-ok'
     setTimeout(() => { status.textContent = '' }, 2000)
   }
-  callbacks?.announce('Settings saved')
+  callbacks?.announce(t('chat.announce.settingsSaved'))
 }
 
 async function handleSettingsTest(): Promise<void> {
@@ -857,7 +1403,7 @@ async function handleSettingsTest(): Promise<void> {
   const status = document.getElementById('chat-settings-status')
   const testBtn = document.getElementById('chat-settings-test') as HTMLButtonElement | null
   if (status) {
-    status.textContent = 'Testing…'
+    status.textContent = t('chat.settings.status.testing')
     status.className = 'chat-settings-status'
   }
   if (testBtn) testBtn.disabled = true
@@ -869,20 +1415,20 @@ async function handleSettingsTest(): Promise<void> {
       // Warn if connection works but the Enable checkbox is unchecked
       const enabledInput = document.getElementById('chat-settings-enabled') as HTMLInputElement | null
       if (enabledInput && !enabledInput.checked) {
-        status.textContent = 'Connected — but "Enable LLM" is unchecked. Check it and Save to use AI.'
+        status.textContent = t('chat.settings.status.enableHint')
         status.className = 'chat-settings-status chat-settings-status-err'
       } else {
-        status.textContent = 'Connected'
+        status.textContent = t('chat.settings.status.connected')
         status.className = 'chat-settings-status chat-settings-status-ok'
       }
     } else {
-      status.textContent = result.reason ?? 'Failed to connect'
+      status.textContent = result.reason ?? t('chat.settings.status.failedToConnect')
       status.className = 'chat-settings-status chat-settings-status-err'
     }
     setTimeout(() => { status.textContent = '' }, 5000)
   }
   if (testBtn) testBtn.disabled = false
-  callbacks?.announce(result.ok ? 'LLM connection successful' : 'LLM connection failed')
+  callbacks?.announce(t(result.ok ? 'chat.announce.testSuccess' : 'chat.announce.testFailed'))
 }
 
 // --- Send / receive ---
@@ -891,11 +1437,25 @@ async function handleSend(options: { voice?: boolean } = {}): Promise<void> {
   const input = document.getElementById('chat-input') as HTMLTextAreaElement | null
   if (!input || !callbacks || isStreaming) return
 
+  // Terminate any active listening first (regardless of how send was
+  // triggered) so recognition can't keep mutating the input after we
+  // read and clear it. Suppress the session's auto-send — this send
+  // already commits the current transcript.
+  if (sttSession) {
+    sttSuppressAutoSend = true
+    stopListening()
+  }
+  // Hands-free: suspend the open mic while Orbit thinks/speaks so it
+  // can't transcribe its own reply (§9.1). Resumed once speech drains.
+  handsFree?.setBusy(true)
+  setVoiceAudioFocus(true)
+
   const text = input.value.trim()
-  if (!text) return
-  if (isListening) stopVoiceRecording()
-  const shouldSpeakResponse = options.voice === true
-  if (!shouldSpeakResponse) stopResponseAudio()
+  if (!text) {
+    handsFree?.setBusy(false)
+    setVoiceAudioFocus(false)
+    return
+  }
 
   // Add user message
   const userMsg: ChatMessage = {
@@ -942,6 +1502,11 @@ async function handleSend(options: { voice?: boolean } = {}): Promise<void> {
   isStreaming = true
   showTyping()
   setSendEnabled(false)
+  beginSpeaking()
+  // Identify this turn's speaking session so the resume below can't
+  // re-enable the mic if a newer turn has since taken over (a stale
+  // earlier ttsChain settling after the next send began).
+  const turnSpeakId = ttsSessionId
   const turnStartedAt = Date.now()
   let streamFinishReason: 'stop' | 'length' | 'tool_calls' | 'error' = 'stop'
 
@@ -980,19 +1545,44 @@ async function handleSend(options: { voice?: boolean } = {}): Promise<void> {
           docentMsg.text += chunk.text
           updateStreamingMessage(docentMsg)
           scrollToBottom()
+          // Only re-chunk for speech when this delta may have completed
+          // a sentence — re-splitting the whole message on every token
+          // would be O(n²). The `done` flush catches any trailing text.
+          if (/[.!?\n]/.test(chunk.text)) pumpSpeech(docentMsg.text, false)
           break
 
-        case 'action':
+        case 'action': {
           if (!docentMsg.actions) docentMsg.actions = []
-          docentMsg.actions.push(chunk.action)
+          let action = chunk.action
+          // Eager dry-check for set-time so the user sees the
+          // failure ("no time-enabled dataset loaded", "date out
+          // of range") the moment the action streams in, rather
+          // than staring at an optimistic "Seeking to X" badge
+          // until they click some unrelated Load button. The
+          // dry-check is side-effect-free — actual seeking still
+          // happens later via executeGlobeAction. If the host
+          // doesn't expose canSetTime, we fall through to the
+          // optimistic render as before.
+          if (action.type === 'set-time' && callbacks.canSetTime) {
+            const probe = callbacks.canSetTime(action.isoDate)
+            if (!probe.ok) {
+              action = { ...action, error: probe.message }
+            }
+          }
+          docentMsg.actions.push(action)
           // Globe-control actions are always deferred during streaming;
-          // flushed at 'done' (immediate) or after dataset loads (deferred)
-          if (chunk.action.type !== 'load-dataset') {
-            pendingGlobeActions.push(chunk.action)
+          // flushed at 'done' (immediate) or after dataset loads
+          // (deferred). A set-time we already know will fail still
+          // gets queued so it can re-evaluate after the user loads
+          // a dataset that might satisfy it (different time-enabled
+          // dataset → different success conditions).
+          if (action.type !== 'load-dataset') {
+            pendingGlobeActions.push(action)
           }
           updateStreamingMessage(docentMsg)
           scrollToBottom()
           break
+        }
 
         case 'auto-load': {
           // Auto-load the top result immediately
@@ -1000,8 +1590,8 @@ async function handleSend(options: { voice?: boolean } = {}): Promise<void> {
           if (autoAction.type === 'load-dataset') {
             callbacks.onLoadDataset(autoAction.datasetId)
             if (!docentMsg.text) {
-              const altHint = chunk.alternatives.length > 0 ? ' Here are some alternatives if this isn\'t quite right:' : ''
-              docentMsg.text = `I've loaded **${autoAction.datasetTitle}** — that's your closest match.${altHint}`
+              const altHint = chunk.alternatives.length > 0 ? t('chat.autoLoad.altHint') : ''
+              docentMsg.text = t('chat.autoLoad.message', { title: autoAction.datasetTitle, altHint })
             }
           }
           if (!docentMsg.actions) docentMsg.actions = []
@@ -1038,9 +1628,7 @@ async function handleSend(options: { voice?: boolean } = {}): Promise<void> {
             updateStreamingMessage(docentMsg)
           }
           if (chunk.fallback && docentMsg.text) {
-            const hint = isLocalDev
-              ? '⚠ AI service unavailable — running in offline mode. Make sure `npm run dev` is proxying /api, or configure a local provider in settings.'
-              : '⚠ AI service unavailable — showing offline results. Check LLM settings.'
+            const hint = t(isLocalDev ? 'chat.fallback.localDev' : 'chat.fallback.production')
             docentMsg.text += `\n\n*${hint}*`
             updateStreamingMessage(docentMsg)
           }
@@ -1060,7 +1648,7 @@ async function handleSend(options: { voice?: boolean } = {}): Promise<void> {
     }
   } catch {
     if (!docentMsg.text) {
-      docentMsg.text = "Sorry, I had trouble responding. Try asking again, or check the LLM settings."
+      docentMsg.text = t('chat.error.generic')
     }
     streamFinishReason = 'error'
   }
@@ -1068,6 +1656,18 @@ async function handleSend(options: { voice?: boolean } = {}): Promise<void> {
   hideTyping()
   isStreaming = false
   setSendEnabled(true)
+  // Speak any remaining (final) sentence and let the queue drain.
+  pumpSpeech(docentMsg.text, true)
+  // Resume hands-free listening only once any spoken reply has finished
+  // draining (ttsChain), so the open mic doesn't capture Orbit's voice.
+  // When auto-speak is off, ttsChain is already resolved → immediate.
+  // Restore the ducked dataset audio at the same point. Skip if a newer
+  // turn has since started speaking — it now owns the mic/ducking.
+  void ttsChain.finally(() => {
+    if (turnSpeakId !== ttsSessionId) return
+    handsFree?.setBusy(false)
+    setVoiceAudioFocus(false)
+  })
 
   // Clean up empty actions array
   if (docentMsg.actions?.length === 0) delete docentMsg.actions
@@ -1116,12 +1716,7 @@ async function handleSend(options: { voice?: boolean } = {}): Promise<void> {
   renderMessages()
   scrollToBottom()
   saveSession()
-  if (shouldSpeakResponse) {
-    void speakResponse(docentMsg.text)
-  } else if (voiceState.status === 'thinking' || voiceState.status === 'speaking') {
-    setVoiceState('idle', '')
-  }
-  callbacks.announce('Docent responded')
+  callbacks.announce(t('chat.announce.docentResponded'))
 }
 
 function setSendEnabled(enabled: boolean): void {
@@ -1141,15 +1736,24 @@ function renderMessages(): void {
   if (!container) return
 
   if (messages.length === 0) {
+    // Inline render — markdown-lite **bold** is parsed below in renderMarkdownLite
+    // for chat messages, but the welcome block hard-codes its <strong> tags so
+    // it can keep its specific p/strong markup. Escape the translation FIRST
+    // so a translator-supplied "</p><script>" or HTML/event attribute can't
+    // smuggle markup; then apply the **bold** → <strong> transform on the
+    // already-escaped text. escapeHtml doesn't touch the asterisks so the
+    // regex still matches the markdown markers.
+    const intro = escapeHtml(t('chat.welcome.intro')).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    const hint = escapeHtml(t('chat.welcome.hint'))
     container.innerHTML = `<div class="chat-welcome">
       <div class="chat-welcome-icon" aria-hidden="true">&#x1F30D;</div>
-      <p><strong>I'm Orbit</strong>, your digital docent — I help you find the right dataset for your question.</p>
-      <p class="chat-welcome-hint">Browse the catalog to compare options side by side. Ask me when you have something specific in mind.</p>
+      <p>${intro}</p>
+      <p class="chat-welcome-hint">${hint}</p>
       <div class="chat-suggestions">
-        <button class="chat-suggestion" data-query="What datasets show sea level rise?">Sea level rise</button>
-        <button class="chat-suggestion" data-query="Explain what NDVI measures">What is NDVI?</button>
-        <button class="chat-suggestion" data-query="Show me something related to hurricanes">Hurricanes</button>
-        <button class="chat-suggestion" data-query="Which datasets cover the Arctic?">Arctic</button>
+        <button class="chat-suggestion" data-query="${escapeAttr(t('chat.welcome.suggestions.seaLevel.query'))}">${escapeHtml(t('chat.welcome.suggestions.seaLevel.label'))}</button>
+        <button class="chat-suggestion" data-query="${escapeAttr(t('chat.welcome.suggestions.ndvi.query'))}">${escapeHtml(t('chat.welcome.suggestions.ndvi.label'))}</button>
+        <button class="chat-suggestion" data-query="${escapeAttr(t('chat.welcome.suggestions.hurricanes.query'))}">${escapeHtml(t('chat.welcome.suggestions.hurricanes.label'))}</button>
+        <button class="chat-suggestion" data-query="${escapeAttr(t('chat.welcome.suggestions.arctic.query'))}">${escapeHtml(t('chat.welcome.suggestions.arctic.label'))}</button>
       </div>
     </div>`
     container.querySelectorAll<HTMLElement>('.chat-suggestion').forEach(btn => {
@@ -1167,6 +1771,7 @@ function renderMessages(): void {
   container.innerHTML = messages.map(msg => renderMessage(msg)).join('')
   wireActionButtons(container)
   wireFeedbackButtons(container)
+  wireSpeakButtons(container)
 }
 
 /** Render a single chat message as an HTML string with inline action buttons. */
@@ -1175,10 +1780,17 @@ function renderMessage(msg: ChatMessage): string {
   const { html: textHtml, inlinedIds } = renderChatText(msg.text ?? '', msg.actions)
   const remaining = msg.actions?.filter(a => a.type !== 'load-dataset' || !inlinedIds.has(a.datasetId))
   const actionsHtml = remaining?.length ? renderActions(remaining) : ''
+  const thumbsUpLabel = t('chat.feedback.thumbsUp')
+  const thumbsDownLabel = t('chat.feedback.thumbsDown')
+  const speakLabel = t('chat.voice.speakAria')
+  const speakBtnHtml = canSpeakReplies()
+    ? `<button class="chat-speak-btn" data-msg-id="${escapeAttr(msg.id)}" aria-label="${escapeAttr(speakLabel)}" title="${escapeAttr(speakLabel)}">&#x1F50A;&#xFE0E;</button>`
+    : ''
   const feedbackHtml = msg.role === 'docent' && msg.text
     ? `<div class="chat-feedback">
-         <button class="chat-feedback-btn" data-feedback="thumbs-up" data-msg-id="${escapeAttr(msg.id)}" aria-label="Good response" aria-pressed="false" title="Good response">&#x1F44D;&#xFE0E;</button>
-         <button class="chat-feedback-btn" data-feedback="thumbs-down" data-msg-id="${escapeAttr(msg.id)}" aria-label="Bad response" aria-pressed="false" title="Bad response">&#x1F44E;&#xFE0E;</button>
+         ${speakBtnHtml}
+         <button class="chat-feedback-btn" data-feedback="thumbs-up" data-msg-id="${escapeAttr(msg.id)}" aria-label="${escapeAttr(thumbsUpLabel)}" aria-pressed="false" title="${escapeAttr(thumbsUpLabel)}">&#x1F44D;&#xFE0E;</button>
+         <button class="chat-feedback-btn" data-feedback="thumbs-down" data-msg-id="${escapeAttr(msg.id)}" aria-label="${escapeAttr(thumbsDownLabel)}" aria-pressed="false" title="${escapeAttr(thumbsDownLabel)}">&#x1F44E;&#xFE0E;</button>
        </div>`
     : ''
   return `<div class="chat-msg ${roleClass}" data-msg-id="${escapeAttr(msg.id)}">
@@ -1232,8 +1844,16 @@ function renderChatText(
   text: string,
   actions?: ChatAction[],
 ): { html: string; inlinedIds: Set<string> } {
-  // Strip raw markers that appear during streaming (all action types)
-  let clean = text.replace(/<?<LOAD:[^>]+>>?\n?/g, '')
+  // Strip raw markers that appear during streaming (all action types).
+  // LOAD_FRAME must come before LOAD (the LOAD regex requires `:`
+  // right after `LOAD` so it wouldn't match `<<LOAD_FRAME:...>>` —
+  // verified — but stripping LOAD_FRAME first keeps the order
+  // intent-obvious for future readers). Phase 3pg-review/C —
+  // Copilot discussion_r3277396454: the LOAD_FRAME marker was
+  // visibly flickering in the transcript during stream because
+  // the renderer hadn't been taught to strip it yet.
+  let clean = text.replace(/<?<LOAD_FRAME:[^>]+>>?\n?/g, '')
+  clean = clean.replace(/<?<LOAD:[^>]+>>?\n?/g, '')
   clean = clean.replace(/<?<FLY:[^>]+>>?\n?/g, '')
   clean = clean.replace(/<?<TIME:[^>]+>>?\n?/g, '')
   clean = clean.replace(/<?<BOUNDS:[^>]+>>?\n?/g, '')
@@ -1255,9 +1875,9 @@ function renderChatText(
     inlinedIds.add(id)
     // Show non-interactive "Loaded" badge if this dataset is already on the globe
     if (action.datasetId === currentDatasetId) {
-      return `<span class="chat-action-btn chat-action-inline chat-action-loaded"><span class="chat-action-title">${escapeHtml(action.datasetTitle)}</span> <span class="chat-action-load">Loaded &#x2714;</span></span>`
+      return `<span class="chat-action-btn chat-action-inline chat-action-loaded"><span class="chat-action-title">${escapeHtml(action.datasetTitle)}</span> <span class="chat-action-load">${escapeHtml(t('chat.action.loaded'))}</span></span>`
     }
-    return `<button class="chat-action-btn chat-action-inline" data-dataset-id="${escapeAttr(action.datasetId)}" aria-label="Load ${escapeAttr(action.datasetTitle)}"><span class="chat-action-title">${escapeHtml(action.datasetTitle)}</span> <span class="chat-action-load">Load &#x27A4;</span></button>`
+    return `<button class="chat-action-btn chat-action-inline" data-dataset-id="${escapeAttr(action.datasetId)}" aria-label="${escapeAttr(t('chat.action.load.aria', { title: action.datasetTitle }))}"><span class="chat-action-title">${escapeHtml(action.datasetTitle)}</span> <span class="chat-action-load">${escapeHtml(t('chat.action.load'))}</span></button>`
   })
 
   return { html, inlinedIds }
@@ -1270,41 +1890,61 @@ function renderActions(actions: ChatAction[]): string {
     if (a.type === 'load-dataset') {
       // Show non-interactive "Loaded" badge if this dataset is already on the globe
       if (a.datasetId === currentDatasetId) {
-        return `<span class="chat-action-btn chat-action-loaded"><span class="chat-action-title">${escapeHtml(a.datasetTitle)}</span> <span class="chat-action-load">Loaded &#x2714;</span></span>`
+        return `<span class="chat-action-btn chat-action-loaded"><span class="chat-action-title">${escapeHtml(a.datasetTitle)}</span> <span class="chat-action-load">${escapeHtml(t('chat.action.loaded'))}</span></span>`
       }
-      return `<button class="chat-action-btn" data-dataset-id="${escapeAttr(a.datasetId)}" aria-label="Load ${escapeAttr(a.datasetTitle)}">
+      return `<button class="chat-action-btn" data-dataset-id="${escapeAttr(a.datasetId)}" aria-label="${escapeAttr(t('chat.action.load.aria', { title: a.datasetTitle }))}">
         <span class="chat-action-title">${escapeHtml(a.datasetTitle)}</span>
-        <span class="chat-action-load">Load &#x27A4;</span>
+        <span class="chat-action-load">${escapeHtml(t('chat.action.load'))}</span>
       </button>`
     }
     if (a.type === 'fly-to') {
       const latLabel = Math.abs(a.lat).toFixed(1) + '\u00B0' + (a.lat >= 0 ? 'N' : 'S')
       const lonLabel = Math.abs(a.lon).toFixed(1) + '\u00B0' + (a.lon >= 0 ? 'E' : 'W')
-      return `<span class="chat-action-status" aria-label="Flying to ${latLabel}, ${lonLabel}">Flying to ${escapeHtml(latLabel)}, ${escapeHtml(lonLabel)}</span>`
+      const flying = t('chat.action.flyingTo', { coords: `${latLabel}, ${lonLabel}` })
+      return `<span class="chat-action-status" aria-label="${escapeAttr(flying)}">${escapeHtml(flying)}</span>`
     }
     if (a.type === 'set-time') {
-      return `<span class="chat-action-status" aria-label="Seeking to ${escapeAttr(a.isoDate)}">Seeking to ${escapeHtml(a.isoDate)}</span>`
+      // Eager dry-check at stream time may have stamped an `error`
+      // on the action — render that with the failure styling
+      // immediately, matching what executeGlobeAction would write
+      // post-execution. Same pre-translated message in both paths.
+      if (a.error) {
+        return `<span class="chat-action-status chat-action-status-err" aria-label="${escapeAttr(a.error)}">${escapeHtml(a.error)}</span>`
+      }
+      const seeking = t('chat.action.seekingTo', { date: a.isoDate })
+      return `<span class="chat-action-status" aria-label="${escapeAttr(seeking)}">${escapeHtml(seeking)}</span>`
     }
     if (a.type === 'fit-bounds') {
-      const label = a.label ?? 'region'
-      return `<span class="chat-action-status" aria-label="Navigating to ${escapeAttr(label)}">Navigating to ${escapeHtml(label)}</span>`
+      const label = a.label ?? t('chat.action.regionDefault')
+      const navigating = t('chat.action.navigatingTo', { label })
+      return `<span class="chat-action-status" aria-label="${escapeAttr(navigating)}">${escapeHtml(navigating)}</span>`
     }
     if (a.type === 'add-marker') {
       const label = a.label ?? `${a.lat.toFixed(1)}, ${a.lng.toFixed(1)}`
-      return `<span class="chat-action-status" aria-label="Marker: ${escapeAttr(label)}">Marker: ${escapeHtml(label)}</span>`
+      const marker = t('chat.action.marker', { label })
+      return `<span class="chat-action-status" aria-label="${escapeAttr(marker)}">${escapeHtml(marker)}</span>`
     }
     if (a.type === 'toggle-labels') {
-      return `<span class="chat-action-status" aria-label="${a.visible ? 'Labels shown' : 'Labels hidden'}">${a.visible ? 'Labels shown' : 'Labels hidden'}</span>`
+      const labelsMsg = t(a.visible ? 'chat.action.labelsShown' : 'chat.action.labelsHidden')
+      return `<span class="chat-action-status" aria-label="${escapeAttr(labelsMsg)}">${escapeHtml(labelsMsg)}</span>`
     }
     if (a.type === 'highlight-region') {
-      const label = a.label ?? 'region'
-      return `<span class="chat-action-status" aria-label="Highlighted ${escapeAttr(label)}">Highlighted ${escapeHtml(label)}</span>`
+      const label = a.label ?? t('chat.action.regionDefault')
+      const highlighted = t('chat.action.highlighted', { label })
+      return `<span class="chat-action-status" aria-label="${escapeAttr(highlighted)}">${escapeHtml(highlighted)}</span>`
+    }
+    if (a.type === 'load-frame') {
+      // Phase 3pg/C — single-frame load button. Display name is
+      // pre-derived server-side (or by `resolveFrameQuery` on the
+      // SPA side); render it verbatim so all consumers agree on
+      // the label.
+      return `<button class="chat-action-btn chat-action-frame" data-dataset-id="${escapeAttr(a.datasetId)}" data-frame-query="${escapeAttr(a.frameQuery)}" aria-label="${escapeAttr(t('chat.action.loadFrame.aria', { name: a.displayName }))}"><span class="chat-action-title">${escapeHtml(a.displayName)}</span> <span class="chat-action-load">${escapeHtml(t('chat.action.loadFrame'))}</span></button>`
     }
     return ''
   }).join('')
   const loadActions = actions.filter(a => a.type === 'load-dataset')
   const browseFooter = loadActions.length >= 3 && callbacks?.onOpenBrowse
-    ? `<button class="chat-browse-link">Compare these side by side in Browse &#x2192;</button>`
+    ? `<button class="chat-browse-link">${escapeHtml(t('chat.action.compareInBrowse'))}</button>`
     : ''
   return `<div class="chat-actions">${items}${browseFooter}</div>`
 }
@@ -1314,9 +1954,32 @@ function wireActionButtons(container: Element): void {
   container.querySelectorAll<HTMLElement>('.chat-action-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       const id = btn.dataset.datasetId
+      // Phase 3pg/C — frame-load buttons carry a `data-frame-query`
+      // attribute and route through `onLoadFrame` instead. The
+      // analytics + dataset-load bookkeeping below stays on the
+      // load-dataset path; frame loads don't unload the parent
+      // sequence so the "remove action card after load" behaviour
+      // would also be wrong for them.
+      //
+      // The frame-query branch is exclusive: if `data-frame-query`
+      // is set, we never fall through to `onLoadDataset` even when
+      // `callbacks.onLoadFrame` is unbound. The fallback would load
+      // the whole sequence — surprising behaviour the user didn't
+      // ask for. Unbound `onLoadFrame` is a host-side opt-out
+      // (e.g. a chat consumer that doesn't ship the frame loader);
+      // the right answer is a quiet no-op, matching the doc comment
+      // on `ChatCallbacks.onLoadFrame`.
+      const frameQuery = btn.dataset.frameQuery
+      if (id && frameQuery !== undefined) {
+        if (callbacks?.onLoadFrame) {
+          callbacks.onLoadFrame(id, frameQuery)
+          callbacks.announce(t('chat.announce.loadingFrame'))
+        }
+        return
+      }
       if (id && callbacks) {
         callbacks.onLoadDataset(id)
-        callbacks.announce('Loading dataset')
+        callbacks.announce(t('chat.announce.loading'))
         // Tier B: chat → load correlation. `latency_ms` is the
         // time between the user's most recent message and this
         // click — long latencies suggest the user read the reply
@@ -1438,14 +2101,14 @@ function showDatasetPrompt(dataset: Dataset): void {
   dismissDatasetPrompt()
   const el = document.getElementById('chat-dataset-prompt')
   if (!el) return
-  el.textContent = `Ask the Docent about ${dataset.title} \u2192`
+  el.textContent = t('chat.datasetPrompt.cta', { title: dataset.title })
   el.classList.remove('hidden')
   el.onclick = () => {
     dismissDatasetPrompt()
     openChat()
     const input = document.getElementById('chat-input') as HTMLTextAreaElement | null
     if (input) {
-      input.value = `Tell me about ${dataset.title}`
+      input.value = t('chat.datasetPrompt.tellMe', { title: dataset.title })
       input.style.height = 'auto'
       input.style.height = Math.min(input.scrollHeight, 96) + 'px'
     }
@@ -1487,20 +2150,26 @@ function scrollToBottom(): void {
 
 // --- Feedback ---
 
-const FEEDBACK_TAGS_NEGATIVE = [
-  'Wrong dataset',
-  'Inaccurate info',
-  'Too long',
-  'Off topic',
-  'Didn\'t understand my question',
+/** Feedback-tag MessageKey lists. The visible label resolves through
+ * t() at render time so a locale switch + reload picks up new copy
+ * without redeploying. The English source label is also passed
+ * through to the backend (as the keyword translators see) so the
+ * server-side feedback table stores a stable English-key per tag
+ * regardless of the user's locale. */
+const FEEDBACK_TAGS_NEGATIVE: MessageKey[] = [
+  'chat.feedback.tag.wrongDataset',
+  'chat.feedback.tag.inaccurateInfo',
+  'chat.feedback.tag.tooLong',
+  'chat.feedback.tag.offTopic',
+  'chat.feedback.tag.misunderstood',
 ]
 
-const FEEDBACK_TAGS_POSITIVE = [
-  'Great recommendation',
-  'Clear explanation',
-  'Learned something new',
-  'Good level of detail',
-  'Helped me explore',
+const FEEDBACK_TAGS_POSITIVE: MessageKey[] = [
+  'chat.feedback.tag.greatRecommendation',
+  'chat.feedback.tag.clearExplanation',
+  'chat.feedback.tag.learnedSomething',
+  'chat.feedback.tag.goodLevelOfDetail',
+  'chat.feedback.tag.helpedMeExplore',
 ]
 
 /** Check if viewport is narrow (mobile). */
@@ -1604,7 +2273,7 @@ async function submitInlineRating(messageId: string, rating: FeedbackRating, btn
         })
       }
     }
-    callbacks?.announce('Feedback submitted')
+    callbacks?.announce(t('chat.announce.feedbackSubmitted'))
     // Show optional expansion for richer feedback
     showFeedbackExpansion(messageId, rating, btn)
   } catch {
@@ -1623,7 +2292,7 @@ async function submitInlineRating(messageId: string, rating: FeedbackRating, btn
       status: 'error',
       rating: rating === 'thumbs-up' ? 1 : -1,
     })
-    callbacks?.announce('Feedback failed — please try again')
+    callbacks?.announce(t('chat.announce.feedbackFailed'))
   }
 }
 
@@ -1633,19 +2302,22 @@ function showFeedbackExpansion(messageId: string, rating: FeedbackRating, btn: H
   dismissFeedbackExpansion()
 
   const isPositive = rating === 'thumbs-up'
-  const placeholder = isPositive ? 'What was helpful? (optional)' : 'What could be improved? (optional)'
+  const placeholder = t(isPositive ? 'chat.feedback.placeholder.positive' : 'chat.feedback.placeholder.negative')
   const tags = isPositive ? FEEDBACK_TAGS_POSITIVE : FEEDBACK_TAGS_NEGATIVE
 
-  const tagsHtml = tags.map(tag =>
-    `<button class="chat-feedback-tag" aria-pressed="false" data-tag="${escapeAttr(tag)}">${escapeHtml(tag)}</button>`,
-  ).join('')
+  // data-tag stores the canonical English label (server-side stable),
+  // while the visible button text uses t() so it reflects the user's locale.
+  const tagsHtml = tags.map(key => {
+    const englishLabel = enMessages[key as keyof typeof enMessages] ?? key
+    return `<button class="chat-feedback-tag" aria-pressed="false" data-tag="${escapeAttr(englishLabel)}">${escapeHtml(t(key))}</button>`
+  }).join('')
 
   const expansionHtml = `
     <div class="chat-feedback-tags">${tagsHtml}</div>
     <textarea class="chat-feedback-comment" placeholder="${escapeAttr(placeholder)}" rows="2"></textarea>
     <div class="chat-feedback-expand-actions">
-      <button class="chat-feedback-send">Send</button>
-      <button class="chat-feedback-dismiss" aria-label="Dismiss">Dismiss</button>
+      <button class="chat-feedback-send">${escapeHtml(t('chat.feedback.send'))}</button>
+      <button class="chat-feedback-dismiss" aria-label="${escapeAttr(t('chat.feedback.dismiss'))}">${escapeHtml(t('chat.feedback.dismiss'))}</button>
     </div>
   `
 
@@ -1659,7 +2331,7 @@ function showFeedbackExpansion(messageId: string, rating: FeedbackRating, btn: H
     sheet.className = 'chat-feedback-sheet'
     sheet.id = 'chat-feedback-expansion'
     sheet.setAttribute('role', 'region')
-    sheet.setAttribute('aria-label', 'Additional feedback')
+    sheet.setAttribute('aria-label', t('chat.feedback.sheetAria'))
     sheet.dataset.messageId = messageId
     sheet.dataset.rating = rating
     sheet.innerHTML = `<div class="chat-feedback-sheet-handle" aria-hidden="true"></div>${expansionHtml}`
@@ -1674,7 +2346,7 @@ function showFeedbackExpansion(messageId: string, rating: FeedbackRating, btn: H
     expand.className = 'chat-feedback-expand'
     expand.id = 'chat-feedback-expansion'
     expand.setAttribute('role', 'region')
-    expand.setAttribute('aria-label', 'Additional feedback')
+    expand.setAttribute('aria-label', t('chat.feedback.sheetAria'))
     expand.dataset.messageId = messageId
     expand.dataset.rating = rating
     expand.innerHTML = expansionHtml
@@ -1749,7 +2421,7 @@ async function submitFeedbackUpdate(expansion: HTMLElement, messageId: string, r
       const err = await res.json().catch(() => ({ error: 'Unknown error' }))
       throw new Error((err as { error?: string }).error ?? `HTTP ${res.status}`)
     }
-    callbacks?.announce('Additional feedback submitted')
+    callbacks?.announce(t('chat.announce.feedbackExtra'))
     dismissFeedbackExpansion()
   } catch {
     if (sendBtn) sendBtn.disabled = false

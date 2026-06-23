@@ -24,6 +24,11 @@ production data, or audit the privacy posture.
 >   — the design history (14-commit rollout). Useful as historical
 >   context; not authoritative for the current schema — that role
 >   belongs to this file plus the type union in `src/types/index.ts`.
+> - [`ANALYTICS_STORAGE_AND_ADMIN_PLAN.md`](ANALYTICS_STORAGE_AND_ADMIN_PLAN.md)
+>   — the read-side plan: long-term storage beyond Analytics Engine's
+>   30–90 day retention (nightly export → R2 raw archive + D1
+>   rollups) and the in-app `/publish/analytics` + `/publish/feedback`
+>   admin tabs that demote Grafana to an optional extra.
 
 ## Two-tier consent model
 
@@ -52,12 +57,30 @@ client (src/analytics/) ──POST batch──▶ Cloudflare Pages Function
                                             ▼  blob/double layout
                                         Workers Analytics Engine
                                           dataset: terraviz_events
+                                          (hot store, 30–90 day retention)
                                             │
-                                            │  read-side AE SQL API
-                                            ▼
-                                        Grafana dashboards
-                                          grafana/dashboards/*.json
+                  ┌─────────────────────────┴─────────────────────────┐
+                  │ nightly export (GHA cron)                          │ live AE SQL API
+                  ▼                                                    ▼
+   R2 archive  +  D1 rollup tables                               Grafana dashboards
+   events/v1/   analytics_*_daily                                grafana/dashboards/*.json
+   *.ndjson.gz  (indefinite)                                     (optional, self-host)
+                  │
+                  │ rollups (complete days through yesterday)
+                  ▼
+          /publish/analytics tab
+          (primary, in-app, privilege-gated)
 ```
+
+The **`/publish/analytics`** tab is the primary read surface: it
+reads the D1 rollups (complete UTC days through yesterday — there is
+no live-AE overlay in v1; "today so far" is deferred), all inside the
+authenticated portal. **Grafana is now optional** — it is the only
+surface that queries the live AE stream directly, useful for ad-hoc
+AE SQL exploration, but not required. The export pipeline (R2 archive
++ D1 rollups) is the durable record that outlives AE retention and
+the source the tab reads; full design in
+[`ANALYTICS_STORAGE_AND_ADMIN_PLAN.md`](ANALYTICS_STORAGE_AND_ADMIN_PLAN.md).
 
 - **Transport.** `src/analytics/transport.ts` — `fetch()` for live
   batches, `navigator.sendBeacon()` on `pagehide`. Tauri uses the
@@ -72,10 +95,19 @@ client (src/analytics/) ──POST batch──▶ Cloudflare Pages Function
   sort of the event payload keys. See
   [`ANALYTICS_QUERIES.md`](ANALYTICS_QUERIES.md) for per-event
   positions.
-- **Querying.** Grafana with the Yesoreyeram Infinity datasource
-  pointed at the AE SQL API. Dashboard JSON in `grafana/dashboards/`
-  is the source of truth — polish in-Grafana, then export and
-  re-commit.
+- **Querying.** Primary: the in-app **`/publish/analytics`** tab
+  (`functions/api/v1/publish/analytics.ts`) over the D1 rollups —
+  complete days through yesterday; v1 has no live-AE overlay.
+  Optional: Grafana with the Yesoreyeram Infinity datasource pointed
+  at the AE SQL API for live, ad-hoc queries — dashboard JSON in
+  `grafana/dashboards/` is the source of truth for that path (polish
+  in-Grafana, then export and re-commit).
+- **Long-term storage.** A nightly GitHub Actions cron
+  (`analytics-export.yml`) drains complete UTC days from AE into an
+  R2 NDJSON archive (full fidelity, indefinite) and D1 daily rollup
+  tables (`analytics_*_daily`) that back the dashboard's history.
+  Authoritative design:
+  [`ANALYTICS_STORAGE_AND_ADMIN_PLAN.md`](ANALYTICS_STORAGE_AND_ADMIN_PLAN.md).
 
 ## Privacy posture (summary)
 
@@ -117,7 +149,7 @@ must be corrected.
 | `viewport_focus` / `layout_changed` | A | `src/services/viewportManager.ts` |
 | `playback_action` | A | `src/ui/playbackController.ts` |
 | `settings_changed` | A | `src/ui/toolsMenuUI.ts`, `src/ui/privacyUI.ts` |
-| `browse_opened` / `browse_filter` | A | `src/ui/browseUI.ts` |
+| `browse_opened` / `browse_filter` / `catalog_view_mode_changed` | A | `src/ui/browseUI.ts` |
 | `tour_started` / `tour_task_fired` / `tour_paused` / `tour_resumed` / `tour_ended` | A | `src/services/tourEngine.ts` |
 | `vr_session_started` / `vr_session_ended` / `vr_placement` | A | `src/services/vrSession.ts`, `src/services/vrPlacement.ts` |
 | `perf_sample` | A | `src/analytics/perfSampler.ts` |
@@ -126,9 +158,13 @@ must be corrected.
 | `dwell` | **B** | `src/analytics/dwell.ts` (panel + dataset dwell, called by chat / browse / info / tools UI) |
 | `orbit_interaction` / `orbit_turn` / `orbit_tool_call` / `orbit_load_followed` / `orbit_correction` | **B** | `src/ui/chatUI.ts`, `src/services/docentService.ts`, `src/services/datasetLoader.ts` |
 | `browse_search` | **B** | `src/ui/browseUI.ts` (debounced + hashed) |
+| `catalog_graph_node_clicked` | **B** | `src/ui/catalogGraphUI.ts` (per-minute throttled + hashed values) |
+| `catalog_timeline_brush_applied` | **B** | `src/ui/catalogTimelineUI.ts` (per-minute throttled, numeric-only payload) |
+| `catalog_map_region_drawn` | **B** | `src/ui/catalogMapUI.ts` (per-minute throttled, numeric-only payload, 3-decimal rounded bounds) |
 | `vr_interaction` | **B** | `src/services/vrInteraction.ts` (per-gesture, throttled) |
 | `error_detail` | **B** | `src/analytics/errorCapture.ts` (adds sanitized stack) |
 | `tour_question_answered` | **B** | `src/services/tourEngine.ts` |
+| `voice_interaction` | **B** | `src/ui/chatUI.ts` (Orbit voice STT/TTS — no transcript or audio, only provider / lang / duration / success) |
 
 Per-event field documentation lives in the type definitions
 (`src/types/index.ts` lines 685–1023) and the query reference

@@ -76,6 +76,11 @@ npm run test         # vitest run
 npm run tokens       # regenerate src/styles/tokens.css from tokens/*.json
 npm run dev:desktop  # Tauri dev mode (requires Rust)
 npm run build:desktop # tsc + vite build + tauri build
+
+# Visual testing & reporting (run against a dev server on :4173)
+npm run screenshots:report  # capture every scene × viewport → report-out/index.html
+npm run screenshots:diff -- --baseline <dir>  # pixel-diff vs a baseline
+npm run screenshots:smoke   # gating interaction tests (search, Orbit, nav)
 ```
 
 > **Note:** `src/styles/tokens.css` is a generated build artifact
@@ -101,23 +106,61 @@ npm run build:desktop # tsc + vite build + tauri build
 | `src/services/llmProvider.ts` | OpenAI-compatible SSE streaming client + `/models` fetch |
 | `src/services/downloadService.ts` | Offline dataset download manager (desktop only, Tauri commands) |
 | `src/services/tilePreloader.ts` | Eagerly fetches low-zoom GIBS tiles into cache on startup |
+| `src/services/catalogSource.ts` | Build-time switch for where `dataService` / `datasetLoader` source catalog data (SOS snapshot vs node catalog) |
+| `src/services/relatedDatasets.ts` | Algorithmic related-dataset recommendations |
+| `src/services/visitMemory.ts` | Local-only log of which datasets the user has opened (localStorage) |
+| `src/services/qaService.ts` | Loads / queries the preprocessed Q&A knowledge base (local docent path) |
+| `src/services/deepLinkService.ts` | Deep-link handler — `zyra://` URLs and `/dataset/…` links |
+| `src/services/shareService.ts` | Share datasets via the Web Share API or clipboard |
+| `src/services/screenshotService.ts` | Captures the globe canvas (+ optional UI) as a compressed JPEG data URL |
+| `src/services/globeThumbnail.ts` | Renders a 2:1 equirectangular data frame onto a sphere (lazy Three.js, in-browser) and captures a square globe thumbnail — the publisher-portal generator for `thumbnail_ref` |
+| `src/services/zipDownloadService.ts` | Web-only "package a dataset as a `.zip`" entry point |
+| `src/services/heroService.ts` | Picks the single "Right now" hero candidate for the catalog landing surface |
+| `src/services/generalFeedbackService.ts` | Posts app-level feedback (bug / feature / other) to `/api/general-feedback` |
+| `src/services/playlistService.ts` | CRUD over user-curated dataset sequences (localStorage) |
+| `src/services/playlistPlayback.ts` | "Active playlist" state machine |
+| `src/services/datasetFilter.ts` | Catalog filter predicate engine — shared by the chip rail and the Graph / Map / Timeline views |
+| `src/services/catalogGraph.ts` | Catalog **Graph** view — pure transform from a filtered catalog to a cytoscape node/edge graph (facet/keyword co-occurrence) |
+| `src/services/catalogMap.ts` | Catalog **Map** view — pure transform to one bbox overlay per dataset (geographic coverage) |
+| `src/services/catalogTimeline.ts` | Catalog **Timeline** view — pure transform to one row per dataset on a shared time axis |
+| `src/services/datasetOverlayOptions.ts` | Pure helpers for the dataset-overlay rendering path (Phase 3e) |
+| `src/services/markdownRenderer.ts` | Markdown → safe HTML renderer (Orbit messages, doc content) |
+| `src/services/docentDegradedState.ts` | Session-scoped degraded-mode state for the docent |
+| `src/services/appleIntelligenceProvider.ts` | On-device LLM Orbit backend via Apple's Foundation Models framework (macOS) |
+| `src/services/voiceService.ts` | Orbit voice foundation — STT/TTS capability detection, provider registry + resolver (`auto` = on-device → browser; `cloud` opt-in only) incl. the Phase 3 realtime streaming-STT registry/resolver, per-locale capability matrix, recognition-language options, spoken-form projection + sentence chunking (`docs/ORBIT_VOICE_PLAN.md`) |
+| `src/services/voiceBrowserEngines.ts` | Browser Web Speech engines registered against `voiceService`'s resolver — Phase 1 push-to-talk `SpeechRecognition` STT + `speechSynthesis` TTS, plus the Phase 3 **continuous** streaming STT engine (zero-dependency hands-free path) |
+| `src/services/voiceCloudEngines.ts` | Cloudflare-edge voice engines — push-to-talk STT + Phase 3 **streaming** STT (both `/api/voice/transcribe`, Whisper; the streaming one records one VAD-bounded utterance per turn) + TTS (`/api/voice/synthesize`, MeloTTS/Aura); opt-in `cloud` provider, web-only, honours the `KILL_VOICE` cooldown |
+| `src/services/voiceVad.ts` | Phase 3 local voice-activity detection — pure `EnergyVad` energy-threshold state machine (attack/release hysteresis) + thin `startMicVad` Web Audio capture loop; gates mic audio locally before any realtime streaming (`docs/ORBIT_VOICE_PLAN.md` §9.1) |
+| `src/services/voiceRealtimeSession.ts` | Phase 3 hands-free session controller — composes the streaming STT engine + local VAD gate into one turn cycle; drives both the `open-mic` (VAD-gated) and `push-to-talk` (caller-driven) interaction models; mic/VAD seams injectable for tests (`docs/ORBIT_VOICE_PLAN.md` §9.1) |
+| `src/services/uiScaleService.ts` | Runtime side of the `--ui-scale` token (§7.1) |
+| `src/services/shaderSettingsService.ts` | Runtime side of the globe-shader uniforms (§7.2) |
+| `src/services/atmosphereConstants.ts` | Atmospheric-scattering constants + GLSL snippets shared by `earthTileLayer` and the VR/Orbit Earth |
+| `src/services/atmosphereLut.ts` | Transmittance look-up table (LUT) for atmospheric scattering |
+| `src/services/vrBorders.ts` | VR country / coastline borders overlay — thin transparent shell outside the globe surface |
+| `src/services/vrBrowse.ts` | In-VR dataset browse panel (CanvasTexture) — switch datasets without exiting immersive mode |
+| `src/services/vrTimeLabel.ts` | In-VR dataset time label — billboarded floating panel above the globe |
+| `src/services/vrTourControls.ts` | In-VR tour control strip — prev / play-pause / next / stop + step counter |
+| `src/services/vrTourOverlay.ts` | In-VR tour overlay manager — CanvasTexture + VideoTexture panels replacing the 2D `tourUI` surface |
 | `src/ui/chatUI.ts` | Orbit chat panel — rendering, settings, trigger positioning |
+| `src/ui/voiceHandsFree.ts` | Phase 3 hands-free wiring — `HandsFreeController` bridges `RealtimeVoiceSession` to the chat input/send path (partials→input, turn→send, suspend during think/speak), drives open-mic mute + push-to-talk press; inert until opted in and a streaming engine resolves (`docs/ORBIT_VOICE_PLAN.md` §9.1) |
 | `src/ui/browseUI.ts` | Dataset browse/search overlay |
 | `src/ui/downloadUI.ts` | Download manager panel — view/delete cached datasets (desktop only) |
 | `src/ui/mapControlsUI.ts` | Map controls positioning helper — keeps the Tools bar above the playback transport |
 | `src/ui/playbackController.ts` | Playback transport controls + portrait-mobile positioning |
 | `src/ui/toolsMenuUI.ts` | Tools popover — Browse button, view toggles (labels, borders, terrain, auto-rotate, info, legend), layout picker, Orbit settings entry point, Meet Orbit link (web only) |
 | `src/ui/vrButton.ts` | Enter AR / Enter VR button — feature-gated (hidden on non-WebXR browsers), lazy-loads Three.js on tap |
-| `src/services/vrSession.ts` | WebXR session lifecycle — requests `immersive-ar` or `immersive-vr`, wires renderer.xr, drives the per-frame loop, handles anchor persistence |
+| `src/ui/vrZoomOverlay.ts` | DOM zoom slider mounted on screen-tap AR sessions (phone via ARCore Chrome). Drives `globe.scale` through a callback; log-mapped so each unit of slider travel is a constant multiplicative zoom. Lives under `src/ui/` so the i18n string lint covers it. |
+| `src/services/vrSession.ts` | WebXR session lifecycle — requests `immersive-ar` or `immersive-vr`, wires renderer.xr, drives the per-frame loop, handles anchor persistence, falls back to `local` reference space if `local-floor` is unsupported |
 | `src/services/vrScene.ts` | VR scene framing — background (space blue vs transparent passthrough) + globe placement; delegates the Earth stack to `photorealEarth.ts` |
 | `src/services/photorealEarth.ts` | Reusable photoreal Earth factory — diffuse / night lights / specular / atmosphere / clouds / sun / ground shadow with day/night shading; shared by VR view and Orbit character page |
 | `src/services/vrInteraction.ts` | Controller input — surface-pinned drag, two-hand pinch+rotate, thumbstick zoom, flick-to-spin inertia, raycast hit routing |
 | `src/services/vrHud.ts` | In-VR floating HUD — dataset title + play/pause + exit-VR as a CanvasTexture panel with UV hit regions |
 | `src/services/vrPlacement.ts` | AR spatial placement — reticle + Place button; WebXR hit-test to anchor the globe on a real surface |
 | `src/services/vrLoading.ts` | 3D loading scene — orbiting rings, progress bar, status text; fades out when dataset is ready |
-| `src/utils/vrCapability.ts` | Feature detection — `navigator.xr`, `immersive-vr`, `immersive-ar` support |
+| `src/utils/vrCapability.ts` | Feature detection — `navigator.xr`, `immersive-vr`, `immersive-ar` support — plus `getInputArchetype()` (controller / screen / transient) and `classifyXrDevice(ua, mode)` (UA-based bucket for `vr_session_started.device_class`) |
 | `src/utils/vrPersistence.ts` | WebXR anchor persistent-handle save/load (localStorage) for cross-session placement stability |
 | `src/utils/viewPreferences.ts` | Persists Dataset info + Legend toggle state to localStorage |
+| `src/analytics/index.ts` | Telemetry public surface — call sites import `emit()` / `flush()` only from this barrel |
 | `src/analytics/emitter.ts` | Telemetry queue + tier gate + batched dispatch + pagehide beacon flush |
 | `src/analytics/transport.ts` | `fetch()` + `sendBeacon()` transport with response classification (ok/retry/permanent) |
 | `src/analytics/config.ts` | `TelemetryTier` persistence (`sos-telemetry-config`); compile-time `TELEMETRY_BUILD_ENABLED` / `TELEMETRY_CONSOLE_MODE` flags |
@@ -129,7 +172,186 @@ npm run build:desktop # tsc + vite build + tauri build
 | `src/analytics/hash.ts` | 12-hex SHA-256 helper for free-text fields (search queries, error stack signatures) |
 | `src/ui/privacyUI.ts` | Tools → Privacy panel — tier picker (off / essential / research), session-id display, what-we-collect explainer |
 | `src/ui/disclosureBanner.ts` | First-launch privacy disclosure banner — shown once per install, dismisses to default Essential tier |
+| `src/orbitMain.ts` | Entry point for the Orbit standalone character page (`/orbit`) |
+| `src/config/endpoints.ts` | Externally-hosted endpoint configuration (catalog / proxy / NOAA / NASA base URLs) |
+| `src/types/image-sequence-constants.ts` | Constants shared by the publisher API (`functions/`), the GHA runner (`cli/`), and the portal (`src/`) for the image-sequence upload pipeline |
+| `src/types/zyra-workflow-constants.ts` | Constants shared by the publisher API (`functions/`), the GHA runner (`cli/`), and the portal (`src/`) for the Zyra workflow pipeline — stage/command allowlist, template fields, run statuses (`docs/ZYRA_INTEGRATION_PLAN.md`) |
+| `src/data/regions.ts` | Common region bounding boxes for name-based region resolution |
+| `src/services/orbitCharacter/index.ts` | `OrbitController` — public API for the Orbit character (owns the Three.js scene, rAF loop, state machine) |
+| `src/services/orbitCharacter/orbitScene.ts` | Three.js scene + per-frame update for the Orbit character |
+| `src/services/orbitCharacter/orbitMaterials.ts` | Materials + shaders for the Orbit character |
+| `src/services/orbitCharacter/orbitStates.ts` | Persistent-state vocabulary (STATES table) for the Orbit character |
+| `src/services/orbitCharacter/orbitGestures.ts` | Transient gesture overlays that play over the active state, then yield control back |
+| `src/services/orbitCharacter/orbitFlight.ts` | Flight system + scale presets for the Orbit character |
+| `src/services/orbitCharacter/orbitTrails.ts` | Sub-sphere distance-based sparkle-wake trails |
+| `src/services/orbitCharacter/orbitTypes.ts` | Shared types for the Orbit character |
+| `src/ui/catalogTabsUI.ts` | Catalog ↔ Sphere segmented control |
+| `src/ui/catalogGraphUI.ts` | Catalog Graph view — UI mount + cytoscape.js wiring (consumes `catalogGraph.ts`) |
+| `src/ui/catalogMapUI.ts` | Catalog Map view — UI mount + MapLibre wiring (consumes `catalogMap.ts`) |
+| `src/ui/catalogTimelineUI.ts` | Catalog Timeline view — UI mount + SVG wiring (consumes `catalogTimeline.ts`) |
+| `src/ui/playlistUI.ts` | Playlist manager panel + the "Add to playlist" popover from browse cards / info panel |
+| `src/ui/tourUI.ts` | 2D tour control bar + overlay types (VR equivalent is `vrTourOverlay.ts`) |
+| `src/ui/helpUI.ts` | Help panel — Guide tab + Feedback form |
+| `src/ui/creditsPanel.ts` | Credits panel (Tools → Credits) |
+| `src/ui/heroPanelUI.ts` | "Right now" hero panel UI (Phase 7 §9.1 of `docs/WEB_CATALOG_FEATURES_PLAN.md`) |
+| `src/ui/downloadDialogUI.ts` | Web-only zip-download panel (§8.2) |
+| `src/ui/shaderTunerUI.ts` | Dev-only shader-tuner floating panel (§7.2) |
+| `src/ui/orbitDebugPanel.ts` | Debug panel for the Orbit standalone page |
+| `src/ui/orbitPerfHud.ts` | Perf HUD for the Orbit standalone page |
+| `src/ui/orbitPostMessageBridge.ts` | postMessage bridge between the host SPA and the embedded Orbit page |
+| `src/ui/domUtils.ts` | Small DOM helpers shared across UI modules |
+| `src/ui/sanitizeHtml.ts` | Allowlist-based HTML sanitizer for untrusted input |
+| `src/ui/publisher/index.ts` | Publisher portal entry point — lazy-loaded on `/publish/*`; mounts the History-API router + pages |
+| `src/ui/publisher/router.ts` | Tiny History-API router for the publisher portal |
+| `src/ui/publisher/api.ts` | Shared HTTP client for the publisher portal |
+| `src/ui/publisher/types.ts` | Wire types for portal-bound publisher API responses |
+| `src/ui/publisher/analytics-charts.ts` | Hand-rolled SVG chart helpers (bar series with Y-axis, mix bars, stat tiles) + CSV export helpers for the analytics tab — no charting library |
+| `src/ui/publisher/components/dataset-form.ts` | Shared dataset create / edit form |
+| `src/ui/publisher/components/asset-uploader.ts` | Asset uploader component (Phase 3pd image-sequence pipeline) |
+| `src/ui/publisher/components/chip-input.ts` | Chip-input control — entries become removable chips as the user types |
+| `src/ui/publisher/components/markdown-toolbar.ts` | GitHub-issue-style markdown toolbar over a `<textarea>` |
+| `src/ui/publisher/components/topbar.ts` | Glass-surface top bar with section tabs |
+| `src/ui/publisher/components/error-card.ts` | Shared error-card renderer used by every portal page |
+| `src/ui/publisher/pages/datasets.ts` | `/publish/datasets` — dataset list visible to the caller |
+| `src/ui/publisher/pages/dataset-detail.ts` | `/publish/datasets/:id` — read-only dataset detail |
+| `src/ui/publisher/pages/dataset-edit.ts` | `/publish/datasets/:id/edit` — edit an existing draft |
+| `src/ui/publisher/pages/dataset-new.ts` | `/publish/datasets/new` — wrapper around the shared dataset form |
+| `src/ui/publisher/pages/tours.ts` | `/publish/tours` — tour-creator landing page |
+| `src/ui/publisher/workflows-api.ts` | Typed API wrappers for the Zyra workflow surface (Phase Z2 of `docs/ZYRA_INTEGRATION_PLAN.md`) |
+| `src/ui/publisher/workflow-templates.ts` | Curated workflow templates + insert-stage snippets for guided authoring (Phase Z3) |
+| `src/ui/publisher/pages/workflows.ts` | `/publish/workflows` — Zyra workflow list |
+| `src/ui/publisher/pages/workflow-detail.ts` | `/publish/workflows/:id` — workflow summary + run history + Run now |
+| `src/ui/publisher/pages/workflow-edit.ts` | `/publish/workflows/new` + `…/:id/edit` — workflow form (YAML→JSON client-side, server-side Validate) |
+| `src/ui/publisher/pages/featured-hero.ts` | `/publish/featured-hero` — set the "Right now" hero override (`docs/HERO_ADMIN_SCOPING.md`) |
+| `src/ui/publisher/pages/analytics.ts` | `/publish/analytics` — privileged analytics dashboard over the D1 rollups, incl. the MapLibre spatial-attention heatmap (Phase B of `docs/ANALYTICS_STORAGE_AND_ADMIN_PLAN.md`) |
+| `src/ui/publisher/pages/feedback.ts` | `/publish/feedback` — privileged feedback review (AI thumbs + bug/feature reports) over the D1 feedback tables; replaces the feedback-admin HTML dashboard (Phase C of `docs/ANALYTICS_STORAGE_AND_ADMIN_PLAN.md`) |
+| `src/ui/publisher/pages/me.ts` | `/publish/me` — current-user identity + role display |
+| `src/ui/publisher/pages/users.ts` | `/publish/users` — admin-only Users tab: approve / reject / suspend / reactivate publishers and change roles (admin / publisher / readonly) |
+| `src/ui/tourAuthoring/index.ts` | Tour-authoring public surface — detects `?tourEdit=` and mounts the dock |
+| `src/ui/tourAuthoring/dock.ts` | Floating tour-authoring dock — attaches to SPA chrome on `/?tourEdit=<id>` (or `=new`) |
+| `src/ui/tourAuthoring/state.ts` | In-memory tour-authoring state — dock reads/writes here; `autosave.ts` flushes it |
+| `src/ui/tourAuthoring/autosave.ts` | Debounced autosave for the tour-authoring dock |
+| `src/ui/tourAuthoring/api.ts` | Publisher-side API client for the tour-authoring dock |
+| `src/utils/logger.ts` | Log-level gating so production builds stay silent |
+| `src/utils/debounce.ts` | Debounced-function wrapper |
+| `src/utils/time.ts` | Time parsing / formatting utilities |
+| `src/utils/frames.ts` | Frame-query resolution shared by Orbit (marker parsing) + the dataset loader |
+| `src/utils/deviceCapability.ts` | Device-capability detection for adaptive performance tuning |
+| `src/utils/fetchProgress.ts` | Fetch a URL as a Blob with byte-level progress reporting |
+| `src/utils/captionProxy.ts` | Caption-URL proxying helper |
+| `src/utils/catalogFilters.ts` | URL round-trip for catalog filter state |
+| `src/utils/catalogMode.ts` | Catalog mode — `?catalog=true` URL routing |
+| `src/utils/posterDeepLinks.ts` | Poster deep-link handlers |
 | `functions/api/ingest.ts` | Cloudflare Pages Function — receives telemetry batches, stamps `event_type` / `environment` / `country` / `internal` server-side, writes to Workers Analytics Engine |
+
+> **Note:** the table above is the **SPA** module map. It is
+> linted for completeness by `npm run check:doc-coverage` (see
+> _Module-map coverage_ below): every module under `src/` and
+> `src-tauri/src/` must appear here. When you add a module, add its
+> row in the same PR.
+
+### Backend subsystems (`functions/` + `cli/`)
+
+The Cloudflare Pages Functions backend and the publisher CLI have
+their own per-module map in
+[`docs/BACKEND_MODULES.md`](docs/BACKEND_MODULES.md) (one row per
+file, enforced by `check:doc-coverage`) and their design rationale
+in the `docs/CATALOG_*` plan docs. The major clusters, for
+orientation:
+
+| Subsystem | Where | What |
+|---|---|---|
+| Semantic search & embeddings | `functions/api/v1/_lib/{embeddings,vectorize-store,embed-dataset-job,search-datasets}.ts` | Vector embeddings + Vectorize-backed semantic dataset search. Authoritative plan: `docs/CATALOG_BACKEND_PLAN.md`. |
+| Publisher | `cli/`, `src/ui/publisher/`, `functions/api/v1/` (`dataset-mutations`, `tour-mutations`, `publisher-store`) | Authoring/publishing datasets & tours into the node catalog. See `docs/CATALOG_PUBLISHING_TOOLS.md`. |
+| R2 asset/tour migration | `cli/` + `functions/api/v1/_lib/` (`migrate-r2-*`, `rollback-r2-*`) | One-off migrations of assets/tours into R2. See `docs/CATALOG_ASSETS_PIPELINE.md`. |
+
+### Module-map coverage
+
+`npm run check:doc-coverage` (in the `type-check` chain) fails CI
+if any module under `src/` (SPA map) or `src-tauri/src/` (Rust map)
+is missing from CLAUDE.md. When you add a module, add its row in
+the same PR. For one that genuinely warrants no row (throwaway
+shim, obvious from a documented sibling), add `// doc-exempt:
+<reason>` to its source — the reason is mandatory, same convention
+as `i18n-exempt:`.
+
+**Scope** (an explicit manifest in `scripts/check-doc-coverage.ts`):
+
+- **Covered:** all of `src/` and `src-tauri/src/` against this file,
+  recursively; all of `functions/` and `cli/` against
+  [`docs/BACKEND_MODULES.md`](docs/BACKEND_MODULES.md) (the backend
+  map — helper-dense and route-shaped, kept out of CLAUDE.md and
+  next to the `docs/CATALOG_*` plan docs).
+- **Excluded:** generated code (`messages*.ts` i18n codegen),
+  `*.d.ts`, `*.test.ts`, and `test-setup.ts`.
+- Matching is on the **full repo-relative path**, because the
+  backend's route layout repeats basenames across directories
+  (multiple `[id].ts`, `manifest.ts`, `publish.ts`).
+
+### Architecture graph (`/graphify`)
+
+A vendored [graphify](https://github.com/safishamsi/graphify) skill
+lives at `.claude/skills/graphify/` (see its `VENDORED.md`). It
+turns the repo into a queryable knowledge graph — community
+detection, "god nodes" (most-connected abstractions), and
+`query` / `path` / `explain` over the structure. It's how the
+module-map drift above was found, and it spans SPA + `functions/`
++ `cli/` + Rust in one graph (surfacing cross-tier coupling the
+per-section docs don't).
+
+**Two passes, very different cost:**
+
+- **Structural** (tree-sitter AST + Leiden clustering) — free,
+  deterministic, seconds. `graphify update <path> --no-cluster`.
+  This is what backs the doc-coverage check and catches drift.
+- **Semantic** (LLM concept/relationship extraction over docs +
+  code) — **~1M tokens** on this repo, counted against your Claude
+  Code usage. Run it **deliberately** (before a large refactor, or
+  periodically), never in CI.
+
+Run it via `/graphify <paths>` in a Claude Code session (e.g.
+`/graphify src functions cli src-tauri docs` skips the generated
+`locales/` + `tokens/` JSON). Outputs land in `graphify-out/`
+(gitignored). The CLI is pre-installed by the SessionStart hook;
+no API key is used — the semantic pass runs on the host session.
+
+---
+
+## Visual testing & reporting
+
+A Playwright-driven tool captures the real UI to catch visual and
+interaction regressions. It started as the Weblate translator-screenshot
+pipeline and now shares one capture core
+(`scripts/screenshots/core/`) across several consumers. Authoritative
+design: [`docs/VISUAL_REPORT_PLAN.md`](docs/VISUAL_REPORT_PLAN.md).
+
+| Command | What it does |
+|---|---|
+| `npm run screenshots:report` | Captures every scene × viewport (desktop + mobile) into a self-contained `report-out/index.html` gallery with per-scene problem badges (console/page errors, failed requests, optional `VISUAL_AXE` a11y). The local visual-debug surface. Add `-- --scene <name>[,<name>]` (or `VISUAL_ONLY=`) to capture just one surface while iterating on it — reuses the scene's maintained navigation/fixtures/masks instead of an ad-hoc script. |
+| `npm run screenshots:diff -- --baseline <dir>` | Pixel-diffs the current `report-out/` against a baseline PNG dir (masked regions excluded); advisory. |
+| `npm run screenshots:smoke` | Gating interaction tests — search, Orbit's local engine, navigation, a fixture-backed publisher page. |
+| `npm run screenshots:capture` | The Weblate translator-screenshot capture (separate output + uploader). |
+
+All capture commands run against a dev server on `:4173`
+(`npm run dev -- --port 4173`). CI is
+[`.github/workflows/visual-report.yml`](.github/workflows/visual-report.yml):
+PRs get an advisory `visual-report` artifact + comment (diffed against
+the latest `main` baseline) and a gating smoke job; `main` publishes the
+baseline and deploys the report. The Weblate sync
+(`sync-weblate-screenshots.yml`) is deliberately separate.
+
+- **Scenes** are the one human-maintained list:
+  [`scripts/screenshots/scenes.ts`](scripts/screenshots/scenes.ts)
+  (`{ name, description, setup(page), masks?, fixtures? }`). `masks`
+  excludes non-deterministic regions (globe / MapLibre / graph) from the
+  diff; `fixtures` route-stubs `/api/**` so data-backed pages render
+  populated (see
+  [`scripts/screenshots/fixtures/`](scripts/screenshots/fixtures/),
+  typed against `src/ui/publisher/types.ts`).
+- **Convention (mirrors the module-map coverage rule):** when you add a
+  UI route or surface under `src/ui/`, add a `Scene` for it in the same
+  PR — and a smoke assertion if it is interactive. Report strings are
+  dev/CI output and are intentionally **not** routed through i18n.
 
 ---
 
@@ -284,6 +506,108 @@ Two elements track the info panel height as it animates open:
 
 ---
 
+## Localization
+
+The app ships in multiple languages. **Every new user-facing
+string must go through the i18n layer; never hard-code English
+in source.** A static check (`npm run check:i18n-strings`) runs
+in the type-check chain and fails CI if it finds a hard-coded
+label in `src/ui/` or `src/services/docent*.ts`.
+
+### i18n runtime modules
+
+The `src/i18n/` layer (these are the runtime modules; the
+`src/i18n/messages*.ts` files are generated codegen output and are
+not individually documented):
+
+| File | Responsibility |
+|---|---|
+| `src/i18n/index.ts` | Public runtime API — `t()`, `plural()`, `interpolate()`, locale switching, `<html dir>` wiring |
+| `src/i18n/bootstrap.ts` | Shared i18n bootstrap for entry points (`main.ts`, `orbitMain.ts`, future entries) |
+| `src/i18n/detect.ts` | Initial-locale detection (query param → storage → `navigator.languages`) |
+| `src/i18n/persistence.ts` | Locale-preference persistence — mirrors `src/utils/viewPreferences.ts` |
+| `src/i18n/format.ts` | Locale-aware formatting helpers (numbers, dates, lists) |
+| `src/i18n/applyI18nAttributes.ts` | DOM walker that translates static markup carrying `data-i18n` attributes |
+| `src/i18n/rtl.ts` | RTL locale set + `<html dir>` resolution |
+| `src/i18n/screenshotTrace.ts` | Build-flag-gated (`VITE_I18N_TRACE`) recorder — `t()` mirrors every resolved key onto `window.__i18nTrace` for the Weblate screenshot-capture pipeline (`docs/WEBLATE_SCREENSHOT_SYNC_PLAN.md`); tree-shakes out of normal builds |
+
+### When you add a new UI string
+
+1. Add the key to `locales/en.json` (sorted; the codegen will
+   canonicalize on the next `npm run locales`).
+2. Reference it via `t('your.key.here')` from
+   [`src/i18n/index.ts`](src/i18n/index.ts).
+3. Run `npm run locales` (or `npm run check:locales`) — the
+   codegen builds a TypeScript `MessageKey` union from
+   `en.json`, so any unresolved key fails type-check.
+4. If the key is ambiguous out of context (placeholders to
+   preserve, ARIA semantics, special markers like
+   `<<LOAD:DATASET_ID>>`), add a one-line entry to
+   [`locales/_explanations.json`](locales/_explanations.json).
+   It auto-syncs to Weblate's per-string Explanation field via
+   the `sync-weblate.yml` workflow.
+
+For a string that genuinely shouldn't be translated (debug
+HUD, technical identifier, machine-only output), add
+`// i18n-exempt: <reason>` to the same line. The reason is
+mandatory — it's how a future reader knows the omission was
+deliberate.
+
+### When you add CSS
+
+Use **logical inline-axis properties** so the layout flips
+correctly when an RTL locale is active (`<html dir>` is set
+automatically by [`src/i18n/index.ts`](src/i18n/index.ts) via
+[`src/i18n/rtl.ts`](src/i18n/rtl.ts)):
+
+| Use this | Not this |
+|---|---|
+| `padding-inline-start` / `padding-inline-end` | `padding-left` / `padding-right` |
+| `margin-inline-start` / `margin-inline-end` | `margin-left` / `margin-right` |
+| `border-inline-start` / `border-inline-end` | `border-left` / `border-right` |
+| `inset-inline-start` / `inset-inline-end` | `left` / `right` |
+| `text-align: start` / `text-align: end` | `text-align: left` / `text-align: right` |
+
+Two patterns are intentionally physical: classic centering
+(`top: 50%; left: 50%; transform: translate(-50%, -50%)` —
+`inset-inline-start: 50%` doesn't center in RTL) and
+direction-sensitive `transform: translateX(±100%)` slides (pair
+with a `:root[dir="rtl"]` override that flips the sign — see
+[`src/styles/browse.css`](src/styles/browse.css)
+`#browse-overlay.collapsed`). Full guide:
+[`docs/CSS_ARCHITECTURE_PLAN.md`](docs/CSS_ARCHITECTURE_PLAN.md)
+§RTL safety.
+
+### Commands
+
+| Command | What it does |
+|---|---|
+| `npm run locales` | Regenerates the TS message modules + canonicalizes the locale JSON. Idempotent. |
+| `npm run check:locales` | Drift-check (CI). Fails if generated TS or canonicalized JSON differs from a fresh render. |
+| `npm run check:i18n-strings` | Scans `src/ui/` + `src/services/docent*.ts` for hard-coded user-visible strings. Runs in the `type-check` chain. |
+| `npm run sync:weblate` | Pushes `locales/_explanations.json` to Weblate's per-string Explanation field. Token via `WEBLATE_TOKEN` env var. Auto-runs in CI on push to main. |
+
+### Don't hand-edit non-source locales
+
+Translator changes flow in via Weblate PRs. The codegen
+canonicalizes every `locales/*.json` on every run so Weblate's
+PRs against `main` never produce whitespace-only diffs.
+Hand-editing `locales/es.json` (or `kab.json`, `ar.json`, etc.)
+is fine for one-off fixes but the canonical surface is Weblate.
+
+### Doc references
+
+- [`docs/I18N_PLAN.md`](docs/I18N_PLAN.md) — full plan, phase
+  table (L1 / L1.5 shipped; L2-L4 blocked on catalog backend),
+  runtime API.
+- [`CONTRIBUTING-TRANSLATIONS.md`](CONTRIBUTING-TRANSLATIONS.md)
+  — translator workflow, glossary conventions, DCO setup.
+- [`docs/CSS_ARCHITECTURE_PLAN.md`](docs/CSS_ARCHITECTURE_PLAN.md)
+  — §RTL safety section with the use-this-not-that table and
+  centering exceptions.
+
+---
+
 ## Tours
 
 The tour engine (`src/services/tourEngine.ts`) plays back SOS-format tour JSON files. Each tour is a sequence of tasks executed in order. The following tour tasks are relevant to the multi-globe feature:
@@ -377,7 +701,7 @@ or missing hashing/sanitization of free-text fields.
 ## Deployment
 
 ### Web
-Cloudflare Pages. `functions/api/[[route]].ts` is a Cloudflare Function that proxies LLM API requests server-side so the API key is never in the client bundle.
+Cloudflare Pages. Orbit's default LLM path is Cloudflare Workers AI: `functions/api/chat/completions.ts` runs the `AI` binding edge-side and streams an OpenAI-shaped SSE response (no external API key in the client bundle), with `functions/api/models.ts` backing the "Test Connection" button. External OpenAI-compatible providers are configured client-side only (Tools → Orbit Settings; localStorage / desktop keychain) — there is no server-side `LLM_PROVIDER_*` proxy.
 
 ### Desktop
 Tauri v2. Three CI/CD workflows:
@@ -400,6 +724,7 @@ The desktop app shares 100% of the TypeScript source. Desktop-only behaviour is 
 | `src-tauri/src/keychain.rs` | OS keychain read/write for LLM API key |
 | `src-tauri/src/download_manager.rs` | Dataset download with progress events, cancellation, JSON index |
 | `src-tauri/src/download_commands.rs` | Tauri commands exposing download operations to the frontend |
+| `src-tauri/src/lib.rs` | Shared app entry (`run()`) for desktop **and** mobile — module wiring, plugin/builder setup, `native_panic` hook; `main.rs` calls it on desktop, the `mobile_entry_point` macro on iOS/Android |
 
 ### Key configuration files
 

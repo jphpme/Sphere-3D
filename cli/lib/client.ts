@@ -102,6 +102,24 @@ export class TerravizClient {
     return this.request<T>('GET', '/api/v1/publish/me')
   }
 
+  /** Read this node's identity row (or `{ identity: null }` on a
+   *  fresh deploy). Backs `terraviz init-node`'s idempotency check. */
+  getNodeIdentity<T = unknown>(): Promise<Result<T>> {
+    return this.request<T>('GET', '/api/v1/publish/node-identity')
+  }
+
+  /** Provision / update this node's identity row. Backs
+   *  `terraviz init-node`. */
+  setNodeIdentity<T = unknown>(body: {
+    display_name: string
+    base_url: string
+    description?: string | null
+    contact_email?: string | null
+    public_key?: string
+  }): Promise<Result<T>> {
+    return this.request<T>('PUT', '/api/v1/publish/node-identity', body)
+  }
+
   list<T = unknown>(query: {
     status?: 'draft' | 'published' | 'retracted'
     limit?: number
@@ -117,6 +135,109 @@ export class TerravizClient {
 
   get<T = unknown>(id: string): Promise<Result<T>> {
     return this.request<T>('GET', `/api/v1/publish/datasets/${encodeURIComponent(id)}`)
+  }
+
+  /**
+   * Phase 3pg/E — list the frames of an image-sequence dataset via
+   * the public `/api/v1/datasets/{id}/frames` endpoint. Authenticated
+   * publisher endpoints aren't used here because the frame surface
+   * inherits the dataset's visibility, and the CLI's typical
+   * consumer is an operator or federated-peer appliance that
+   * already has read access to whatever the public API exposes.
+   *
+   * Query parameters mirror the endpoint surface:
+   *   - `limit` / `cursor` — pagination
+   *   - `from` + `to` (ISO 8601) — inclusive time window; both
+   *     must be supplied together
+   *   - `at` (ISO 8601) — single closest-frame query; wins over
+   *     `from`/`to` when both are present
+   *
+   * Returns the parsed response body the endpoint emits:
+   *   `{ datasetId, count, frames: [...], cursor: string|null }`.
+   */
+  framesList<T = unknown>(
+    id: string,
+    query: {
+      limit?: number
+      cursor?: string
+      from?: string
+      to?: string
+      at?: string
+    } = {},
+  ): Promise<Result<T>> {
+    const params = new URLSearchParams()
+    if (query.limit !== undefined) params.set('limit', String(query.limit))
+    if (query.cursor !== undefined) params.set('cursor', query.cursor)
+    if (query.from !== undefined) params.set('from', query.from)
+    if (query.to !== undefined) params.set('to', query.to)
+    if (query.at !== undefined) params.set('at', query.at)
+    const qs = params.toString()
+    return this.request<T>(
+      'GET',
+      `/api/v1/datasets/${encodeURIComponent(id)}/frames${qs ? `?${qs}` : ''}`,
+    )
+  }
+
+  /**
+   * Phase 3pg/E — fetch the per-frame redirect target via the
+   * `/api/v1/datasets/{id}/frames/{index}` endpoint. The endpoint
+   * responds with a 302 to the public R2 URL; this method uses
+   * `redirect: 'manual'` so we can return the resolved URL plus
+   * the RFC 9530 `Content-Digest` without actually downloading
+   * the bytes. The operator typically pipes this into `curl -o`.
+   *
+   * Returns `{ url, contentDigest? }` on the redirect path; an
+   * error envelope on 4xx/5xx (404 frame-out-of-range, 503
+   * misconfig, etc.).
+   */
+  async framesGet(
+    id: string,
+    index: number,
+  ): Promise<Result<{ url: string; contentDigest?: string }>> {
+    const url = `${this.config.server}/api/v1/datasets/${encodeURIComponent(id)}/frames/${index}`
+    let res: Response
+    try {
+      res = await this.fetchImpl(url, {
+        method: 'GET',
+        headers: { ...authHeaders(this.config), Accept: 'application/json' },
+        redirect: 'manual',
+      })
+    } catch (e) {
+      return { ok: false, status: 0, error: 'network_error', message: String(e) }
+    }
+    if (res.status === 302) {
+      const location = res.headers.get('location')
+      if (!location) {
+        return {
+          ok: false,
+          status: res.status,
+          error: 'invalid_response',
+          message: '302 without a Location header.',
+        }
+      }
+      const contentDigest = res.headers.get('content-digest') ?? undefined
+      return { ok: true, status: 302, body: { url: location, contentDigest } }
+    }
+    // 4xx / 5xx — the endpoint returns the standard JSON error envelope.
+    const text = await res.text()
+    let parsed: unknown
+    try {
+      parsed = text ? JSON.parse(text) : null
+    } catch {
+      return {
+        ok: false,
+        status: res.status,
+        error: 'non_json_response',
+        message: text.slice(0, 200),
+      }
+    }
+    const env = (parsed ?? {}) as { error?: string; message?: string }
+    return {
+      ok: false,
+      status: res.status,
+      error: env.error ?? 'http_error',
+      message: env.message,
+    }
   }
 
   // --- Write endpoints --------------------------------------------
@@ -200,6 +321,31 @@ export class TerravizClient {
     )
   }
 
+  // --- Zyra workflow endpoints (Phase Z1) --------------------------
+
+  /** Fetch a workflow definition — what the GHA runner executes. */
+  getWorkflow<T = unknown>(id: string): Promise<Result<T>> {
+    return this.request<T>('GET', `/api/v1/publish/workflows/${encodeURIComponent(id)}`)
+  }
+
+  /** Runner lifecycle callback (running / succeeded / failed / canceled). */
+  postWorkflowRunStatus<T = unknown>(
+    workflowId: string,
+    runId: string,
+    body: {
+      status: 'running' | 'succeeded' | 'failed' | 'canceled'
+      gha_run_id?: string | null
+      upload_id?: string | null
+      error_summary?: string | null
+    },
+  ): Promise<Result<T>> {
+    return this.request<T>(
+      'POST',
+      `/api/v1/publish/workflows/${encodeURIComponent(workflowId)}/runs/${encodeURIComponent(runId)}/status`,
+      body,
+    )
+  }
+
   // --- Asset upload endpoints (Phase 1b) --------------------------
 
   /** Initiate an asset upload — mints a Stream direct-upload URL or R2 presigned PUT. */
@@ -210,6 +356,31 @@ export class TerravizClient {
       mime: string
       size: number
       content_digest: string
+    },
+  ): Promise<Result<T>> {
+    return this.request<T>(
+      'POST',
+      `/api/v1/publish/datasets/${encodeURIComponent(datasetId)}/asset`,
+      body,
+    )
+  }
+
+  /**
+   * Initiate an image-sequence upload — the same `POST .../asset`
+   * endpoint, routed into the sequence path by the presence of a
+   * `frames` array. Mints one presigned PUT per frame + one for the
+   * source-filenames JSON blob (`ImageSequenceInitResponse`). The
+   * runner re-hashes that blob against `source_filenames_digest`
+   * before encoding.
+   */
+  initImageSequenceUpload<T = unknown>(
+    datasetId: string,
+    body: {
+      kind: 'data'
+      mime: string
+      size: number
+      frames: Array<{ filename: string; digest: string; size: number }>
+      source_filenames_digest: string
     },
   ): Promise<Result<T>> {
     return this.request<T>(

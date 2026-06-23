@@ -1,5 +1,12 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import type { TelemetryEvent, SessionStartEvent, LayerLoadedEvent } from '../../src/types'
+import type {
+  TelemetryEvent,
+  SessionStartEvent,
+  LayerLoadedEvent,
+  MigrationR2HlsEvent,
+  MigrationR2AssetsEvent,
+  MigrationR2ToursEvent,
+} from '../../src/types'
 import {
   onRequestPost,
   onRequestOptions,
@@ -124,6 +131,62 @@ function layerLoaded(id = 'A'): LayerLoadedEvent {
     slot_index: '0',
     trigger: 'browse',
     load_ms: 1234,
+  }
+}
+
+function migrationR2Hls(
+  overrides: Partial<MigrationR2HlsEvent> = {},
+): MigrationR2HlsEvent {
+  return {
+    event_type: 'migration_r2_hls',
+    dataset_id: 'DS00001AAAAAAAAAAAAAAAAAAAAA',
+    legacy_id: 'INTERNAL_SOS_768',
+    vimeo_id: '1107911993',
+    r2_key: 'videos/DS00001AAAAAAAAAAAAAAAAAAAAA/master.m3u8',
+    source_bytes: 41_000_000,
+    bundle_bytes: 50_000_000,
+    encode_duration_ms: 30_000,
+    upload_duration_ms: 2_000,
+    duration_ms: 35_000,
+    outcome: 'ok',
+    ...overrides,
+  }
+}
+
+function migrationR2Assets(
+  overrides: Partial<MigrationR2AssetsEvent> = {},
+): MigrationR2AssetsEvent {
+  return {
+    event_type: 'migration_r2_assets',
+    dataset_id: 'DS00001AAAAAAAAAAAAAAAAAAAAA',
+    legacy_id: 'INTERNAL_SOS_768',
+    asset_type: 'thumbnail',
+    source_url: 'https://d3sik7mbbzunjo.cloudfront.net/atmosphere/hurricane_season_2024/thumb.jpg',
+    r2_key: 'datasets/DS00001AAAAAAAAAAAAAAAAAAAAA/thumbnail.jpg',
+    source_bytes: 240_000,
+    duration_ms: 700,
+    outcome: 'ok',
+    ...overrides,
+  }
+}
+
+function migrationR2Tours(
+  overrides: Partial<MigrationR2ToursEvent> = {},
+): MigrationR2ToursEvent {
+  return {
+    event_type: 'migration_r2_tours',
+    dataset_id: 'DS00001AAAAAAAAAAAAAAAAAAAAA',
+    legacy_id: 'INTERNAL_SOS_MARIA_360',
+    source_url: 'https://d3sik7mbbzunjo.cloudfront.net/terraviz/maria/tour.json',
+    r2_key: 'tours/DS00001AAAAAAAAAAAAAAAAAAAAA/tour.json',
+    source_bytes: 1_276,
+    siblings_relative: 1,
+    siblings_external: 1,
+    siblings_sos_cdn: 0,
+    siblings_migrated: 1,
+    duration_ms: 4_200,
+    outcome: 'ok',
+    ...overrides,
   }
 }
 
@@ -264,6 +327,31 @@ describe('toDataPoint', () => {
     // field should appear; the event field lands at blob 5+ after
     // alphabetical ordering.
     expect(dp.blobs!.filter((b) => b === 'true').length).toBeGreaterThanOrEqual(1)
+  })
+
+  it('encodes voice_interaction at its documented blob/double positions', () => {
+    // Mirrors docs/ANALYTICS_QUERIES.md → voice_interaction. Fields
+    // sort alphabetically after the 4 server-stamped blobs; emit()
+    // always stamps client_offset_ms so it occupies double1.
+    const event = {
+      event_type: 'voice_interaction',
+      mode: 'tts',
+      provider: 'browser',
+      trigger: 'replay',
+      duration_ms: 0,
+      lang: 'en',
+      success: true,
+      client_offset_ms: 42,
+    } as unknown as TelemetryEvent
+    const dp = toDataPoint(event, 'sess', 'production', 'US', false)
+    expect(dp.blobs![0]).toBe('voice_interaction')
+    expect(dp.blobs![4]).toBe('en')        // blob5 lang
+    expect(dp.blobs![5]).toBe('tts')       // blob6 mode
+    expect(dp.blobs![6]).toBe('browser')   // blob7 provider
+    expect(dp.blobs![7]).toBe('true')      // blob8 success
+    expect(dp.blobs![8]).toBe('replay')    // blob9 trigger
+    expect(dp.doubles![0]).toBe(42)        // double1 client_offset_ms
+    expect(dp.doubles![1]).toBe(0)         // double2 duration_ms
   })
 
   it('skips null and undefined fields entirely (defense-in-depth — validation rejects them upstream)', () => {
@@ -507,6 +595,105 @@ describe('onRequestPost — happy path', () => {
     })
     const res = await onRequestPost(ctx)
     expect(res.status).toBe(204)
+  })
+
+  it('accepts migration_r2_hls events (Phase 3 commit E)', async () => {
+    const ae = makeAE()
+    const ctx = makeCtx({
+      body: body([
+        migrationR2Hls(),
+        migrationR2Hls({
+          outcome: 'data_ref_patch_failed',
+          r2_key: 'videos/orphan/master.m3u8',
+        }),
+      ]),
+      ip: '10.0.0.20',
+      env: { ANALYTICS: ae as unknown as AnalyticsEngineDataset },
+    })
+    const res = await onRequestPost(ctx)
+    expect(res.status).toBe(204)
+    expect(ae.datapoints).toHaveLength(2)
+    expect(ae.datapoints[0].blobs![0]).toBe('migration_r2_hls')
+    expect(ae.datapoints[1].blobs![0]).toBe('migration_r2_hls')
+  })
+
+  it('accepts migration_r2_tours events (Phase 3c commit C)', async () => {
+    // One event per row (NOT per sibling) — atomic. The 3c/B pump
+    // emits a single event covering tour.json + every sibling for
+    // a given dataset. All seven outcome enum values pass
+    // validation; partial-failure outcomes (sibling_fetch_failed
+    // etc.) propagate to AE alongside the ok ones.
+    const ae = makeAE()
+    const ctx = makeCtx({
+      body: body([
+        migrationR2Tours(),
+        migrationR2Tours({
+          dataset_id: 'DS00002BBBBBBBBBBBBBBBBBBBBB',
+          legacy_id: 'INTERNAL_SOS_726_ONLINE',
+          outcome: 'dead_source',
+          r2_key: '',
+          siblings_relative: 0,
+          siblings_migrated: 0,
+        }),
+        migrationR2Tours({
+          dataset_id: 'DS00003CCCCCCCCCCCCCCCCCCCCC',
+          legacy_id: 'INTERNAL_SOS_HRRR_Smoke_Tour_Mobile',
+          outcome: 'sibling_fetch_failed',
+          r2_key: '',
+          siblings_relative: 7,
+          siblings_migrated: 3,
+        }),
+        migrationR2Tours({
+          outcome: 'patch_failed',
+          r2_key: 'tours/orphan/tour.json',
+        }),
+      ]),
+      ip: '10.0.0.22',
+      env: { ANALYTICS: ae as unknown as AnalyticsEngineDataset },
+    })
+    const res = await onRequestPost(ctx)
+    expect(res.status).toBe(204)
+    expect(ae.datapoints).toHaveLength(4)
+    for (const dp of ae.datapoints) {
+      expect(dp.blobs![0]).toBe('migration_r2_tours')
+    }
+  })
+
+  it('accepts migration_r2_assets events (Phase 3b commit H)', async () => {
+    // One event per (row, asset_type) pair. The 3b/G pump emits
+    // up to 4 events per row (thumbnail / legend / caption /
+    // color_table). All four asset types pass validation; partial
+    // failure outcomes propagate to AE alongside the ok ones.
+    const ae = makeAE()
+    const ctx = makeCtx({
+      body: body([
+        migrationR2Assets({ asset_type: 'thumbnail' }),
+        migrationR2Assets({ asset_type: 'legend' }),
+        migrationR2Assets({
+          asset_type: 'caption',
+          source_url: 'https://d3sik7mbbzunjo.cloudfront.net/extras/x.srt',
+          r2_key: 'datasets/DS00001AAAAAAAAAAAAAAAAAAAAA/caption.vtt',
+        }),
+        migrationR2Assets({
+          asset_type: 'color_table',
+          outcome: 'fetch_failed',
+          r2_key: '',
+        }),
+        migrationR2Assets({
+          asset_type: 'thumbnail',
+          outcome: 'patch_failed',
+          r2_key: 'datasets/orphan/thumbnail.png',
+        }),
+      ]),
+      ip: '10.0.0.21',
+      env: { ANALYTICS: ae as unknown as AnalyticsEngineDataset },
+    })
+    const res = await onRequestPost(ctx)
+    expect(res.status).toBe(204)
+    expect(ae.datapoints).toHaveLength(5)
+    for (const dp of ae.datapoints) {
+      expect(dp.blobs![0]).toBe('migration_r2_assets')
+    }
   })
 })
 

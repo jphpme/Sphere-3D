@@ -17,6 +17,7 @@ import type {
   ShowPopupHtmlTaskParams, QuestionTaskParams, TourOverlayAnchor,
 } from '../types'
 import type { TourEngine } from '../services/tourEngine'
+import { t } from '../i18n'
 
 // ── VR tour overlay mirror ──────────────────────────────────────────
 //
@@ -312,8 +313,9 @@ function addCloseButton(el: HTMLElement, onClose: () => void): void {
   const btn = document.createElement('button')
   btn.className = 'tour-textbox-close'
   btn.innerHTML = '&#x2715;'
-  btn.title = 'Close'
-  btn.setAttribute('aria-label', 'Close')
+  const closeLabel = t('tour.close')
+  btn.title = closeLabel
+  btn.setAttribute('aria-label', closeLabel)
   btn.addEventListener('click', onClose)
   el.appendChild(btn)
 }
@@ -355,7 +357,7 @@ export function showTourLegend(legendUrl: string): void {
   wrapper.className = 'tour-legend'
   const img = document.createElement('img')
   img.src = legendUrl
-  img.alt = 'Legend'
+  img.alt = t('tour.legend.alt')
   img.style.cursor = 'zoom-in'
   // Tap to open the full legend modal (if it exists)
   img.addEventListener('click', () => {
@@ -428,6 +430,13 @@ export function showTourTextBox(params: ShowRectTaskParams): void {
       display: flex;
       flex-direction: column;
       ${params.captionPos === 'center' ? 'align-items:center;text-align:center;' : ''}
+      ${/* Tour `captionPos: left | right` is intentionally physical:
+            the tour author chose a screen position based on what's
+            visually on the globe at that moment. Don't convert to
+            logical (`start`/`end`) — that would flip the caption
+            for RTL viewers, hiding it behind whatever the tour
+            author was pointing at. Translators handle directional
+            content via the caption text itself. */ ''}
       ${params.captionPos === 'left' ? 'align-items:flex-start;text-align:left;' : ''}
       ${params.captionPos === 'right' ? 'align-items:flex-end;text-align:right;' : ''}
       ${params.captionPos === 'top' ? 'align-items:center;text-align:center;' : ''}
@@ -514,7 +523,7 @@ export function showTourImage(params: ShowImageTaskParams): void {
 
   const img = document.createElement('img')
   img.src = params.filename
-  img.alt = params.caption || 'Tour image'
+  img.alt = params.caption || t('tour.image.alt')
   img.style.cssText = `
     max-width: ${width}vw;
     max-height: ${height}vh;
@@ -787,7 +796,7 @@ export function showTourQuestion(params: QuestionDisplayParams): void {
 
   const img = document.createElement('img')
   img.src = params.imgQuestionFilename
-  img.alt = 'Question'
+  img.alt = t('tour.question.alt')
   img.style.cssText = 'max-width:100%;max-height:60%;object-fit:contain;border-radius:6px;margin-bottom:1rem;'
   wrapper.appendChild(img)
 
@@ -799,7 +808,7 @@ export function showTourQuestion(params: QuestionDisplayParams): void {
     const btn = document.createElement('button')
     btn.className = 'tour-question-btn'
     btn.textContent = String(i + 1)
-    btn.setAttribute('aria-label', `Answer ${i + 1}`)
+    btn.setAttribute('aria-label', t('tour.question.answer.aria', { n: i + 1 }))
     btn.addEventListener('click', () => {
       // Disable all buttons
       btnRow.querySelectorAll('button').forEach(b => {
@@ -822,12 +831,12 @@ export function showTourQuestion(params: QuestionDisplayParams): void {
       // Show the answer image after a brief delay
       setTimeout(() => {
         img.src = params.imgAnswerFilename
-        img.alt = 'Answer'
+        img.alt = t('tour.question.answer.alt')
 
         // Add a continue button
         const continueBtn = document.createElement('button')
         continueBtn.className = 'tour-question-continue'
-        continueBtn.textContent = 'Continue'
+        continueBtn.textContent = t('tour.question.continue')
         continueBtn.addEventListener('click', () => {
           hideAllTourQuestions()
           params.onComplete()
@@ -944,12 +953,14 @@ export function updateTourPlayState(isPlaying: boolean): void {
   btn.style.opacity = ''
   if (isPlaying) {
     btn.innerHTML = '&#x23F8;&#xFE0E;'
-    btn.setAttribute('aria-label', 'Pause tour')
-    btn.title = 'Pause tour'
+    const pauseLabel = t('tour.controls.pause.aria')
+    btn.setAttribute('aria-label', pauseLabel)
+    btn.title = pauseLabel
   } else {
     btn.innerHTML = '&#x25B6;&#xFE0E;'
-    btn.setAttribute('aria-label', 'Continue tour')
-    btn.title = 'Continue tour'
+    const continueLabel = t('tour.controls.continue.aria')
+    btn.setAttribute('aria-label', continueLabel)
+    btn.title = continueLabel
   }
 }
 

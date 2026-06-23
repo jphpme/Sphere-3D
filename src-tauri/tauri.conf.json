@@ -1,12 +1,12 @@
 {
   "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/crates/tauri-config-schema/schema.json",
-  "productName": "AYNI",
-  "version": "0.4.1",
+  "productName": "Terraviz",
+  "version": "0.6.0",
   "identifier": "org.zyra-project.terraviz",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:5173",
-    "beforeBuildCommand": "npx vite build",
+    "beforeBuildCommand": "npm run tokens && npm run build:privacy-page && npm run locales && npx vite build",
     "frontendDist": "../dist"
   },
   "app": {

@@ -153,6 +153,98 @@ export async function runGet(ctx: CommandContext): Promise<number> {
   return 0
 }
 
+// --- frames (Phase 3pg/E) -----------------------------------------
+
+/**
+ * Dispatch `terraviz frames <sub> ...`. Subcommands are `list` and
+ * `get`; everything else surfaces as the usage line. Kept as a
+ * sibling of the top-level dispatcher (rather than a flat command)
+ * because the two operations share enough scaffolding — argument
+ * shape, the public-endpoint base path, the streaming-JSON
+ * output pipeline — that grouping reads more naturally than
+ * `terraviz frames-list` / `terraviz frames-get`.
+ */
+export async function runFrames(ctx: CommandContext): Promise<number> {
+  const sub = ctx.args.positional[0]
+  if (!sub) {
+    ctx.stderr.write('Usage: terraviz frames <list|get> ...\n')
+    return 2
+  }
+  const subCtx: CommandContext = {
+    ...ctx,
+    args: {
+      positional: ctx.args.positional.slice(1),
+      options: ctx.args.options,
+    },
+  }
+  switch (sub) {
+    case 'list':
+      return runFramesList(subCtx)
+    case 'get':
+      return runFramesGet(subCtx)
+    default:
+      ctx.stderr.write(`Unknown frames subcommand: ${sub}\nUsage: terraviz frames <list|get> ...\n`)
+      return 2
+  }
+}
+
+async function runFramesList(ctx: CommandContext): Promise<number> {
+  const id = ctx.args.positional[0]
+  if (!id) {
+    ctx.stderr.write('Usage: terraviz frames list <id> [--limit=N] [--cursor=X] [--at=ISO] [--from=ISO --to=ISO]\n')
+    return 2
+  }
+  // `--from` + `--to` come as a pair — surface the partial-supply
+  // case here so the server's 400 doesn't surprise an operator
+  // who typo'd one of the flags.
+  const from = getString(ctx.args.options, 'from')
+  const to = getString(ctx.args.options, 'to')
+  if ((from && !to) || (!from && to)) {
+    ctx.stderr.write('--from and --to must be supplied together.\n')
+    return 2
+  }
+  const result = await ctx.client.framesList(id, {
+    limit: getNumber(ctx.args.options, 'limit'),
+    cursor: getString(ctx.args.options, 'cursor'),
+    at: getString(ctx.args.options, 'at'),
+    from,
+    to,
+  })
+  if (!result.ok) return emitFailure(ctx, result.status, result.error, result.message)
+  jsonOut(ctx, result.body)
+  return 0
+}
+
+async function runFramesGet(ctx: CommandContext): Promise<number> {
+  const id = ctx.args.positional[0]
+  const indexRaw = ctx.args.positional[1]
+  if (!id || indexRaw == null) {
+    ctx.stderr.write('Usage: terraviz frames get <id> <index>\n')
+    return 2
+  }
+  // The server already validates digit-only base-10 strictly via
+  // `/^\d+$/`. We mirror the same rule client-side so a typo'd
+  // `frames get DS 3e2` fails with a usage error rather than an
+  // opaque 400 from the wire.
+  if (!/^\d+$/.test(indexRaw)) {
+    ctx.stderr.write('index must be a non-negative base-10 integer.\n')
+    return 2
+  }
+  const index = parseInt(indexRaw, 10)
+  const result = await ctx.client.framesGet(id, index)
+  if (!result.ok) return emitFailure(ctx, result.status, result.error, result.message)
+  // Write the URL on stdout followed by a newline so the typical
+  // pipeline (`xargs -n1 curl -O`) sees one URL per line. The
+  // RFC 9530 Content-Digest is informational only — emit it on
+  // stderr so it doesn't pollute the pipe but stays visible to a
+  // human watching the terminal.
+  ctx.stdout.write(`${result.body.url}\n`)
+  if (result.body.contentDigest) {
+    ctx.stderr.write(`Content-Digest: ${result.body.contentDigest}\n`)
+  }
+  return 0
+}
+
 // --- publish (create + flip to published) -------------------------
 
 export async function runPublish(ctx: CommandContext): Promise<number> {
@@ -620,6 +712,20 @@ Commands:
   tour update <id> <metadata.json>    Patch tour metadata
   tour preview <id> [--ttl=<seconds>] Mint a short-lived preview URL
 
+  init-node --display-name=<name> --base-url=<url> [--contact=<email>]
+            [--description=<text>]
+            [--public-key=<ed25519:...> | --public-key-file=<path>]
+                                      Provision (or update) this node's identity
+                                      row on the deploy. Run ONCE before
+                                      import-snapshot / publishing — a fresh
+                                      remote deploy has an empty node_identity
+                                      table, which 503s /.well-known and fails
+                                      every publish on origin_node. Reads
+                                      node-public-key.txt (from gen-node-key) by
+                                      default; the key is required on first
+                                      provision. Needs an admin or service-token
+                                      auth (the same token import-snapshot uses).
+
   import-snapshot [--list=<path>] [--enriched=<path>] [--dry-run]
                                       One-shot bulk import of the legacy SOS
                                       catalog snapshot. Idempotent — re-running
@@ -639,6 +745,154 @@ Commands:
                                       no service token is configured; full audit
                                       when a token is set. --skip-publish-checks
                                       forces public-only.
+
+  migrate-r2-hls [--dry-run] [--limit=N] [--id=<id>] [--pace-ms=N]
+                 [--workdir=<path>] [--keep-workdir]
+                 [--ffmpeg-bin=<path>] [--proxy-base=<url>]
+                                      Operator pump that migrates legacy
+                                      vimeo:<id> data_refs to r2:<key> by
+                                      FFmpeg-encoding each source MP4 into a
+                                      4K + 1080p + 720p HLS bundle (2:1 aspect,
+                                      6 s segments) and uploading to R2 via the
+                                      S3 API. Requires ffmpeg on PATH (or
+                                      --ffmpeg-bin) and R2_S3_ENDPOINT /
+                                      R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY
+                                      in the environment. Idempotent — re-running
+                                      skips rows already on r2:. Always run
+                                      --dry-run first. See
+                                      CATALOG_BACKEND_DEVELOPMENT.md "Migrating
+                                      legacy Vimeo data refs to R2/HLS".
+
+  rollback-r2-hls <id> --to-vimeo=<vimeo_id> [--dry-run]
+                                      Roll a single migrated dataset back from
+                                      r2:videos/<id>/master.m3u8 to vimeo:<id>.
+                                      PATCHes data_ref first (commit point),
+                                      then deletes the R2 bundle (cleanup;
+                                      non-fatal). Use to back out a botched
+                                      migration or to re-encode at different
+                                      rendition settings. Requires the same R2
+                                      credentials as migrate-r2-hls for the
+                                      bundle deletion.
+
+  rollback-r2-hls --from-stdin [--dry-run]
+                                      Bulk rollback mode. Reads NDJSON from
+                                      stdin (one { "dataset_id", "vimeo_id" }
+                                      per line — the shape that
+                                      list-realtime-r2 emits) and runs the
+                                      per-row pipeline above sequentially.
+                                      Continues past per-row failures and
+                                      prints an aggregate summary. Mutually
+                                      exclusive with the positional dataset id
+                                      and --to-vimeo. Example:
+                                        terraviz list-realtime-r2 \\
+                                          | terraviz rollback-r2-hls --from-stdin
+
+  list-realtime-r2 [--human] [--snapshot=<path>]
+                                      Find migrated rows whose Vimeo source is
+                                      on a daily re-upload cadence (title
+                                      matches /real[-\s]?time/i) and recover
+                                      the original vimeo_id for each from the
+                                      SOS snapshot. Default output is NDJSON
+                                      designed for piping into rollback-r2-hls
+                                      --from-stdin; --human prints a readable
+                                      table. Read-only — no mutations.
+
+  migrate-r2-assets [--dry-run] [--limit=N] [--id=<id>]
+                    [--types=t1,t2,...] [--pace-ms=N]
+                                      Migrate per-row auxiliary asset URLs
+                                      (thumbnail, legend, caption, color_table)
+                                      from NOAA CloudFront to R2 under
+                                      datasets/<id>/<asset>.<ext>. Idempotent —
+                                      assets already on r2: skip. Captions
+                                      auto-convert SRT → VTT inline. Requires
+                                      the same R2 credentials as migrate-r2-hls.
+                                      Use --types to do one class at a time
+                                      (default: all four). See
+                                      CATALOG_BACKEND_DEVELOPMENT.md
+                                      "Migrating auxiliary asset URLs to R2".
+
+  rollback-r2-assets <id> [--types=t1,t2,...]
+                          [--to-url=<url>] [--dry-run]
+                                      Roll a row's auxiliary asset columns
+                                      back from r2: to the original NOAA URLs.
+                                      Original URL recovered from the SOS
+                                      snapshot by legacy_id; --to-url=<url>
+                                      overrides for non-SOS catalogs
+                                      (requires --types=<single-type>).
+                                      PATCHes the column first (commit point),
+                                      then deletes the R2 object (cleanup;
+                                      non-fatal).
+
+  rollback-r2-assets --from-stdin [--dry-run]
+                                      Bulk rollback. Reads NDJSON from stdin
+                                      (one { "dataset_id", "asset_type" } per
+                                      line) and runs the per-asset pipeline
+                                      sequentially. Continues past failures
+                                      and prints an aggregate summary. Pipe
+                                      a filtered slice of the migration's
+                                      Grafana telemetry to roll back a
+                                      specific subset.
+
+  migrate-r2-tours [--dry-run] [--limit=N] [--id=<id>]
+                   [--pace-ms=N]
+                                      Migrate per-row SOS tour.json files (and
+                                      their sibling overlay / audio / 360-pano
+                                      assets) from NOAA CloudFront to R2 under
+                                      tours/<id>/tour.json + sibling paths.
+                                      Per-row atomic — a row's tour.json is
+                                      only PATCHed after every sibling has
+                                      uploaded successfully. Idempotent —
+                                      rows already on r2: skip. External URLs
+                                      (YouTube embeds, Vimeo, popup web links)
+                                      are left verbatim. Requires the same R2
+                                      credentials as migrate-r2-hls /
+                                      migrate-r2-assets. See
+                                      CATALOG_BACKEND_DEVELOPMENT.md
+                                      "Migrating tour.json files to R2".
+
+  rollback-r2-tours <id> [--to-url=<url>] [--dry-run]
+                                      Roll a row's run_tour_on_load back from
+                                      r2: to the original NOAA URL. Original
+                                      URL recovered from the SOS snapshot by
+                                      legacy_id; --to-url=<url> overrides for
+                                      non-SOS catalogs. PATCHes the column
+                                      first (commit point), then deletes the
+                                      R2 prefix tours/<id>/ (every uploaded
+                                      tour.json + sibling at once;
+                                      non-fatal — leaves orphans on failure
+                                      with the catalog still correct).
+
+  rollback-r2-tours --from-stdin [--dry-run]
+                                      Bulk rollback. Reads NDJSON from stdin
+                                      (one { "dataset_id" } per line) and
+                                      runs the per-row pipeline sequentially.
+                                      Continues past failures and prints an
+                                      aggregate summary. Pipe a filtered
+                                      slice of the migration's Grafana
+                                      telemetry to roll back a specific
+                                      subset.
+
+  frames list <id> [--limit=N] [--cursor=X] [--at=ISO]
+              [--from=ISO --to=ISO]
+                                      List the frames of an image-sequence
+                                      dataset. Streams the public-API JSON
+                                      response (count + per-frame rows with
+                                      index / displayName / originalFilename /
+                                      timestamp / contentDigest / url + an
+                                      optional cursor). Pipe into
+                                      \`jq -r '.frames[].url' | xargs -n1 curl -O\`
+                                      for a bulk fetch. \`--at\` returns the
+                                      single closest frame and wins over
+                                      \`--from\`/\`--to\`.
+
+  frames get <id> <index>             Print the per-frame R2 URL for one
+                                      frame of an image-sequence dataset.
+                                      Uses the 302 redirect from
+                                      /api/v1/datasets/{id}/frames/{index}
+                                      under the hood; stdout is just the
+                                      Location target so the typical
+                                      pipeline is
+                                      \`terraviz frames get DS 47 | xargs curl -O\`.
 
 Global flags:
   --server <url>                      Server base URL (default https://terraviz.app)

@@ -7,18 +7,30 @@
  * endpoint resolves the reference to whatever shape the frontend
  * needs to actually play the asset.
  *
- * Phase 1a scope:
- *   - `vimeo:<id>` for video formats — proxied through the existing
- *     `video-proxy.zyra-project.org` so cutover to a node-served
- *     manifest is a one-line frontend change with no asset re-encoding.
- *   - `url:<href>` for video formats — synthesized single-file
- *     manifest pointing at the external URL (legacy NOAA imagery,
+ * Resolution policy by data_ref scheme + format:
+ *   - `vimeo:<id>` + video — proxied through the existing
+ *     `video-proxy.zyra-project.org`. Surfaces what Vimeo's API
+ *     exposes; subject to the proxy's quality ceiling.
+ *   - `url:<href>` + video — synthesized single-file manifest
+ *     pointing at the external URL (legacy NOAA imagery,
  *     occasional MP4 hosted alongside SOS).
- *   - `url:<href>` for image formats — synthesized progressive-
- *     resolution variants matching the existing `_4096`/`_2048`/
- *     `_1024` ladder the frontend already probes.
- *   - Unknown schemes (`stream:`, `r2:`, `peer:`) and mismatched
- *     scheme/format pairs return 400 with a typed error envelope.
+ *   - `url:<href>` + image — synthesized progressive-resolution
+ *     variants matching the existing `_4096`/`_2048`/`_1024`
+ *     ladder the frontend already probes.
+ *   - `stream:<uid>` + video — Cloudflare Stream HLS playback
+ *     URL (Phase 1b; uncommon now that Phase 3's R2/HLS path is
+ *     preferred for spherical content above 1080p).
+ *   - `r2:<key>` + image — Cloudflare Images variant ladder when
+ *     CF_IMAGES_RESIZE_BASE is configured, otherwise a single
+ *     fallback URL.
+ *   - `r2:<key>.m3u8` + video — HLS master playlist served from
+ *     the R2 public bucket. The Phase 3 r2-hls migration writes
+ *     `r2:videos/<dataset_id>/master.m3u8` here; the SPA's HLS
+ *     player consumes the `hls` field directly.
+ *   - `r2:<key>` + video (non-`.m3u8`) — direct single-file MP4
+ *     manifest. Rare; mostly future-proofing.
+ *   - `peer:` returns 501; mismatched scheme/format pairs return
+ *     400 with a typed error envelope.
  *
  * Wire shape:
  *   - Video: matches the existing `VideoProxyResponse` shape
@@ -36,13 +48,38 @@
  */
 
 import { CatalogEnv } from '../../_lib/env'
+import { parseScheduleSeconds } from '../../_lib/workflow-schedule'
 import { getNodeIdentity, getPublicDataset } from '../../_lib/catalog-store'
 import { isConfigurationError } from '../../_lib/errors'
 import { streamPlaybackUrl } from '../../_lib/stream-store'
 import { computeEtag } from '../../_lib/snapshot'
-import { encodeR2Key, resolveR2PublicUrl } from '../../_lib/r2-public-url'
+import { encodeR2Key, resolveR2HlsPublicUrl, resolveR2PublicUrl } from '../../_lib/r2-public-url'
 
 const CACHE_CONTROL = 'public, max-age=300, stale-while-revalidate=600'
+
+/** Phase Z4 (docs/ZYRA_INTEGRATION_PLAN.md): rows with a LIVE
+ *  update cadence re-bind to their newest upload bundle faster — a
+ *  workflow re-publish is visible within ~1 minute instead of 5.
+ *  Liveness requires `period` AND a trailing edge within two
+ *  cadences of now — historical time-series rows carry `period`
+ *  too and keep the standard policy (PR #179 review). Bundle URLs
+ *  are immutable per upload_id, so this only shortens the
+ *  pointer's cache, never re-fetches video bytes. */
+const CACHE_CONTROL_REALTIME = 'public, max-age=60, stale-while-revalidate=120'
+
+export function cacheControlFor(
+  row: { period: string | null; end_time: string | null },
+  now: number = Date.now(),
+): string {
+  const seconds = row.period ? parseScheduleSeconds(row.period) : null
+  // P0D parses to 0 and overflowed components to Infinity — neither
+  // is a real cadence (PR #179 review).
+  if (seconds === null || !Number.isFinite(seconds) || seconds <= 0) return CACHE_CONTROL
+  if (!row.end_time) return CACHE_CONTROL_REALTIME
+  const end = Date.parse(row.end_time)
+  if (!Number.isFinite(end)) return CACHE_CONTROL
+  return now - end <= 2 * seconds * 1000 ? CACHE_CONTROL_REALTIME : CACHE_CONTROL
+}
 const CONTENT_TYPE = 'application/json; charset=utf-8'
 const DEFAULT_VIDEO_PROXY_BASE = 'https://video-proxy.zyra-project.org/video'
 
@@ -307,9 +344,55 @@ export async function resolveManifest(
       return { manifest: { kind: 'image', variants: [], fallback: url } }
     }
     if (isVideo) {
-      // Non-Stream video sitting on R2 (rare in 1b — Stream is the
-      // default — but possible for the >4K HLS-on-R2 path described
-      // in `CATALOG_ASSETS_PIPELINE.md` "Resolution tiers"). Emit a
+      // HLS bundles (Phase 3 r2-hls migration): when the key ends
+      // in `.m3u8`, the value is an HLS master playlist URL. The
+      // SPA's hlsService.ts uses the `hls` field; `files` stays
+      // empty (no direct-file alternative needed because the
+      // master playlist references its own variant streams + ts
+      // segments via relative paths under the same R2 prefix).
+      //
+      // Resolution here is stricter than the image / single-file
+      // MP4 branches above: we require an *explicit* public
+      // origin (`R2_PUBLIC_BASE` in prod or `MOCK_R2` for tests)
+      // rather than letting the `R2_S3_ENDPOINT` fallback fire.
+      // In a typical production setup `R2_S3_ENDPOINT` is present
+      // so the Phase 3 CLI can sign PUTs, but the bucket itself
+      // is *not* publicly readable through that endpoint — a
+      // custom domain bound via "Connect Domain" is. Falling
+      // through to the S3 endpoint would return an `hls:` URL
+      // that 403s at play time and contradicts the runbook
+      // (`expected-bindings.ts` already documents the missing-
+      // R2_PUBLIC_BASE → 503 r2_unconfigured contract).
+      if (parsed.value.toLowerCase().endsWith('.m3u8')) {
+        const hls = resolveR2HlsPublicUrl(env, parsed.value)
+        if (!hls) {
+          return {
+            error: {
+              status: 503,
+              code: 'r2_unconfigured',
+              message:
+                'R2 public origin is not configured for HLS playback — set ' +
+                'R2_PUBLIC_BASE to the bucket\'s custom-domain URL (Cloudflare ' +
+                'dashboard → R2 → bucket → Settings → Connect Domain), or set ' +
+                'MOCK_R2=true for local development. The R2_S3_ENDPOINT fallback ' +
+                'is intentionally skipped here because that endpoint is for ' +
+                'signed S3 API access, not public reads.',
+            },
+          }
+        }
+        return {
+          manifest: {
+            kind: 'video',
+            id: row.id,
+            title: '',
+            duration: 0,
+            hls,
+            files: [],
+          },
+        }
+      }
+      // Non-HLS video sitting on R2 (rare — direct MP4 hosted on
+      // R2 instead of Stream or an external URL). Emit a
       // single-file manifest pointing at the direct URL.
       return { manifest: externalVideoManifest(row.id, url, row.format) }
     }
@@ -373,10 +456,11 @@ export const onRequestGet: PagesFunction<CatalogEnv, 'id'> = async context => {
 
   const body = JSON.stringify(result.manifest)
   const etag = await computeEtag(body)
+  const cacheControl = cacheControlFor(row)
   if (context.request.headers.get('if-none-match') === etag) {
     return new Response(null, {
       status: 304,
-      headers: { ETag: etag, 'Cache-Control': CACHE_CONTROL },
+      headers: { ETag: etag, 'Cache-Control': cacheControl },
     })
   }
   return new Response(body, {
@@ -384,7 +468,7 @@ export const onRequestGet: PagesFunction<CatalogEnv, 'id'> = async context => {
     headers: {
       'Content-Type': CONTENT_TYPE,
       ETag: etag,
-      'Cache-Control': CACHE_CONTROL,
+      'Cache-Control': cacheControl,
     },
   })
 }

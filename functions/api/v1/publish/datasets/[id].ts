@@ -8,16 +8,24 @@
  *       existence of other publishers' drafts.
  * PUT → Patch metadata. Same authorisation rule as GET.
  *
+ * DELETE → Hard-delete a non-published row (drafts + retracted).
+ *       409 `published` for live rows (retract first) and
+ *       `transcode_in_progress` for rows mid-encode.
+ *
  * `publish`, `retract`, `preview` are sibling files under
  * [id]/ to keep each handler small.
  */
 
 import type { CatalogEnv } from '../../_lib/env'
 import type { PublisherData } from '../_middleware'
+import { writeDatasetAudit } from '../../_lib/audit-store'
+import { getDecorations } from '../../_lib/catalog-store'
 import {
+  deleteDataset,
   getDatasetForPublisher,
   updateDataset,
 } from '../../_lib/dataset-mutations'
+import { resolveHttpAssetUrl } from '../../_lib/r2-public-url'
 import { type JobQueue, WaitUntilJobQueue } from '../../_lib/job-queue'
 
 /** Test injection point — middleware/tests can pre-populate `context.data.jobQueue`. */
@@ -44,12 +52,36 @@ export const onRequestGet: PagesFunction<CatalogEnv, 'id'> = async context => {
   const publisher = (context.data as unknown as PublisherData).publisher
   const id = pickId(context)
   if (!id) return jsonError(400, 'invalid_request', 'Missing dataset id.')
-  const row = await getDatasetForPublisher(context.env.CATALOG_DB!, publisher, id)
+  const db = context.env.CATALOG_DB!
+  const row = await getDatasetForPublisher(db, publisher, id)
   if (!row) return jsonError(404, 'not_found', `Dataset ${id} not found.`)
-  return new Response(JSON.stringify({ dataset: row }), {
-    status: 200,
-    headers: { 'Content-Type': CONTENT_TYPE, 'Cache-Control': 'private, no-store' },
-  })
+  const decorations = (await getDecorations(db, [id])).get(id)
+  // Resolve the raw `data_ref` (`r2:<key>` or a bare URL) to a
+  // publicly-readable URL so the publisher portal's globe-thumbnail
+  // generator can fetch the dataset's own data frame ("Generate from
+  // this dataset's data") without the publisher re-uploading it.
+  // Null when the ref can't be resolved (no R2_PUBLIC_BASE bound, or
+  // a non-resolvable scheme) — the portal then hides the one-click
+  // affordance and falls back to the manual frame picker.
+  const dataUrl = resolveHttpAssetUrl(context.env, row.data_ref)
+  // Same resolution for the auxiliary images so the portal can render
+  // an actual preview (not just the `r2:` ref text) in the edit form.
+  const thumbnailUrl = resolveHttpAssetUrl(context.env, row.thumbnail_ref)
+  const legendUrl = resolveHttpAssetUrl(context.env, row.legend_ref)
+  return new Response(
+    JSON.stringify({
+      dataset: row,
+      data_url: dataUrl,
+      thumbnail_url: thumbnailUrl,
+      legend_url: legendUrl,
+      keywords: decorations?.keywords ?? [],
+      tags: decorations?.tags ?? [],
+    }),
+    {
+      status: 200,
+      headers: { 'Content-Type': CONTENT_TYPE, 'Cache-Control': 'private, no-store' },
+    },
+  )
 }
 
 export const onRequestPut: PagesFunction<CatalogEnv, 'id'> = async context => {
@@ -85,8 +117,33 @@ export const onRequestPut: PagesFunction<CatalogEnv, 'id'> = async context => {
       headers: { 'Content-Type': CONTENT_TYPE },
     })
   }
+  await writeDatasetAudit(
+    context.env.CATALOG_DB!,
+    publisher,
+    'dataset.update',
+    id,
+    { fields: Object.keys(body as Record<string, unknown>).sort() },
+  )
   return new Response(JSON.stringify({ dataset: result.dataset }), {
     status: 200,
     headers: { 'Content-Type': CONTENT_TYPE, 'Cache-Control': 'private, no-store' },
+  })
+}
+
+export const onRequestDelete: PagesFunction<CatalogEnv, 'id'> = async context => {
+  const publisher = (context.data as unknown as PublisherData).publisher
+  const id = pickId(context)
+  if (!id) return jsonError(400, 'invalid_request', 'Missing dataset id.')
+  // Same jobQueue wiring as PUT — without it the embedding
+  // deletion would silently no-op (PR #177 Copilot review).
+  const jobQueue =
+    (context.data as unknown as UpdateContextData).jobQueue ??
+    new WaitUntilJobQueue(context.env, context.waitUntil.bind(context))
+  const result = await deleteDataset(context.env, publisher, id, { jobQueue })
+  if (!result.ok) return jsonError(result.status, result.error, result.message)
+  await writeDatasetAudit(context.env.CATALOG_DB!, publisher, 'dataset.delete', id)
+  return new Response(JSON.stringify({ deleted_id: result.deleted_id }), {
+    status: 200,
+    headers: { 'Content-Type': CONTENT_TYPE },
   })
 }

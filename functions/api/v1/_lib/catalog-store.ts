@@ -16,6 +16,8 @@
  * mechanical refactor.
  */
 
+import { newUlid } from './ulid'
+
 export interface DatasetRow {
   id: string
   slug: string
@@ -57,6 +59,106 @@ export interface DatasetRow {
    * `INTERNAL_SOS_*` id). NULL for publisher-created drafts.
    */
   legacy_id: string | null
+  /** Fourth auxiliary-asset URL: the color ramp used by
+   * interactive probing. Distinct from `legend_ref` in ~2 of 14
+   * overlapping rows. Phase 3b restored this from the SOS
+   * snapshot via migration 0009. NULL on rows that don't ship one. */
+  color_table_ref: string | null
+  /** JSON-stringified probing metadata
+   * (`{ units, minVal, maxVal, minPos, maxPos }`) recovered from
+   * the SOS snapshot. The SPA-side probe tooltip is a separate
+   * downstream change; this column just persists the data. */
+  probing_info: string | null
+  /** Geographic bounding box (NSWE in degrees) for the dataset's
+   * spatial extent. Phase 3d promoted these from the legacy
+   * `bounding_variables` JSON column to typed REALs; consumers
+   * MUST read the typed fields. NULL on rows with global extent.
+   * Validation: n/s in [-90, 90], w/e in [-180, 180], n >= s.
+   * The SPA's regional projection feature (Phase 3e) wraps the
+   * dataset texture to this bbox; rows with all four NULL get
+   * the legacy global-equirectangular treatment. */
+  bbox_n: number | null
+  bbox_s: number | null
+  bbox_w: number | null
+  bbox_e: number | null
+  /** Celestial body the dataset visualises. NULL means Earth (the
+   * common case). Non-Earth values surface as a SPA hint to swap
+   * the base globe texture (Phase 3e). Verbatim SOS strings —
+   * the snapshot includes Mars / Moon / Sun / Jupiter / Saturn /
+   * Mercury / Venus / Pluto / Neptune / Uranus / Io / Europa /
+   * Ganymede / Callisto / Enceladus / Titan / 67p / aurora /
+   * Trappist-1d / Kepler-10b. */
+  celestial_body: string | null
+  /** Radius of the celestial body in miles, when non-Earth.
+   * Paired with `celestial_body` for proportional sizing. NULL
+   * when celestial_body is NULL (Earth's default radius is
+   * implicit). */
+  radius_mi: number | null
+  /** Globe longitude rotation reference in degrees. NULL means 0
+   * (prime-meridian-centered). 12 SOS rows use ±180 for
+   * Pacific-focused datasets where the dateline reads better as
+   * the visual center. */
+  lon_origin: number | null
+  /** Boolean (0/1) image-orientation flag. NULL means 0 (no flip).
+   * Zero rows use this in the current SOS snapshot; persisted for
+   * future publishers whose imagery uses inverted Y conventions. */
+  is_flipped_in_y: number | null
+  /** Boolean (0/1) flag set by the video-upload /complete handler
+   * when a `source.mp4` lands in R2 and a GHA transcode dispatch
+   * fires (Phase 3pd). The workflow clears the flag and writes
+   * `data_ref = r2:videos/{id}/{upload_id}/master.m3u8` (per-
+   * upload-versioned so a re-upload doesn't clobber a still-
+   * playing bundle) when the HLS bundle is ready. The portal
+   * renders a "Transcoding…" badge and gates the publish button
+   * while this is set. NULL on every other row. Migration 0011. */
+  transcoding: number | null
+  /** ULID of the asset_uploads row whose GHA workflow currently
+   * owns the row's transcoding stamp. Set in lockstep with
+   * `transcoding=1` by the /asset/.../complete handler; verified
+   * by /transcode-complete before applying the workflow's callback
+   * so two overlapping uploads can't race their PATCHes against
+   * each other (see migration 0012). NULL when `transcoding` is
+   * NULL. Migration 0012. */
+  active_transcode_upload_id: string | null
+  /** Number of source frames for an image-sequence-source video
+   *  dataset (Phase 3pf). NULL for MP4-source video, image, and
+   *  tour rows. Populated by /complete when stamping
+   *  `transcoding=1`; the manifest serializer reads it to surface
+   *  the frames-as-data envelope in Phase 3pg. Migration 0014. */
+  frame_count: number | null
+  /** File extension on each per-frame R2 key — `png` / `jpg` /
+   *  `webp` matching the `extForMime` convention. Paired with
+   *  `frame_count`; populated by /complete and read by the
+   *  manifest serializer to build the `urlTemplate`. NULL on
+   *  non-sequence rows. Migration 0014. */
+  frame_extension: string | null
+  /** R2 key of the auxiliary JSON blob recording the publisher's
+   *  original frame filenames in encode order. Surfaced by the
+   *  frames-as-data API (Phase 3pg) as `originalFilename` on
+   *  /frames responses for tooling that needs to map back to the
+   *  publisher's on-disk convention. NULL on non-sequence rows.
+   *  Migration 0014. */
+  frame_source_filenames_ref: string | null
+  /** SHA-256 of the asset's *delivered bytes*. Carried for
+   * single-blob assets (R2 images, captions, legends) where one
+   * hash describes the whole object. Always NULL for HLS bundles:
+   * those are many segment files plus variant manifests, and the
+   * pipeline tracks per-segment integrity via the master manifest
+   * rather than a single bundle-wide hash. `clearTranscoding`
+   * (`asset-uploads.ts`) explicitly NULLs this column when a
+   * video transcode lands, atomically with the `data_ref` swap
+   * (PR #112 followup — 3pd-followup/Z). Also NULL when the row
+   * predates Phase 1b content-digest verification or when the
+   * pipeline trusts an upstream-provided source digest instead.
+   * Phase 1b. */
+  content_digest: string | null
+  /** SHA-256 of the publisher's *source upload* (the MP4 they
+   * dropped into the portal uploader, before any transcoding).
+   * Set at /asset/{upload_id}/complete time and round-trips into
+   * the GHA workflow's repository_dispatch payload so the runner
+   * can re-verify before encoding. NULL on rows that never went
+   * through the source-upload flow. */
+  source_digest: string | null
 }
 
 export interface DecorationRows {
@@ -91,6 +193,89 @@ export async function getNodeIdentity(db: D1Database): Promise<NodeIdentityRow |
     .first<NodeIdentityRow>()
 }
 
+export interface NodeIdentityInput {
+  display_name: string
+  base_url: string
+  description?: string | null
+  contact_email?: string | null
+  /** Required on first provision (the column is NOT NULL). On an
+   *  update, omit to keep the existing key. */
+  public_key?: string
+}
+
+/**
+ * Provision or update the single `node_identity` row.
+ *
+ * Migrations create the table but never seed it, and the local
+ * `db:seed` / `gen:node-key` paths only touch the on-disk dev D1 —
+ * so on a remote deploy this row has to be created out-of-band
+ * before `/.well-known/terraviz.json` resolves and before any
+ * publish (dataset inserts read `node_id` from here for the
+ * NOT NULL `origin_node`). This is the server-side primitive behind
+ * the `terraviz init-node` CLI command.
+ *
+ * Idempotent: an existing row is updated in place and its
+ * `node_id` / `created_at` are preserved, so dataset `origin_node`
+ * references stay valid. `public_key` is only overwritten when a new
+ * one is supplied. A fresh provision requires `public_key` (the
+ * column is NOT NULL); the caller validates and surfaces a typed
+ * error before reaching here.
+ */
+export async function upsertNodeIdentity(
+  db: D1Database,
+  input: NodeIdentityInput,
+): Promise<NodeIdentityRow> {
+  const existing = await getNodeIdentity(db)
+  if (existing) {
+    await db
+      .prepare(
+        `UPDATE node_identity
+           SET display_name = ?, base_url = ?, description = ?,
+               contact_email = ?, public_key = ?
+         WHERE node_id = ?`,
+      )
+      .bind(
+        input.display_name,
+        input.base_url,
+        input.description ?? null,
+        input.contact_email ?? null,
+        input.public_key ?? existing.public_key,
+        existing.node_id,
+      )
+      .run()
+  } else {
+    if (!input.public_key) {
+      throw new Error('public_key is required to provision a new node_identity row')
+    }
+    // Guard the insert against a concurrent first-time provision:
+    // only insert when the table is still empty. The `singleton`
+    // UNIQUE index (migration 0016) is the hard backstop; this
+    // `WHERE NOT EXISTS` keeps the idempotent re-run path graceful
+    // (a racing second call inserts nothing and falls through to
+    // return the winning row below) instead of throwing.
+    await db
+      .prepare(
+        `INSERT INTO node_identity
+           (node_id, display_name, base_url, description, contact_email, public_key, created_at)
+         SELECT ?, ?, ?, ?, ?, ?, ?
+         WHERE NOT EXISTS (SELECT 1 FROM node_identity)`,
+      )
+      .bind(
+        newUlid(),
+        input.display_name,
+        input.base_url,
+        input.description ?? null,
+        input.contact_email ?? null,
+        input.public_key,
+        new Date().toISOString(),
+      )
+      .run()
+  }
+  const row = await getNodeIdentity(db)
+  if (!row) throw new Error('node_identity upsert did not produce a row')
+  return row
+}
+
 /**
  * Visible-to-the-public dataset rows: not retracted, not hidden,
  * visibility='public'. The federated / restricted / private cases
@@ -114,7 +299,31 @@ export async function listPublicDatasets(
   options: { since?: string } = {},
 ): Promise<DatasetRow[]> {
   const { since } = options
-  const where = ['visibility = ?', 'is_hidden = 0', 'retracted_at IS NULL']
+  // The four conditions together define "this row is something
+  // the public SPA / federation should see":
+  //   - visibility = 'public': not federated-only or private
+  //   - is_hidden = 0: operator hasn't suppressed it
+  //   - retracted_at IS NULL: not retracted post-publish
+  //   - published_at IS NOT NULL: actually published, not a draft
+  // The fourth condition is what was missing — the schema's
+  // `visibility` column defaults to 'public', so a draft created
+  // with no explicit visibility setting still has visibility='public'
+  // and would leak into the public catalog until publish/retract.
+  // Both the public snapshot endpoint (`/api/v1/catalog`) and
+  // the federation feed (Phase 4) key off this function, so the
+  // fix is applied here once. The publisher portal's drafts tab
+  // is a separate path: it queries the publisher-scoped
+  // `listDatasetsForPublisher` in `dataset-mutations.ts`, which
+  // has its own visibility model (drafts + published owned by
+  // the caller). Found during a production smoke test where a
+  // draft "Test 1" appeared alongside published datasets in the
+  // SPA's browse panel.
+  const where = [
+    'visibility = ?',
+    'is_hidden = 0',
+    'retracted_at IS NULL',
+    'published_at IS NOT NULL',
+  ]
   const binds: unknown[] = ['public']
   if (since) {
     where.push('updated_at > ?')
@@ -140,6 +349,7 @@ export async function getPublicDataset(
       `SELECT * FROM datasets
        WHERE id = ? AND visibility = 'public'
          AND is_hidden = 0 AND retracted_at IS NULL
+         AND published_at IS NOT NULL
        LIMIT 1`,
     )
     .bind(id)

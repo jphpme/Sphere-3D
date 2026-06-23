@@ -15,7 +15,7 @@
  *   - 403 pending / suspended.
  *   - Calls next() with `context.data.publisher` populated for an
  *     active publisher.
- *   - Dev-bypass on loopback mints a staff/active publisher and
+ *   - Dev-bypass on loopback mints an admin/active publisher and
  *     calls next().
  */
 
@@ -96,7 +96,7 @@ describe('publish/_middleware', () => {
     expect(next.fn).not.toHaveBeenCalled()
   })
 
-  it('mints a staff publisher and calls next() under dev bypass on localhost', async () => {
+  it('mints an admin publisher and calls next() under dev bypass on localhost', async () => {
     const sqlite = seedFixtures({ count: 0 })
     const env = {
       CATALOG_DB: asD1(sqlite),
@@ -115,14 +115,14 @@ describe('publish/_middleware', () => {
     const row = sqlite
       .prepare(`SELECT email, role, is_admin, status FROM publishers WHERE email = 'me@localhost'`)
       .get() as { email: string; role: string; is_admin: number; status: string }
-    expect(row).toMatchObject({ role: 'staff', is_admin: 1, status: 'active' })
+    expect(row).toMatchObject({ role: 'admin', is_admin: 1, status: 'active' })
 
     interface PublisherCtxData {
       publisher?: { email?: string; role?: string }
     }
     const data = ctx.data as PublisherCtxData
     expect(data.publisher?.email).toBe('me@localhost')
-    expect(data.publisher?.role).toBe('staff')
+    expect(data.publisher?.role).toBe('admin')
   })
 
   it('returns 401 unauthenticated when the assertion header is missing', async () => {
@@ -167,7 +167,7 @@ describe('publish/_middleware', () => {
         `INSERT INTO publishers (id, email, display_name, role, is_admin, status, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run('PUB001', 'pending@example.com', 'pending', 'community', 0, 'pending', '2026-01-01T00:00:00.000Z')
+      .run('PUB001', 'pending@example.com', 'pending', 'publisher', 0, 'pending', '2026-01-01T00:00:00.000Z')
     const env = {
       CATALOG_DB: asD1(sqlite),
       CATALOG_KV: makeKV(),
@@ -190,7 +190,7 @@ describe('publish/_middleware', () => {
         `INSERT INTO publishers (id, email, display_name, role, is_admin, status, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run('PUB002', 'banned@example.com', 'banned', 'community', 0, 'suspended', '2026-01-01T00:00:00.000Z')
+      .run('PUB002', 'banned@example.com', 'banned', 'publisher', 0, 'suspended', '2026-01-01T00:00:00.000Z')
     const env = {
       CATALOG_DB: asD1(sqlite),
       CATALOG_KV: makeKV(),
@@ -204,5 +204,72 @@ describe('publish/_middleware', () => {
     expect(res.status).toBe(403)
     expect((await readJson<{ error: string }>(res)).error).toBe('suspended')
     expect(next.fn).not.toHaveBeenCalled()
+  })
+
+  it('catches an unhandled downstream exception and returns 500 unhandled_exception', async () => {
+    const sqlite = seedFixtures({ count: 0 })
+    const env = {
+      CATALOG_DB: asD1(sqlite),
+      CATALOG_KV: makeKV(),
+      DEV_BYPASS_ACCESS: 'true',
+      DEV_PUBLISHER_EMAIL: 'me@localhost',
+    }
+    // Replace `next` with one that throws — simulates a downstream
+    // route handler erroring out (the original 3pc/B-fix2 scenario).
+    const next = {
+      fn: vi.fn(async () => {
+        throw new Error('D1_ERROR: table datasets has no column named bbox_n: SQLITE_ERROR')
+      }),
+      response: new Response(),
+    }
+    const consoleSpy = console.error
+    console.error = () => {}
+    try {
+      const res = await onRequest(
+        ctxWithNext({ env, url: 'http://localhost:8788/api/v1/publish/me' }, next),
+      )
+      expect(res.status).toBe(500)
+      const body = await readJson<{ error: string; message: string }>(res)
+      expect(body.error).toBe('unhandled_exception')
+      expect(body.message).toContain('D1_ERROR')
+      expect(body.message).toContain('bbox_n')
+    } finally {
+      console.error = consoleSpy
+    }
+  })
+
+  it('strips stack-frame fragments from the surfaced error message', async () => {
+    const sqlite = seedFixtures({ count: 0 })
+    const env = {
+      CATALOG_DB: asD1(sqlite),
+      CATALOG_KV: makeKV(),
+      DEV_BYPASS_ACCESS: 'true',
+      DEV_PUBLISHER_EMAIL: 'me@localhost',
+    }
+    // Synthesise a multi-line `.message` whose body looks like a
+    // Node-style stack trace. The sanitizer must keep the first
+    // line (the human-readable cause) and drop the rest.
+    const fakeError = new Error(
+      'Boom\n    at handler (file:///worker/index.js:42:13)\n    at next (file:///worker/middleware.js:7:5)',
+    )
+    const next = {
+      fn: vi.fn(async () => {
+        throw fakeError
+      }),
+      response: new Response(),
+    }
+    const consoleSpy = console.error
+    console.error = () => {}
+    try {
+      const res = await onRequest(
+        ctxWithNext({ env, url: 'http://localhost:8788/api/v1/publish/me' }, next),
+      )
+      const body = await readJson<{ message: string }>(res)
+      expect(body.message).toBe('Boom')
+      expect(body.message).not.toMatch(/\bat\b/)
+      expect(body.message).not.toMatch(/file:\/\//)
+    } finally {
+      console.error = consoleSpy
+    }
   })
 })
