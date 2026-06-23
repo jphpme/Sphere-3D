@@ -315,12 +315,18 @@ interface ChipOption {
  * {@link onToggle} with the value; the caller decides how to mutate
  * filter state and re-render.
  */
+/** Above this many chips a group collapses to a 2-row preview with a
+ *  "Show more" toggle, so a long tag cloud can't push the dataset
+ *  list off the browse panel on first load. */
+const CHIP_CLAMP_THRESHOLD = 12
+
 function renderChipGroup(
   facet: string,
   groupLabel: string,
   options: readonly ChipOption[],
   active: ReadonlySet<string>,
   ariaLabel: string,
+  clamp?: { clamped: boolean; moreLabel: string; lessLabel: string },
 ): string {
   if (options.length === 0) return ''
   const chips = options
@@ -329,10 +335,16 @@ function renderChipGroup(
       return `<button type="button" class="browse-chip${isActive ? ' active' : ''}" data-facet="${escapeAttr(facet)}" data-value="${escapeAttr(o.value)}" aria-pressed="${isActive}">${escapeHtml(o.label)}</button>`
     })
     .join('')
+  const canClamp = !!clamp && options.length > CHIP_CLAMP_THRESHOLD
+  const rowClampClass = canClamp && clamp!.clamped ? ' is-clamped' : ''
+  const toggle = canClamp
+    ? `<button type="button" class="browse-chip-rail-toggle" data-chip-toggle="${escapeAttr(facet)}" aria-expanded="${!clamp!.clamped}">${escapeHtml(clamp!.clamped ? clamp!.moreLabel : clamp!.lessLabel)}</button>`
+    : ''
   return `
     <div class="browse-filter-group">
       <div class="browse-filter-label">${escapeHtml(groupLabel)}</div>
-      <div class="browse-chip-row" role="group" aria-label="${escapeAttr(ariaLabel)}">${chips}</div>
+      <div class="browse-chip-row${rowClampClass}" role="group" aria-label="${escapeAttr(ariaLabel)}">${chips}</div>
+      ${toggle}
     </div>`
 }
 
@@ -881,6 +893,10 @@ export function showBrowseUI(
     loadSectionOpenState(),
     bootEffectiveState,
   )
+  // Whether the Category & content chip cloud is expanded past its
+  // 2-row preview. Persists across re-renders within a panel session
+  // (defaults to clamped each time the panel opens).
+  let chipRailExpanded = false
 
   // ----- Filter rail render -----
 
@@ -944,6 +960,7 @@ export function showBrowseUI(
         tagOptions,
         categoryActive,
         t('browse.filter.tags.aria'),
+        { clamped: !chipRailExpanded, moreLabel: t('browse.filter.tags.more'), lessLabel: t('browse.filter.tags.less') },
       ),
     ))
 
@@ -1052,6 +1069,20 @@ export function showBrowseUI(
         sectionHeader.setAttribute('aria-expanded', String(nextOpen))
         const indicator = sectionHeader.querySelector('.browse-filter-section-indicator')
         if (indicator) indicator.textContent = nextOpen ? '▾' : '▸'
+        return
+      }
+      // Chip-rail "Show more / Show fewer" toggle ? flips the 2-row
+      // clamp in place (same pattern as the section header so the
+      // rail isn't re-rendered/thrashed on toggle).
+      const railToggle = target.closest('[data-chip-toggle]') as HTMLElement | null
+      if (railToggle) {
+        e.preventDefault()
+        const nextExpanded = !chipRailExpanded
+        chipRailExpanded = nextExpanded
+        const group = railToggle.closest('.browse-filter-group')
+        group?.querySelector('.browse-chip-row')?.classList.toggle('is-clamped', !nextExpanded)
+        railToggle.setAttribute('aria-expanded', String(nextExpanded))
+        railToggle.textContent = nextExpanded ? t('browse.filter.tags.less') : t('browse.filter.tags.more')
         return
       }
       const chip = target.closest('[data-facet]') as HTMLElement | null

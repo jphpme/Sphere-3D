@@ -378,6 +378,41 @@ body.browse-view-map .browse-title {
     outline-offset: 1px;
 }
 
+/* Chip-rail clamp ? the Category & content tag cloud collapses to a
+   ~2-row preview on first load so it can't push the dataset list off
+   the panel. `is-clamped` is toggled in place by the rail's
+   "Show more / Show fewer" button (see browseUI.ts). */
+.browse-chip-row.is-clamped {
+    /* 2 full chip rows (?3.6rem at ui-scale 1) + a 0.9rem fade
+       zone so the clip reads as "more below" without eating the
+       second visible row. */
+    max-height: calc(4.5rem * var(--ui-scale));
+    overflow: hidden;
+    -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 0.9rem * var(--ui-scale)), transparent);
+    mask-image: linear-gradient(to bottom, #000 calc(100% - 0.9rem * var(--ui-scale)), transparent);
+}
+
+.browse-chip-rail-toggle {
+    align-self: flex-start;
+    margin-top: calc(0.35rem * var(--ui-scale));
+    padding: calc(0.2rem * var(--ui-scale)) calc(0.55rem * var(--ui-scale));
+    border: 1px solid var(--white-o15);
+    border-radius: var(--component-browse-chip-radius);
+    background: transparent;
+    color: var(--color-accent);
+    font-size: var(--component-browse-chip-size);
+    font-family: inherit;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+.browse-chip-rail-toggle:hover {
+    background: var(--white-o10);
+}
+.browse-chip-rail-toggle:focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 1px;
+}
+
 /* Quality & availability toggle row — boolean chips share a
    distinct accent treatment so users distinguish a "set this" chip
    from a "add to the multi-select" chip. */
