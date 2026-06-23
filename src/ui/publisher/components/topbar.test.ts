@@ -175,7 +175,7 @@ describe('renderTopbar', () => {
   it('mounts the back-to-Terraviz link with the correct aria-label and href', () => {
     renderTopbar(host, router)
     const back = host.querySelector<HTMLAnchorElement>('.publisher-topbar-back')
-    expect(back?.getAttribute('aria-label')).toBe('Back to Terraviz')
+    expect(back?.getAttribute('aria-label')).toBe('Back to AYNI')
     expect(back?.getAttribute('href')).toBe('/')
   })
 

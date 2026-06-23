@@ -50,10 +50,10 @@ describe('i18n runtime', () => {
 
     it('falls back to English when the active locale is missing the key', () => {
       // Empty Spanish bundle → resolution falls through to the
-      // baked-in `enMessages` (whose `app.title` is "Terraviz" once
+      // baked-in `enMessages` (whose `app.title` is "AYNI" once
       // Wave 1 populated en.json).
       __installMessagesForTests('es', {})
-      expect(t('app.title' as never)).toBe('Terraviz')
+      expect(t('app.title' as never)).toBe('AYNI')
     })
 
     it('interpolates params when supplied', () => {
