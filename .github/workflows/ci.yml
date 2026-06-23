@@ -68,14 +68,15 @@ jobs:
       - run: npm ci
       - run: npm run build
         env:
-          # SOS deployment ships 1.5 (Â§7.1) as the first-launch UI
+          # SOS deployment ships 1.5 (Ã‚Â§7.1) as the first-launch UI
           # size for its kiosk audience. Set as a GitHub Variable
-          # (Settings â†’ Environments â†’ production â†’ Variables);
+          # (Settings Ã¢â€ â€™ Environments Ã¢â€ â€™ production Ã¢â€ â€™ Variables);
           # unset evaluates to '' which uiScaleService rejects and
           # falls through to 1.0, so non-production builds boot at
           # the universal default.
           VITE_DEFAULT_UI_SCALE: ${{ vars.VITE_DEFAULT_UI_SCALE }}
           VITE_REALTIME_DASH_BASE_URL: ${{ vars.VITE_REALTIME_DASH_BASE_URL }}
+          VITE_CATALOG_SOURCE: ${{ vars.VITE_CATALOG_SOURCE }}
       - uses: actions/upload-artifact@v4
         with:
           name: dist
@@ -90,15 +91,15 @@ jobs:
     environment:
       name: ${{ github.ref == 'refs/heads/main' && 'production' || 'preview' }}
       # Production URL shown in GitHub's Deployments UI / the PR
-      # "deployed" badge. Cosmetic only â€” does not affect where
+      # "deployed" badge. Cosmetic only Ã¢â‚¬â€ does not affect where
       # wrangler deploys (that's --project-name below). Sourced from
       # the TERRAVIZ_SERVER *Variable* so forks pick up their own
       # hostname without editing this file. NOTE: the `secrets` context
       # is not available in `environment.url` (GitHub rejects it), so
-      # this must be a Variable (Settings â†’ Variables, repo or the
+      # this must be a Variable (Settings Ã¢â€ â€™ Variables, repo or the
       # `production` Environment), not the secret transcode-hls.yml
       # reads. Set it to the same value, e.g. https://terraviz.test.gsl.noaa.gov.
-      # Unset â†’ '' (no link rendered).
+      # Unset Ã¢â€ â€™ '' (no link rendered).
       url: ${{ github.ref == 'refs/heads/main' && 'https://vr.ayni.eu.com/' || '' }}
     steps:
       - uses: actions/checkout@v4
@@ -111,22 +112,23 @@ jobs:
       - run: npm ci
       - run: npm run build
         env:
-          # Same passthrough as the build job above â€” the deploy
+          # Same passthrough as the build job above Ã¢â‚¬â€ the deploy
           # job re-runs the build so the production bundle carries
           # the production-environment Variables (1.5 for the SOS
           # deploy, '' / 1.0 for preview).
           VITE_DEFAULT_UI_SCALE: ${{ vars.VITE_DEFAULT_UI_SCALE }}
           VITE_REALTIME_DASH_BASE_URL: ${{ vars.VITE_REALTIME_DASH_BASE_URL }}
+          VITE_CATALOG_SOURCE: ${{ vars.VITE_CATALOG_SOURCE }}
       # Apply pending CATALOG_DB migrations to the REMOTE before the new
       # Functions go live, so additive schema (new tables/columns) is
       # present when the new code lands. `wrangler d1 migrations apply`
-      # is idempotent â€” it tracks applied files in `d1_migrations` and
+      # is idempotent Ã¢â‚¬â€ it tracks applied files in `d1_migrations` and
       # only runs pending ones, so re-running every deploy is a no-op
       # when current.
       #
       # CATALOG_DB only. We deliberately do NOT auto-apply FEEDBACK_DB:
       # its migrations_dir is the repo-root `migrations/`, which also
-      # holds the generated `catalog-schema.sql` *snapshot* â€” wrangler
+      # holds the generated `catalog-schema.sql` *snapshot* Ã¢â‚¬â€ wrangler
       # would treat that snapshot as a feedback "migration" and try to
       # create catalog tables in the feedback DB. CATALOG_DB's dir is
       # `migrations/catalog/` (no snapshot), so it's clean. The two
@@ -141,8 +143,8 @@ jobs:
       # before the code merges. Never run this on the preview path.
       #
       # OPT-IN: off by default. Set the repo/Environment variable
-      # ENABLE_D1_MIGRATE=1 to turn it on â€” and only after granting the
-      # CI token **D1:Edit** (Account â†’ D1 â†’ Edit). A deploy-only token
+      # ENABLE_D1_MIGRATE=1 to turn it on Ã¢â‚¬â€ and only after granting the
+      # CI token **D1:Edit** (Account Ã¢â€ â€™ D1 Ã¢â€ â€™ Edit). A deploy-only token
       # produces a Cloudflare 7403/7500 here and would block the
       # deploy, so the safe default is off (forks aren't broken out of
       # the box). See docs/SELF_HOSTING.md.
@@ -174,7 +176,7 @@ jobs:
           # wrangler errors: under `bash -e` the command substitution aborts the
           # script before the subsequent `echo "$DEPLOY_OUTPUT"` runs, so failed
           # deploys surfaced only as "Process completed with exit code 1" with no
-          # visible error. Piping through `tee` fixes that â€” output reaches the log
+          # visible error. Piping through `tee` fixes that Ã¢â‚¬â€ output reaches the log
           # before the step dies, and `set -o pipefail` keeps the step failing on
           # wrangler errors.
           DEPLOY_LOG=$(mktemp)
