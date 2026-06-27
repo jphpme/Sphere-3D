@@ -689,14 +689,16 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
       }
     }
   }
-  const placement = isAr ? createVrPlacement(THREE_, hitTestSource) : null
+  const placement = createVrPlacement(THREE_, isAr ? 'ar' : 'vr', hitTestSource)
+  // AR reveals the Place button only when a hit-test source backs
+  // it; VR always has a gaze ray to project, so the button always
+  // shows.
+  const placementAvailable = isAr ? !!hitTestSource : true
   if (placement) {
     scene.scene.add(placement.reticleGroup)
+    scene.scene.add(placement.railGroup)
     scene.scene.add(placement.placeButtonMesh)
-    // Reveal the Place button only if we actually have a hit-test
-    // source to back it up. Without one, tapping it would be a
-    // no-op and confusing.
-    if (hitTestSource) {
+    if (placementAvailable) {
       placement.placeButtonMesh.visible = true
     }
   }
@@ -968,24 +970,49 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
       placement?.setPlacing(!placement.isPlacing())
     },
     onPlaceConfirm: () => {
-      const hit = placement?.getReticlePosition()
-      if (!hit) return
+      if (!placement) return
+      // Position step → advance to the height step. No globe move
+      // yet; the rail appears and the user picks a height.
+      if (placement.getStep() === 'position') {
+        placement.advanceStep()
+        return
+      }
+      // Height step → finalise. Read the combined base XZ + chosen
+      // height. Fall back to the live reticle if the height step
+      // somehow has no value (defensive).
+      const target = placement.getPlacementPosition()
+        ?? placement.getReticlePosition()
+      if (!target) return
       // Move the globe right away so the visual response is
       // immediate. The anchor creation (below) is async; if it
       // succeeds, per-frame anchor-pose tracking will take over
       // the globe's position next frame with no visible jump
       // since the anchor's pose matches the hit point we just set.
-      const target = liftedPlacementPosition(THREE_, hit, scene.globe.scale.x)
+      // Surface-resting lift applies only in AR (VR placement
+      // already carries the chosen height; VR has no surface to
+      // rest on).
+      if (isAr) {
+        liftedPlacementPosition(THREE_, target, scene.globe.scale.x, target)
+      }
       scene.globe.position.copy(target)
-      placement?.setPlacing(false)
+      placement.setPlacing(false)
 
       // Create a system-tracked anchor from the raw hit-test
       // result. The anchor stays bolted to the real surface even
       // when the local-floor coord frame shifts (which happens
-      // every new session). Replaces any previous anchor.
-      const hitResult = placement?.getLastHitTestResult()
+      // every new session). Replaces any previous anchor. VR has
+      // no hit-test result (no real geometry), so it skips
+      // anchoring entirely and keeps the placed world position.
+      const hitResult = placement.getLastHitTestResult()
       const createFn = hitResult?.createAnchor
-      if (!hitResult || !createFn) return
+      if (!hitResult || !createFn) {
+        emit({
+          event_type: 'vr_placement',
+          layer_id: ctx.getDatasetId() ?? '',
+          persisted: false,
+        })
+        return
+      }
 
       void createFn.call(hitResult).then(async anchor => {
         // Swap out any prior anchor. Only one active at a time —
@@ -1130,6 +1157,8 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
   const scratchPos = new THREE_.Vector3()
   /** Scratch vector reused every frame by the billboard-lookAt block below. */
   const scratchCamPos = new THREE_.Vector3()
+  /** Headset forward direction, reused by the VR gaze + height placement path. */
+  const scratchGazeDir = new THREE_.Vector3()
   // `lastTime` starts null so the very first frame uses its own
   // timestamp as "previous" and computes a 0-duration delta —
   // rather than mixing XR's frame timestamp (first callback arg)
@@ -1149,10 +1178,32 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     if (!active) return
     sessionTelemetry.frames++
 
-    // Spatial placement: per-frame hit-test against the room. Only
-    // does work while in Place mode; cheap when idle.
-    if (active.placement && frame && active.refSpace) {
-      active.placement.update(frame, active.refSpace)
+    // Spatial placement — per-frame work, but only while in Place mode.
+    // Two position sources, one height step:
+    //   - AR + hit-test  → update() projects the controller reticle.
+    //   - VR (no geometry) → updateGaze() projects the headset ray
+    //     onto a virtual floor.
+    //   - height step (either mode) → updateHeight() maps headset
+    //     pitch to a vertical position along the rail.
+    if (active.placement) {
+      if (active.refSpace && frame && active.placement.getStep() === 'position') {
+        active.placement.update(frame, active.refSpace)
+      }
+      // VR gaze position step — no XR frame/refSpace needed, the
+      // Three.js camera already carries the headset world pose.
+      if (!isAr && active.placement.getStep() === 'position') {
+        active.camera.getWorldPosition(scratchCamPos)
+        active.camera.getWorldDirection(scratchGazeDir)
+        active.placement.updateGaze(scratchCamPos, scratchGazeDir)
+      }
+      // Height step — both modes use headset pitch.
+      if (active.placement.getStep() === 'height') {
+        active.camera.getWorldDirection(scratchGazeDir)
+        const elevation = Math.asin(
+          Math.max(-1, Math.min(1, scratchGazeDir.y)),
+        )
+        active.placement.updateHeight(elevation)
+      }
     }
 
     // Sync globe position from the system-tracked anchor, if any.
@@ -1429,6 +1480,7 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     }
     if (a.placement) {
       a.scene.scene.remove(a.placement.reticleGroup)
+      a.scene.scene.remove(a.placement.railGroup)
       a.scene.scene.remove(a.placement.placeButtonMesh)
       a.placement.dispose()
     }

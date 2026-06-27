@@ -21,6 +21,12 @@
  */
 
 import type * as THREE from 'three'
+import {
+  HEIGHT_MAX,
+  HEIGHT_MIN,
+  elevationToHeight,
+  rayPlaneXZ,
+} from './vrHeightControl'
 
 // --- Reticle dimensions ---
 /** Outer radius of the reticle ring. ~7 cm reads well at floor distance. */
@@ -41,8 +47,30 @@ const PLACE_BUTTON_CANVAS_SIZE = 256
  * half a metre above the surface so the visible bottom rests on
  * the table. The actual lift is scaled by the globe's current
  * uniform scale at placement time — see `liftedPlacementPosition`.
+ *
+ * Only applied in AR once placement is finalised; the height step
+ * owns the Y during interactive placement.
  */
 const PLACE_LIFT_Y = 0.5
+
+/**
+ * Y coordinate of the virtual floor plane used by VR gaze placement.
+ * In the `local-floor` reference space y=0 is the real floor, so
+ * gaze projects onto the ground just like an AR hit-test would. In
+ * the `local` (no floor) space y=0 is the head origin; we still
+ * project onto y=0 there, which lands the globe around knee/lap
+ * height — acceptable since the user immediately adjusts height in
+ * step 2.
+ */
+const VR_GAZE_FLOOR_Y = 0
+
+// --- Height rail (vertical indicator shown during the height step) ---
+/** Total height of the rail. Spans the full placeable height band. */
+const RAIL_HEIGHT = HEIGHT_MAX - HEIGHT_MIN
+/** Radius of the slider marker that rides up/down the rail. */
+const RAIL_MARKER_RADIUS = 0.02
+/** Thin rail line radius. */
+const RAIL_TUBE = 0.003
 
 /**
  * Where the floating Place button sits relative to the globe.
@@ -53,27 +81,90 @@ const PLACE_BUTTON_POSITION = { x: 0, y: 1.18, z: -1.0 }
 
 const ACCENT_COLOR = 0x4da6ff // --color-accent
 
+/**
+ * Placement sub-step. Placement is no longer a single confirm; it
+ * advances through two stages so the user controls height
+ * separately from horizontal location.
+ *
+ * - `'position'` — picking the XZ location. AR: controller hit-test
+ *   reticle on real surfaces. VR: gaze ray projected onto a virtual
+ *   floor plane (no real geometry). Trigger advances to `'height'`.
+ * - `'height'` — XZ locked, the user tilts their head to raise/lower
+ *   the globe along a visible rail. Trigger finalises placement.
+ */
+export type VrPlacementStep = 'position' | 'height'
+
 export interface VrPlacementHandle {
   /** Reticle group — caller adds to scene. Hidden until in Place mode + hit available. */
   readonly reticleGroup: THREE.Group
+  /** Height-rail group — caller adds to scene. Visible only during the height step. */
+  readonly railGroup: THREE.Group
   /** Floating Place button mesh — caller adds to scene. Used as a raycast target. */
   readonly placeButtonMesh: THREE.Mesh
-  /** True while user is in Place mode. */
+  /** True while user is in Place mode (either step). */
   isPlacing(): boolean
-  /** Programmatically toggle Place mode. */
+  /** Programmatically toggle Place mode. Resets to the position step. */
   setPlacing(active: boolean): void
+  /** Current sub-step. `'position'` until the first confirm, then `'height'`. */
+  getStep(): VrPlacementStep
   /**
-   * Per-frame update — call from the VR session render loop. Reads
-   * a hit-test result from the controller's viewer-space ray and
-   * positions the reticle there. No-op when not in Place mode or
-   * when hit-test is unavailable.
+   * Advance the placement state machine. From `'position'` → freezes
+   * the chosen XZ and switches to `'height'`. From `'height'` → no-op
+   * (the caller reads {@link getPlacementPosition} and finalises).
+   * Safe to call when not placing.
+   */
+  advanceStep(): void
+  /**
+   * Per-frame update for AR sessions — call from the VR session
+   * render loop. Reads a hit-test result from the controller's
+   * viewer-space ray and positions the reticle there. Drives the
+   * `'position'` step. No-op when not in Place mode, in the height
+   * step, or when hit-test is unavailable.
    */
   update(frame: XRFrame, refSpace: XRReferenceSpace): void
   /**
+   * Per-frame update for VR (non-AR) sessions. Projects the headset
+   * gaze ray onto a virtual floor plane to drive the `'position'`
+   * step. The caller supplies the headset world pose each frame
+   * (origin + unit forward). No-op when not in Place mode or when
+   * in the height step.
+   */
+  updateGaze(
+    cameraOrigin: { x: number; y: number; z: number },
+    cameraForward: { x: number; y: number; z: number },
+  ): void
+  /**
+   * Per-frame update for the height step. Maps the headset pitch
+   * (radians, up positive) to a globe height and moves the height
+   * marker along the rail. No-op unless in the `'height'` step.
+   */
+  updateHeight(elevationRad: number): void
+  /**
+   * Current elevation-driven height (metres above floor), or null
+   * when not in the height step. Exposed for analytics/telemetry.
+   */
+  getHeight(): number | null
+  /**
+   * The frozen horizontal base position captured when the position
+   * step was confirmed, or null if placement hasn't advanced. The
+   * height step moves the globe vertically above this point.
+   */
+  getBasePosition(): THREE.Vector3 | null
+  /**
    * Last successful reticle world position, or null if none. Used
-   * by the placement-confirm flow to know where to put the globe.
+   * during the position step to know where the reticle currently is.
    */
   getReticlePosition(): THREE.Vector3 | null
+  /**
+   * Final globe-centre position for the in-progress placement, or
+   * null when there is no valid placement. Combines the frozen base
+   * XZ with the elevation-driven height (height step) — or the
+   * reticle position (position step, before height is chosen).
+   *
+   * The caller applies the surface-resting lift via
+   * {@link liftedPlacementPosition} on finalise.
+   */
+  getPlacementPosition(): THREE.Vector3 | null
   /**
    * Latest XR hit-test result from the most recent successful
    * reticle frame, or null. Used by vrSession to create a
@@ -143,8 +234,18 @@ function drawPlaceButton(ctx: CanvasRenderingContext2D, active: boolean): void {
   ctx.fill()
 }
 
+/**
+ * Whether the placement handle is backed by real-world geometry
+ * (AR hit-test) or a virtual floor (VR gaze). The factory needs to
+ * know so it can reveal the Place button only when a position
+ * source actually exists: AR requires a hit-test source; VR always
+ * has a gaze ray, so the button always shows.
+ */
+export type VrPlacementMode = 'ar' | 'vr'
+
 export function createVrPlacement(
   THREE_: typeof THREE,
+  mode: VrPlacementMode,
   hitTestSource: XRHitTestSource | null,
 ): VrPlacementHandle {
   // --- Reticle ---
@@ -212,28 +313,92 @@ export function createVrPlacement(
   )
   placeButtonMesh.renderOrder = 10
   // Hidden by default — vrSession reveals it once it confirms
-  // hit-test is supported on this session.
+  // hit-test is supported on this session (AR) or always for VR.
   placeButtonMesh.visible = false
+
+  // --- Height rail ---
+  // Vertical line + slider marker shown during the height step so
+  // the user has a visible target for "how high am I placing". The
+  // rail is repositioned to the frozen base XZ each time the
+  // position step is confirmed; only its marker moves per-frame.
+  const railGroup = new THREE_.Group()
+
+  const railGeom = new THREE_.CylinderGeometry(RAIL_TUBE, RAIL_TUBE, RAIL_HEIGHT, 8)
+  const railMat = new THREE_.MeshBasicMaterial({
+    color: ACCENT_COLOR,
+    transparent: true,
+    opacity: 0.5,
+    depthTest: false,
+  })
+  const railLine = new THREE_.Mesh(railGeom, railMat)
+  // Cylinder is centred on its midpoint; shift so its base sits at
+  // the group origin (the floor point under the chosen XZ).
+  railLine.position.y = RAIL_HEIGHT / 2
+  railGroup.add(railLine)
+
+  const markerGeom = new THREE_.SphereGeometry(RAIL_MARKER_RADIUS, 16, 16)
+  const markerMat = new THREE_.MeshBasicMaterial({
+    color: 0xffffff,
+    transparent: true,
+    opacity: 0.95,
+    depthTest: false,
+  })
+  const railMarker = new THREE_.Mesh(markerGeom, markerMat)
+  railGroup.add(railMarker)
+
+  railGroup.renderOrder = 11 // alongside the reticle
+  railGroup.visible = false
 
   // --- State ---
   let placing = false
+  /** Current placement sub-step. Resets to 'position' on setPlacing(true). */
+  let step: VrPlacementStep = 'position'
   /**
-   * Latest hit position from per-frame hit-test. Single allocated
-   * Vector3 reused each frame via `.copy()` — previous version
-   * re-allocated with `scratch.clone()` every frame during Place
-   * mode, which shows up as GC churn during a long placement
-   * hold. `lastHitValid` tracks whether the stored pose is current.
+   * Latest hit position from per-frame hit-test (AR) or gaze
+   * projection (VR). Single allocated Vector3 reused each frame via
+   * `.copy()` — previous version re-allocated with `scratch.clone()`
+   * every frame during Place mode, which shows up as GC churn during
+   * a long placement hold. `lastHitValid` tracks whether the stored
+   * pose is current.
    */
   const lastHitPosition = new THREE_.Vector3()
   let lastHitValid = false
   /**
    * The raw XR hit-test result from the most recent frame. Kept so
    * vrSession can call `createAnchor()` on it at placement-confirm
-   * time. Cleared when the reticle loses its surface.
+   * time. Cleared when the reticle loses its surface. VR sessions
+   * never populate this (no real geometry to anchor against).
    */
   let lastHitResult: XRHitTestResult | null = null
-  /** Scratch vector for hit-test result extraction. */
+  /** Scratch vector for hit-test / gaze result extraction. */
   const scratch = new THREE_.Vector3()
+
+  /**
+   * Frozen horizontal base point captured when the position step is
+   * confirmed. The height step moves the globe vertically above
+   * this XZ. Null until the position step advances.
+   */
+  const basePosition = new THREE_.Vector3()
+  let baseValid = false
+  /**
+   * Elevation-driven height (metres above floor) during the height
+   * step. Null outside the height step. Read by getPlacementPosition
+   * to combine with the frozen base XZ.
+   */
+  let heightValue: number | null = null
+
+  function hidePositionVisuals(): void {
+    reticleGroup.visible = false
+    lastHitValid = false
+    lastHitResult = null
+  }
+
+  function resetToPositionStep(): void {
+    step = 'position'
+    baseValid = false
+    heightValue = null
+    railGroup.visible = false
+  }
 
   function refreshPlaceButtonAppearance(): void {
     drawPlaceButton(placeCtx, placing)
@@ -242,6 +407,7 @@ export function createVrPlacement(
 
   return {
     reticleGroup,
+    railGroup,
     placeButtonMesh,
 
     isPlacing() {
@@ -252,17 +418,49 @@ export function createVrPlacement(
       if (placing === active) return
       placing = active
       refreshPlaceButtonAppearance()
-      if (!active) {
+      if (active) {
+        // Entering Place mode always starts at the position step.
+        resetToPositionStep()
         reticleGroup.visible = false
-        lastHitValid = false
-        lastHitResult = null
+      } else {
+        hidePositionVisuals()
+        resetToPositionStep()
       }
     },
 
+    getStep() {
+      return step
+    },
+
+    advanceStep() {
+      if (!placing) return
+      if (step === 'position') {
+        // Freeze the current reticle XZ as the placement base.
+        const reticle = lastHitValid ? lastHitPosition : null
+        if (!reticle) return // nothing aimed at yet; ignore the tap
+        basePosition.copy(reticle)
+        baseValid = true
+        step = 'height'
+        // Seed the height from the reticle's own Y so there's no
+        // visible jump when the rail appears — the globe starts at
+        // wherever the surface was, then the user adjusts.
+        heightValue = Math.max(HEIGHT_MIN, Math.min(HEIGHT_MAX, reticle.y))
+        // Park the rail at the frozen base and show it.
+        railGroup.position.set(basePosition.x, 0, basePosition.z)
+        railMarker.position.y = heightValue
+        railGroup.visible = true
+        // Reticle is no longer the active affordance.
+        hidePositionVisuals()
+      }
+      // From 'height' the caller reads getPlacementPosition and
+      // finalises — no state transition here.
+    },
+
     update(frame, refSpace) {
-      // Only do hit-test work while in Place mode — saves the
-      // per-frame WebXR call when the user isn't actively placing.
-      if (!placing || !hitTestSource) {
+      // Only do hit-test work while in the position step — saves
+      // the per-frame WebXR call otherwise. The height step is
+      // driven by updateHeight instead.
+      if (!placing || step !== 'position' || !hitTestSource) {
         if (reticleGroup.visible) reticleGroup.visible = false
         return
       }
@@ -270,16 +468,12 @@ export function createVrPlacement(
       if (hits.length === 0) {
         // Lost the surface — keep reticle hidden, lastHitPosition
         // stays null so a confirm tap won't place spuriously.
-        reticleGroup.visible = false
-        lastHitValid = false
-        lastHitResult = null
+        hidePositionVisuals()
         return
       }
       const pose = hits[0].getPose(refSpace)
       if (!pose) {
-        reticleGroup.visible = false
-        lastHitValid = false
-        lastHitResult = null
+        hidePositionVisuals()
         return
       }
       // Keep the raw hit-test result around — vrSession will call
@@ -297,10 +491,55 @@ export function createVrPlacement(
       lastHitValid = true
     },
 
+    updateGaze(cameraOrigin, cameraForward) {
+      if (!placing || step !== 'position') {
+        if (reticleGroup.visible) reticleGroup.visible = false
+        return
+      }
+      const hit = rayPlaneXZ(cameraOrigin, cameraForward, VR_GAZE_FLOOR_Y)
+      if (!hit) {
+        // Looking up/level — no floor crossing ahead.
+        hidePositionVisuals()
+        return
+      }
+      scratch.set(hit.x, VR_GAZE_FLOOR_Y, hit.z)
+      reticleGroup.position.copy(scratch)
+      reticleGroup.visible = true
+      lastHitPosition.copy(scratch)
+      lastHitValid = true
+      // VR gaze has no XR hit-test result, so lastHitResult stays
+      // null — vrSession's anchor path is AR-only already.
+    },
+
+    updateHeight(elevationRad) {
+      if (!placing || step !== 'height' || heightValue === null) return
+      heightValue = elevationToHeight(elevationRad)
+      railMarker.position.y = heightValue
+    },
+
+    getHeight() {
+      return heightValue
+    },
+
+    getBasePosition() {
+      return baseValid ? basePosition.clone() : null
+    },
+
     getReticlePosition() {
       // Clone here (not per-frame) so callers can safely store the
       // returned Vector3 without worrying about us mutating it the
       // next frame. Called once per placement-confirm tap — cheap.
+      return lastHitValid ? lastHitPosition.clone() : null
+    },
+
+    getPlacementPosition() {
+      if (!placing) return null
+      if (step === 'height' && baseValid && heightValue !== null) {
+        return new THREE_.Vector3(basePosition.x, heightValue, basePosition.z)
+      }
+      // Position step (or height step with no height set yet):
+      // fall back to the live reticle so a hasty confirm still lands
+      // somewhere sensible.
       return lastHitValid ? lastHitPosition.clone() : null
     },
 
@@ -326,6 +565,10 @@ export function createVrPlacement(
       placeGeometry.dispose()
       placeMaterial.dispose()
       placeTexture.dispose()
+      railGeom.dispose()
+      railMat.dispose()
+      markerGeom.dispose()
+      markerMat.dispose()
     },
   }
 }
