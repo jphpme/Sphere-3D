@@ -155,7 +155,8 @@ npm run screenshots:smoke   # gating interaction tests (search, Orbit, nav)
 | `src/services/photorealEarth.ts` | Reusable photoreal Earth factory — diffuse / night lights / specular / atmosphere / clouds / sun / ground shadow with day/night shading; shared by VR view and Orbit character page |
 | `src/services/vrInteraction.ts` | Controller input — surface-pinned drag, two-hand pinch+rotate, thumbstick zoom, flick-to-spin inertia, raycast hit routing |
 | `src/services/vrHud.ts` | In-VR floating HUD — dataset title + play/pause + exit-VR as a CanvasTexture panel with UV hit regions |
-| `src/services/vrPlacement.ts` | AR spatial placement — reticle + Place button; WebXR hit-test to anchor the globe on a real surface |
+| `src/services/vrPlacement.ts` | Spatial placement — reticle + Place button; two-step `position`→`height` machine. AR uses WebXR hit-test to anchor the globe on a real surface; VR (no geometry) projects the headset gaze ray onto a virtual floor |
+| `src/services/vrHeightControl.ts` | Pure math for the placement height step — maps headset pitch to a globe height (elevation→height) and projects a gaze ray onto a horizontal plane (ray→floor XZ); unit-tested, no WebGL dependency |
 | `src/services/vrLoading.ts` | 3D loading scene — orbiting rings, progress bar, status text; fades out when dataset is ready |
 | `src/utils/vrCapability.ts` | Feature detection — `navigator.xr`, `immersive-vr`, `immersive-ar` support — plus `getInputArchetype()` (controller / screen / transient) and `classifyXrDevice(ua, mode)` (UA-based bucket for `vr_session_started.device_class`) |
 | `src/utils/vrPersistence.ts` | WebXR anchor persistent-handle save/load (localStorage) for cross-session placement stability |
@@ -445,11 +446,16 @@ change. Design doc: [`docs/VR_INVESTIGATION_PLAN.md`](docs/VR_INVESTIGATION_PLAN
   Earth-specific decoration is hidden so the data reads uniformly
   across the sphere.
 
-- **Spatial placement (AR only).** `vrPlacement.ts` uses WebXR
-  `hit-test` to let the user point at a real-world surface and tap
-  to anchor the globe there. `vrPersistence.ts` stores the anchor's
-  persistent-handle UUID in localStorage so the globe stays in the
-  same physical spot across sessions (Quest's Meta Anchors extension).
+- **Spatial placement (both modes, two-step).** `vrPlacement.ts`
+  runs a `position`→`height` state machine. AR uses WebXR `hit-test`
+  to let the user point a controller ray at a real-world surface;
+  VR (no real geometry) projects the headset gaze ray onto a
+  virtual floor. The second step lets the user raise/lower the
+  globe by tilting their head (pitch), driven by the pure math in
+  `vrHeightControl.ts`. In AR, `vrPersistence.ts` stores the
+  anchor's persistent-handle UUID in localStorage so the globe
+  stays in the same physical spot across sessions (Quest's Meta
+  Anchors extension); VR has no anchor (no real-world reference).
 
 ### Session-start ordering is subtle
 
