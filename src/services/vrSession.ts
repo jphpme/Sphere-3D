@@ -1086,9 +1086,6 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     if (wantOverlay && !zoomOverlay) {
       zoomOverlay = createVrZoomOverlay({
         onZoom: (raw) => {
-          // Resizable only while a placement is in progress — a
-          // locked globe keeps its size.
-          if (placement && !placement.isPlacing()) return
           const clamped = Math.max(MIN_GLOBE_SCALE, Math.min(MAX_GLOBE_SCALE, raw))
           scene.globe.scale.setScalar(clamped)
         },

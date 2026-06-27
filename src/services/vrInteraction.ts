@@ -1143,20 +1143,6 @@ export function createVrInteraction(
     ctx.globe.quaternion.copy(mode.globeStartQuat).premultiply(deltaQ)
   }
 
-  /**
-   * Whether the globe's scale may be changed right now. Per the
-   * placement UX, the globe is only resizable WHILE a placement is
-   * in progress — once locked it holds its size. On a phone in AR
-   * this is what stops accidental multi-touch (two transient
-   * pointers landing on the globe) from pinch-growing a locked
-   * globe while the user is trying to swipe-rotate it. When there
-   * is no placement handle (a mode with no placement concept at
-   * all), there's no "locked" state, so resizing stays allowed.
-   */
-  function resizeAllowed(): boolean {
-    return !ctx.placement || ctx.placement.isPlacing()
-  }
-
   /** Apply pinch-scale + full rigid-body rotation for the two-hand gesture. */
   function updateTwoHand(mode: Extract<RotationMode, { kind: 'two-hand' }>): void {
     controllers[0].getWorldPosition(p0)
@@ -1167,16 +1153,12 @@ export function createVrInteraction(
     if (currentDistance < 0.001) return
 
     // Pinch zoom: scale is proportional to the distance ratio,
-    // clamped to the globe's configured min/max. Gated to placement
-    // only — a locked globe keeps its size, so a stray second touch
-    // can't grow it while the user swipe-rotates.
-    if (resizeAllowed()) {
-      const scale = Math.max(
-        MIN_GLOBE_SCALE,
-        Math.min(MAX_GLOBE_SCALE, mode.startScale * (currentDistance / mode.startDistance)),
-      )
-      ctx.globe.scale.setScalar(scale)
-    }
+    // clamped to the globe's configured min/max.
+    const scale = Math.max(
+      MIN_GLOBE_SCALE,
+      Math.min(MAX_GLOBE_SCALE, mode.startScale * (currentDistance / mode.startDistance)),
+    )
+    ctx.globe.scale.setScalar(scale)
 
     // Rotation: full rigid-body delta. Earlier version only
     // considered the axis direction between the hands, so wrist
@@ -1392,7 +1374,7 @@ export function createVrInteraction(
         if (Math.abs(signed) > Math.abs(zoomAxis)) zoomAxis = signed
       }
     }
-    if (zoomAxis !== 0 && resizeAllowed()) {
+    if (zoomAxis !== 0) {
       // Capture the start-of-gesture scale on the rising edge so
       // the matching release can report a magnitude that means
       // "scale ratio over the whole gesture", not "ratio for the
