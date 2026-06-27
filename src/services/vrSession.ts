@@ -1196,13 +1196,21 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
         active.camera.getWorldDirection(scratchGazeDir)
         active.placement.updateGaze(scratchCamPos, scratchGazeDir)
       }
-      // Height step — both modes use headset pitch.
+      // Height step — both modes use headset pitch. Drive the globe
+      // LIVE along the chosen height so the user sees it slide as
+      // they tilt their head, instead of a frozen globe that only
+      // jumps on confirm (which read as "nothing locked"). The
+      // chosen XZ is frozen from the position step; only Y moves.
       if (active.placement.getStep() === 'height') {
         active.camera.getWorldDirection(scratchGazeDir)
         const elevation = Math.asin(
           Math.max(-1, Math.min(1, scratchGazeDir.y)),
         )
         active.placement.updateHeight(elevation)
+        const preview = active.placement.getPlacementPosition()
+        if (preview) {
+          active.scene.globe.position.copy(preview)
+        }
       }
     }
 
