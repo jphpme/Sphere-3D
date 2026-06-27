@@ -27,7 +27,7 @@ import { createVrInteraction, type VrInteractionHandle } from './vrInteraction'
 import { createVrLoading, type VrLoadingHandle } from './vrLoading'
 import { createVrZoomOverlay, type VrZoomOverlayHandle } from '../ui/vrZoomOverlay'
 import { MAX_GLOBE_SCALE, MIN_GLOBE_SCALE } from './vrScene'
-import { createVrPlacement, liftedPlacementPosition, type VrPlacementHandle } from './vrPlacement'
+import { createVrPlacement, type VrPlacementHandle } from './vrPlacement'
 import {
   clearPersistedAnchorHandle,
   loadPersistedAnchorHandle,
@@ -714,6 +714,18 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
   // created/restored asynchronously (may land after the first
   // render frame) and then drives the globe position per-frame.
   let currentAnchor: XRAnchor | null = null
+  /**
+   * Height the user chose during placement, expressed as a vertical
+   * offset ABOVE the anchored surface point (metres). Stored at
+   * confirm time and applied each frame in the anchor-sync block so
+   * the globe respects the chosen height instead of being re-pinned
+   * to the surface. Relative to the surface (not the floor) so it
+   * survives local-floor coord-system re-bases just like the anchor.
+   * Unchanged from 0 (surface level) until the first height-step
+   * finalise; restored anchors fall back to surface-level until the
+   * user re-places.
+   */
+  let placementHeightOffset = 0
   if (isAr) {
     const savedHandle = loadPersistedAnchorHandle()
     if (savedHandle) {
@@ -983,17 +995,19 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
       const target = placement.getPlacementPosition()
         ?? placement.getReticlePosition()
       if (!target) return
+      // Capture the chosen height as an offset above the surface so
+      // the per-frame anchor sync keeps it. basePosition.y is the
+      // surface reticle Y frozen in the position step; target.y is
+      // the elevation-driven height. Their difference is portable
+      // across local-floor re-bases (both are in the same space at
+      // confirm time). VR has no anchor, so the offset is unused
+      // there but harmless to compute.
+      const base = placement.getBasePosition()
+      placementHeightOffset = base ? target.y - base.y : 0
       // Move the globe right away so the visual response is
-      // immediate. The anchor creation (below) is async; if it
-      // succeeds, per-frame anchor-pose tracking will take over
-      // the globe's position next frame with no visible jump
-      // since the anchor's pose matches the hit point we just set.
-      // Surface-resting lift applies only in AR (VR placement
-      // already carries the chosen height; VR has no surface to
-      // rest on).
-      if (isAr) {
-        liftedPlacementPosition(THREE_, target, scene.globe.scale.x, target)
-      }
+      // immediate. The anchor creation (below) is async; the anchor
+      // sync applies placementHeightOffset so there's no jump when
+      // tracking takes over.
       scene.globe.position.copy(target)
       placement.setPlacing(false)
 
@@ -1218,21 +1232,19 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     // The anchor's anchorSpace is resolved in local-floor coords
     // each frame — but critically, the system adjusts what
     // "(anchor.x, anchor.y, anchor.z)" means as local-floor gets
-    // re-based, so the globe stays bolted to the real surface.
-    // Lift offset (PLACE_LIFT_Y, owned by vrPlacement) keeps the
-    // visible bottom resting on the surface. Writing directly into
-    // globe.position avoids per-frame allocation.
+    // re-based, so the globe stays bolted to the real surface. The
+    // vertical offset is the height the user chose during placement
+    // (placementHeightOffset), NOT a fixed lift — applying it here
+    // is what makes the height step actually stick in AR. Writing
+    // directly into globe.position avoids per-frame allocation.
     if (currentAnchor && frame && active.refSpace) {
       const anchorPose = frame.getPose(currentAnchor.anchorSpace, active.refSpace)
       if (anchorPose) {
-        // Lift is scaled by globe's current uniform scale so the
-        // visible bottom stays on the real surface even when the
-        // user has zoomed the globe larger or smaller.
-        liftedPlacementPosition(
-          THREE_,
-          anchorPose.transform.position,
-          active.scene.globe.scale.x,
-          active.scene.globe.position,
+        const ap = anchorPose.transform.position
+        active.scene.globe.position.set(
+          ap.x,
+          ap.y + placementHeightOffset,
+          ap.z,
         )
       }
     }
