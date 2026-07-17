@@ -53,6 +53,14 @@ export interface CatalogEnv {
    */
   ACCESS_AUD?: string
   /**
+   * Optional explicit sign-in URL for the public app's account button.
+   * When unset, `/api/v1/account/login` builds the standard Cloudflare
+   * Access login URL from `ACCESS_TEAM_DOMAIN` + `ACCESS_AUD`.
+   * If set, `{return_to}` inside the value is replaced with the encoded
+   * same-origin return URL; otherwise the handler appends `redirect_url`.
+   */
+  ACCOUNT_LOGIN_URL?: string
+  /**
    * Comma-separated list of email domains (e.g.
    * `noaa.gov,zyra-project.org`) whose verified Access user logins
    * auto-promote to `role='admin', is_admin=1, status='active'` on

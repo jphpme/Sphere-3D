@@ -6,6 +6,10 @@ name = "ayni-vr"
 compatibility_date = "2024-12-01"
 pages_build_output_dir = "dist"
 
+[vars]
+REALTIME_FREE_WEEKLY_SECONDS = "1200"
+REALTIME_QUOTA_SEGMENT_SECONDS = "10"
+
 [ai]
 binding = "AI"
 
@@ -97,6 +101,16 @@ id = "cb678d8a3f4d4afda5924d503fa185d3"
 [[kv_namespaces]]
 binding = "CATALOG_KV"
 id = "07b41256ec53465a9211f60b1132c39d"
+
+# Weekly free-tier metering for same-origin realtime DASH playback.
+# `/dash/**` and `/realtime/**` media segment requests decrement this
+# KV-backed allowance; forecast, manifest, thumbnail, legend, and DSA
+# requests are not charged. Wire this binding in the Pages dashboard
+# before enabling the gated realtime catalog in production.
+#
+[[kv_namespaces]]
+binding = "REALTIME_QUOTA_KV"
+id = "fc9ecc345f8a4f078469ceba7d9c78fe"
 
 # R2 bucket for catalog assets (Phase 1b onward) — sphere thumbnails,
 # image data refs, legends, captions, and tour JSON. Stream handles

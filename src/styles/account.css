@@ -1,0 +1,130 @@
+#account-control {
+    position: absolute;
+    top: calc(0.75rem * var(--ui-scale));
+    inset-inline-end: calc(0.75rem * var(--ui-scale));
+    z-index: 12;
+    pointer-events: auto;
+}
+
+#account-control.hidden {
+    display: none;
+}
+
+.account-button {
+    display: inline-flex;
+    align-items: center;
+    gap: calc(0.45rem * var(--ui-scale));
+    min-height: calc(34px * var(--ui-scale));
+    max-width: min(42vw, calc(220px * var(--ui-scale)));
+    padding: calc(0.28rem * var(--ui-scale)) calc(0.65rem * var(--ui-scale));
+    color: var(--color-text-secondary);
+    background: var(--glass-bg-light);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
+    border: 1px solid var(--white-o12);
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+.account-button:hover,
+.account-button[aria-expanded="true"] {
+    color: var(--color-text);
+    background: rgba(30, 30, 40, 0.95);
+    border-color: rgba(77, 166, 255, 0.45);
+}
+
+.account-avatar {
+    display: inline-grid;
+    place-items: center;
+    width: calc(22px * var(--ui-scale));
+    height: calc(22px * var(--ui-scale));
+    border-radius: 999px;
+    color: var(--color-bg);
+    background: var(--color-accent);
+    font-size: calc(0.66rem * var(--ui-scale));
+    font-weight: 700;
+    line-height: 1;
+    flex: 0 0 auto;
+}
+
+.account-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: calc(0.72rem * var(--ui-scale));
+}
+
+.account-popover {
+    position: absolute;
+    top: calc(100% + calc(0.5rem * var(--ui-scale)));
+    inset-inline-end: 0;
+    width: min(calc(260px * var(--ui-scale)), calc(100vw - calc(1.5rem * var(--ui-scale))));
+    padding: calc(0.75rem * var(--ui-scale));
+    color: var(--color-text-secondary);
+    background: rgba(13, 13, 18, 0.94);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    border: 1px solid var(--white-o12);
+    border-radius: 6px;
+    box-shadow: 0 6px 32px rgba(0, 0, 0, 0.45);
+}
+
+.account-popover.hidden {
+    display: none;
+}
+
+.account-popover-title {
+    margin-bottom: calc(0.3rem * var(--ui-scale));
+    color: var(--color-text);
+    font-size: calc(0.78rem * var(--ui-scale));
+    font-weight: 600;
+}
+
+.account-popover-body {
+    margin-bottom: calc(0.65rem * var(--ui-scale));
+    overflow-wrap: anywhere;
+    font-size: calc(0.72rem * var(--ui-scale));
+    line-height: 1.35;
+}
+
+.account-popover-actions {
+    display: flex;
+    justify-content: flex-end;
+}
+
+.account-action {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: calc(30px * var(--ui-scale));
+    padding: calc(0.35rem * var(--ui-scale)) calc(0.65rem * var(--ui-scale));
+    color: var(--color-text-secondary);
+    background: var(--white-o06);
+    border: 1px solid var(--white-o12);
+    border-radius: 6px;
+    text-decoration: none;
+    font: inherit;
+    font-size: calc(0.72rem * var(--ui-scale));
+    cursor: pointer;
+}
+
+.account-action-primary {
+    color: var(--color-bg);
+    background: var(--color-accent);
+    border-color: var(--color-accent);
+}
+
+.account-action:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+}
+
+@media (max-width: 640px) {
+    .account-label {
+        display: none;
+    }
+
+    .account-button {
+        padding-inline: calc(0.36rem * var(--ui-scale));
+    }
+}

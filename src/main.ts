@@ -32,6 +32,7 @@ import {
 } from './services/playlistPlayback'
 import { updateMapControlsPosition } from './ui/mapControlsUI'
 import { initToolsMenu, syncToolsMenuState, syncToolsMenuLayout, pulseBrowseButton } from './ui/toolsMenuUI'
+import { initAccountUI } from './ui/accountUI'
 import { openCreditsPanel } from './ui/creditsPanel'
 import { initChatUI, openChat, openChatSettings, notifyDatasetChanged, showChatTrigger, hideChatTrigger, closeChat, flushPendingGlobeActions } from './ui/chatUI'
 import { loadViewPreferences, saveViewPreferences, type ViewPreferences } from './utils/viewPreferences'
@@ -335,6 +336,7 @@ class InteractiveSphere {
         announce: (msg) => this.announce(msg),
         getCurrentDataset: () => this.appState.currentDataset ?? null,
       })
+      void initAccountUI()
       // Catalog ↔ sphere tab control — only becomes visible when
       // `?catalog=true` is in the URL (see the show/hide calls in
       // the boot branches further below and in

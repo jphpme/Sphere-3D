@@ -455,7 +455,7 @@ function resolveRealtimeDashAsset(pathOrUrl: string | undefined, baseUrl: string
   if (!pathOrUrl) return undefined
   if (/^https?:\/\//i.test(pathOrUrl)) return pathOrUrl
   const clean = pathOrUrl.replace(/^\/+/, '')
-  if (!baseUrl) return `/${clean}`
+  if (!baseUrl) return `/dash/${clean}`
   return new URL(clean, baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`).toString()
 }
 

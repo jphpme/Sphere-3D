@@ -274,6 +274,43 @@ describe('DataService Ã¢â‚¬â€ node-mode', () => {
     expect(fetchStub).toHaveBeenCalledWith('/assets/realtime-dash-datasets.json', expect.anything())
   })
 
+  it('routes relative real-time DASH assets through the same-origin proxy', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL | string) => {
+        const url = String(input)
+        if (url === '/api/v1/catalog') {
+          return new Response(JSON.stringify({ datasets: [] }), { status: 200 })
+        }
+        if (url === '/api/v1/tours') {
+          return new Response(JSON.stringify({ tours: [] }), { status: 200 })
+        }
+        if (url === '/assets/realtime-dash-datasets.json') {
+          return new Response(JSON.stringify({
+            datasets: [{
+              id: 'clouds',
+              display_name: 'Clouds',
+              dataProductType: 'realtime',
+              mpd: 'global/realtime/noaa/clouds/stream.mpd',
+              thumbnail: 'global/realtime/noaa/clouds/thumbnail_small.png',
+            }],
+          }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        }
+        throw new Error(`Unexpected fetch URL: ${url}`)
+      }) as unknown as typeof fetch,
+    )
+
+    const svc = new DataService()
+    const datasets = await svc.fetchDatasets()
+    const realtime = datasets.find(d => d.id === 'R2_DASH_clouds')
+
+    expect(realtime?.dataLink).toBe('/dash/global/realtime/noaa/clouds/stream.mpd')
+    expect(realtime?.thumbnailLink).toBe('/dash/global/realtime/noaa/clouds/thumbnail_small.png')
+  })
+
   it('preserves legacyId from the wire shape and falls back on lookup (1d/T)', async () => {
     // Tour files and other long-lived references hard-code SOS
     // legacy IDs (e.g. INTERNAL_SOS_768); post-cutover the catalog's
