@@ -10,7 +10,9 @@
  *      headset's gaze ray onto a virtual floor plane.
  *   2. **height** — with the XZ location locked, the user tilts
  *      their head up/down to raise or lower the globe along the
- *      vertical axis, then triggers to confirm.
+ *      vertical axis, then triggers to confirm. On handheld AR
+ *      (screen input) a vertical touch-drag serves the same role —
+ *      see {@link dragToHeight}.
  *
  * Everything in this file is pure arithmetic over plain numbers so
  * it can be unit-tested without a WebGL/WebXR context. The render
@@ -63,6 +65,38 @@ export function elevationToHeight(elevationRad: number): number {
   const clamped = Math.max(-HEIGHT_PITCH_RANGE, Math.min(HEIGHT_PITCH_RANGE, elevationRad))
   const t = (clamped + HEIGHT_PITCH_RANGE) / (2 * HEIGHT_PITCH_RANGE) // 0..1
   return HEIGHT_MIN + t * (HEIGHT_MAX - HEIGHT_MIN)
+}
+
+/**
+ * Apply a vertical touch-drag to the current placement height.
+ *
+ * Touch alternative to the device-tilt height control for handheld
+ * AR (the `screen` input class, where the "headset" is the phone
+ * itself and tilt maps awkwardly). A drag spanning the full viewport
+ * height sweeps the whole [{@link HEIGHT_MIN}, {@link HEIGHT_MAX}]
+ * range, so the mapping is resolution-independent: the same gesture
+ * moves the globe the same fraction of the range on any tablet.
+ *
+ * Screen Y grows downward, so dragging UP (negative `dragDeltaYPx`)
+ * raises the globe. The result is clamped to the range endpoints,
+ * matching the tilt path's clamp behaviour.
+ *
+ * @param currentHeight    Height at drag start (metres above floor).
+ * @param dragDeltaYPx     Finger travel since drag start, CSS pixels
+ *   (positive = finger moved down the screen).
+ * @param viewportHeightPx Full viewport height in CSS pixels. Values
+ *   ≤ 0 are degenerate (layout not ready) and leave the height
+ *   unchanged apart from clamping.
+ */
+export function dragToHeight(
+  currentHeight: number,
+  dragDeltaYPx: number,
+  viewportHeightPx: number,
+): number {
+  const clampedBase = Math.max(HEIGHT_MIN, Math.min(HEIGHT_MAX, currentHeight))
+  if (viewportHeightPx <= 0) return clampedBase
+  const delta = (-dragDeltaYPx / viewportHeightPx) * (HEIGHT_MAX - HEIGHT_MIN)
+  return Math.max(HEIGHT_MIN, Math.min(HEIGHT_MAX, clampedBase + delta))
 }
 
 /**

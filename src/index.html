@@ -280,6 +280,13 @@
         </div>
     </div>
 
+    <!-- WebXR DOM-overlay root — passed as `domOverlay.root` on
+         immersive-ar session requests (see vrSession.ts). Chrome on
+         Android renders this element on top of the AR camera feed,
+         which is what makes the zoom slider / placement touch layer
+         visible mid-session. Empty on headsets and outside XR. -->
+    <div id="xr-dom-overlay"></div>
+
     <div id="a11y-announcer" aria-live="polite" aria-atomic="true" class="sr-only"></div>
 
     <script type="module" src="./main.ts"></script>

@@ -106,6 +106,18 @@ export function createVrZoomOverlay(opts: VrZoomOverlayOptions): VrZoomOverlayHa
   slider.addEventListener('input', onInput)
   slider.addEventListener('change', onInput)
 
+  // Taps on overlay DOM elements also fire XR `selectstart` on the
+  // transient screen input unless prevented — during Place mode that
+  // stray select would confirm the placement while the user only
+  // meant to drag the slider. `beforexrselect` + preventDefault is
+  // the dom-overlays spec's standard dedup hook. Listener sits on the
+  // host (not just the slider) so taps on the label / padding are
+  // covered too.
+  const onBeforeXrSelect = (ev: Event): void => {
+    ev.preventDefault()
+  }
+  host.addEventListener('beforexrselect', onBeforeXrSelect)
+
   let mounted = false
 
   // Closed-over helpers so the handle methods don't depend on `this`
@@ -130,6 +142,7 @@ export function createVrZoomOverlay(opts: VrZoomOverlayOptions): VrZoomOverlayHa
   function dispose(): void {
     slider.removeEventListener('input', onInput)
     slider.removeEventListener('change', onInput)
+    host.removeEventListener('beforexrselect', onBeforeXrSelect)
     unmount()
   }
 

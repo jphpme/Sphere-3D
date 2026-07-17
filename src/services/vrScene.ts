@@ -44,6 +44,13 @@ export type { VrDatasetTexture } from './photorealEarth'
  * eye-height for a seated user. `z=-1.5` puts the globe about
  * arm's-length ahead of them.
  *
+ * In immersive-vr this is only the pre-first-frame default: the
+ * render loop repositions the globe in front of the user's actual
+ * gaze on the first frame with a valid viewer pose (see
+ * {@link file://./vrSpawn.ts vrSpawn.ts} and the `pendingGazeSpawn`
+ * block in vrSession.ts). AR keeps this position until its
+ * hit-test / anchor placement flow moves the globe.
+ *
  * On devices that fall back to the `local` reference space (no
  * floor), the origin is the head pose at session start, so `y=0`
  * is already eye level — we override the y-coordinate via

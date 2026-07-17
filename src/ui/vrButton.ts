@@ -22,13 +22,33 @@
  * someone asks.
  */
 
-import { isImmersiveVrSupported, isImmersiveArSupported } from '../utils/vrCapability'
+import { isImmersiveVrSupported, isImmersiveArSupported, isWebXRAvailable } from '../utils/vrCapability'
 import { enterImmersive, loadThree, type VrMode, type VrSessionContext } from '../services/vrSession'
 import { pauseForVrEntry, resumeForVrExit, TELEMETRY_BUILD_ENABLED } from '../analytics'
 import { logger } from '../utils/logger'
 import { t } from '../i18n'
 
 const BUTTON_ID = 'vr-enter-btn'
+
+/**
+ * Surface a short user-visible message in the app's existing
+ * `#error-message` banner (same DOM contract main.ts's `setError`
+ * uses). Self-contained so this module doesn't need a handle on the
+ * app instance; a missing banner (orbit.html, test fixtures) no-ops.
+ */
+function showVrErrorBanner(message: string): void {
+  const errorEl = document.getElementById('error-message')
+  if (!errorEl) return
+  const textEl = document.getElementById('error-text')
+  if (textEl) textEl.textContent = message
+  errorEl.classList.remove('hidden')
+  const dismissBtn = document.getElementById('error-dismiss') as HTMLButtonElement | null
+  if (dismissBtn) {
+    dismissBtn.onclick = () => {
+      errorEl.classList.add('hidden')
+    }
+  }
+}
 
 /**
  * Wire the immersive-mode button. Safe to call even if the button
@@ -58,6 +78,14 @@ export async function initVrButton(ctx: VrSessionContext): Promise<void> {
 
   if (!vrSupported && !arSupported) {
     logger.debug('[VR] Neither immersive mode supported — button stays hidden')
+    // Tell the user WHY there's no enter button instead of hiding it
+    // silently — but only when the browser actually speaks WebXR.
+    // Browsers with no XR API at all (plain 2D desktops, Firefox,
+    // Safari) keep the fully-silent treatment so the banner doesn't
+    // become noise for users who were never going to see the button.
+    if (isWebXRAvailable()) {
+      showVrErrorBanner(t('vr.error.unsupported'))
+    }
     return
   }
 
@@ -117,10 +145,12 @@ export async function initVrButton(ctx: VrSessionContext): Promise<void> {
       // strand the sampler in the paused state.
       if (TELEMETRY_BUILD_ENABLED) resumeForVrExit()
       logger.error(`[VR] enterImmersive(${mode}) failed:`, err)
-      // Surface a simple user-facing message via the title tooltip;
-      // a polished version would route through the app's
-      // #error-message banner.
-      button.title = err instanceof Error ? err.message : t('vr.error.failed', { mode: mode.toUpperCase() })
+      // Surface the failure in the app's error banner (and keep the
+      // title tooltip for hover users) — a silent return leaves the
+      // user tapping a button that appears to do nothing.
+      const message = err instanceof Error ? err.message : t('vr.error.failed', { mode: mode.toUpperCase() })
+      button.title = message
+      showVrErrorBanner(t('vr.error.failed', { mode: mode.toUpperCase() }))
     } finally {
       button.classList.remove('pending')
       button.removeAttribute('aria-busy')

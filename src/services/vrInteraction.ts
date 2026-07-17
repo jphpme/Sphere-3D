@@ -7,7 +7,8 @@
  *
  *   - Trigger-drag while pointing at the globe  → rotate the globe
  *   - Trigger-click on a HUD button             → fire the HUD action
- *   - Grip press on either controller           → exit VR
+ *   - Grip on the globe                         → grab-and-carry (reposition)
+ *   - Grip held (~800 ms) off the globe         → exit VR
  *   - Thumbstick Y on either controller         → zoom the globe
  *
  * The module is intentionally decoupled from session management:
@@ -152,6 +153,16 @@ const VELOCITY_SMOOTHING_ALPHA = 0.4
  */
 const RAY_LENGTH = 5
 
+/**
+ * How long the grip must be held (away from the globe) to exit VR.
+ * The grip button is dual-purpose: a quick squeeze while pointing at
+ * the globe grabs and carries it; a sustained squeeze anywhere else
+ * is the deliberate "get me out" gesture. 800 ms is long enough that
+ * an accidental bump or a short grab-release doesn't exit, short
+ * enough that an intentional exit doesn't feel laggy.
+ */
+const GRIP_EXIT_HOLD_MS = 800
+
 export interface VrInteractionContext {
   scene: THREE.Scene
   /** Primary globe — scene slot 0. Drives rotation + surface-pinned raycast. */
@@ -186,7 +197,7 @@ export interface VrInteractionContext {
   onPlaceButton: () => void
   /** Fired when the user pulls trigger while in Place mode — caller anchors the globe. */
   onPlaceConfirm: () => void
-  /** Fired when the user squeezes the grip — caller ends the session. */
+  /** Fired on a long-press grip (~800 ms hold) away from the globe — caller ends the session. */
   onExit: () => void
   /**
    * Fired when globe manipulation settles: trigger-drag release
@@ -491,6 +502,38 @@ export function createVrInteraction(
   const lastGrabbedGlobe: (THREE.Mesh | null)[] = [null, null]
   /** Current rotation mode — recomputed on every trigger state change. */
   let rotationMode: RotationMode = { kind: 'idle' }
+
+  /**
+   * Grab-and-carry state. Populated on `squeezestart` when the
+   * controller ray is on a globe and cleared on `squeezeend`. While
+   * active, the per-frame `update` writes `globe.position` so the
+   * world offset captured at grab time stays pinned under the
+   * controller — position only; rotation / pinch-scale are untouched
+   * and keep working alongside a carry.
+   *
+   * Deliberate simplifications:
+   *   - The offset is measured to the PRIMARY globe's center even
+   *     when the ray hit a secondary — the arc follows the primary
+   *     every frame in scene.update(), so the whole layout carries
+   *     rigidly together.
+   *   - First grab wins: squeezing the second grip while a carry is
+   *     active is ignored (no two-hand carry math).
+   */
+  type CarryState =
+    | { kind: 'idle' }
+    | {
+        kind: 'carry'
+        controllerIndex: 0 | 1
+        /** World offset from controller origin to primary globe center, captured at grab. */
+        grabOffset: THREE.Vector3
+      }
+  let carry: CarryState = { kind: 'idle' }
+  /**
+   * Per-controller long-press exit deadline (performance.now() ms).
+   * Armed on `squeezestart` that did NOT land on the globe; fires
+   * `onExit` once the deadline passes, disarmed on `squeezeend`.
+   */
+  const gripExitDeadline: (number | null)[] = [null, null]
 
   /**
    * Running track of the globe's angular velocity during single +
@@ -874,14 +917,56 @@ export function createVrInteraction(
     return uv ? uv.y : null
   }
 
+  /**
+   * Subtle haptic tick on the controller that started a gesture.
+   * `hapticActuators` comes from the WebXR Gamepads module, not the
+   * standard Gamepad API, so it needs the repo's `as unknown as`
+   * cast pattern; everything is guarded because screen input has no
+   * gamepad at all and some controllers lack actuators. Failures
+   * (unsupported effect, rejected promise) are swallowed — haptics
+   * are garnish, never worth an exception.
+   */
+  function pulseHaptic(index: 0 | 1, intensity = 0.5, durationMs = 30): void {
+    const gp = inputSources[index]?.gamepad
+    if (!gp) return
+    const actuators = (gp as unknown as {
+      hapticActuators?: ReadonlyArray<{
+        pulse?: (value: number, duration: number) => unknown
+      }>
+    }).hapticActuators
+    const pulse = actuators?.[0]?.pulse
+    if (!pulse) return
+    try {
+      const result = pulse.call(actuators![0], intensity, durationMs)
+      // `pulse` returns a Promise<boolean> on modern implementations —
+      // attach a rejection handler so a haptic failure never surfaces
+      // as an unhandled rejection.
+      if (result && typeof (result as Promise<unknown>).catch === 'function') {
+        void (result as Promise<unknown>).catch(() => { /* haptics unavailable */ })
+      }
+    } catch { /* haptics unavailable */ }
+  }
+
   function onSelectStart(index: 0 | 1): void {
     const controller = controllers[index]
 
-    // Place mode short-circuits everything — trigger anywhere
-    // confirms the placement at whatever the reticle currently
-    // shows. Don't even bother with a raycast; just fire the
-    // confirm callback. Globe-grab is suppressed during Place mode.
+    // Place mode short-circuits almost everything — a trigger tap
+    // anywhere confirms the placement at whatever the reticle
+    // currently shows. One exception, raycast first: tapping the
+    // Place BUTTON mid-flow exits Place mode without placing (the
+    // documented "re-tap exits" behaviour, previously unreachable
+    // because the confirm short-circuit ran before any raycast).
+    // Screen-class taps route through the same transient controller
+    // slot, so this covers handheld AR too — with the DOM cancel
+    // button (vrPlacementTouch) as the more forgiving touch target.
+    // Globe-grab is suppressed during Place mode.
     if (ctx.placement?.isPlacing()) {
+      const hit = pickHit(controller)
+      if (hit?.kind === 'place-button') {
+        ctx.onPlaceButton()
+        return
+      }
+      pulseHaptic(index)
       ctx.onPlaceConfirm()
       return
     }
@@ -972,6 +1057,7 @@ export function createVrInteraction(
     // primary's quaternion), so grabbing any globe works the same.
     lastGrabbedGlobe[index] = hit.mesh
     triggersOnGlobe[index] = true
+    pulseHaptic(index) // grab-rotate start feedback
     reevaluateRotationMode()
   }
 
@@ -1054,10 +1140,40 @@ export function createVrInteraction(
     }
   }
 
-  function onSqueezeStart(): void {
-    // Grip = exit. Either controller does it.
-    logger.info('[VR] Grip pressed — exiting VR session')
-    ctx.onExit()
+  function onSqueezeStart(index: 0 | 1): void {
+    // Grip on the globe = grab-and-carry. Suppressed during Place
+    // mode — the placement flow owns globe positioning there (its
+    // own trigger handling confirms the spot), and a carry mid-place
+    // would fight the reticle / height rail.
+    const placing = ctx.placement?.isPlacing() ?? false
+    if (!placing && carry.kind === 'idle') {
+      const hit = pickHit(controllers[index])
+      if (hit?.kind === 'globe') {
+        const controller = controllers[index]
+        controller.getWorldPosition(scratchVec3A)
+        carry = {
+          kind: 'carry',
+          controllerIndex: index,
+          grabOffset: ctx.globe.position.clone().sub(scratchVec3A),
+        }
+        pulseHaptic(index) // grab-and-carry start feedback
+        return
+      }
+    }
+    // Grip anywhere else — arm the long-press exit. A quick release
+    // (squeezeend before the deadline) cancels it, so bumping the
+    // grip doesn't end the session.
+    gripExitDeadline[index] = performance.now() + GRIP_EXIT_HOLD_MS
+  }
+
+  function onSqueezeEnd(index: 0 | 1): void {
+    if (carry.kind === 'carry' && carry.controllerIndex === index) {
+      carry = { kind: 'idle' }
+      // Moving the globe changes the view distance / framing — the
+      // same "settled" signal the other manipulation gestures fire.
+      ctx.onCameraSettled?.()
+    }
+    gripExitDeadline[index] = null
   }
 
   // --- Wire up both controllers ---
@@ -1120,7 +1236,8 @@ export function createVrInteraction(
     // Bind captured index so the shared handlers know which slot.
     controller.addEventListener('selectstart', () => onSelectStart(i))
     controller.addEventListener('selectend', () => onSelectEnd(i))
-    controller.addEventListener('squeezestart', () => onSqueezeStart())
+    controller.addEventListener('squeezestart', () => onSqueezeStart(i))
+    controller.addEventListener('squeezeend', () => onSqueezeEnd(i))
 
     // Stash this controller's XRInputSource on `connected`. Needed
     // by updateThumbstickZoom, which reads the gamepad — iterating
@@ -1504,6 +1621,37 @@ export function createVrInteraction(
         case 'inertia':
           updateInertia(rotationMode, deltaSeconds)
           break
+      }
+
+      // Grab-and-carry — keep the grabbed offset pinned under the
+      // controller: globe.position = controllerPos + grabOffset each
+      // frame. Position only; the rotation modes above and pinch /
+      // thumbstick zoom are orthogonal and keep working mid-carry.
+      // Runs regardless of rotation mode so the user can carry with
+      // one hand and rotate with the other. Place mode cancels an
+      // active carry — the placement flow owns globe.position while
+      // it's active (reticle / height rail write it per frame).
+      if (carry.kind === 'carry') {
+        if (ctx.placement?.isPlacing()) {
+          carry = { kind: 'idle' }
+        } else {
+          const controller = controllers[carry.controllerIndex]
+          controller.getWorldPosition(scratchVec3A)
+          scratchVec3A.add(carry.grabOffset)
+          ctx.globe.position.copy(scratchVec3A)
+        }
+      }
+
+      // Long-press grip exit — fires once the hold deadline passes.
+      // Only arms when the squeeze didn't land on the globe (see
+      // onSqueezeStart); squeezeend disarms before this can fire.
+      for (let i = 0; i < 2; i++) {
+        const deadline = gripExitDeadline[i]
+        if (deadline !== null && performance.now() >= deadline) {
+          gripExitDeadline[i] = null
+          logger.info('[VR] Grip held — exiting VR session')
+          ctx.onExit()
+        }
       }
 
       // Overlay drag — writes a new customWorldOffset to the

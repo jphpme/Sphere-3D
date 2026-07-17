@@ -140,6 +140,13 @@ export interface VrPlacementHandle {
    */
   updateHeight(elevationRad: number): void
   /**
+   * Set the height directly (metres above floor), clamped to the
+   * placeable range. Touch-drag alternative to {@link updateHeight}
+   * for handheld AR, where device tilt is not the natural input.
+   * No-op unless in the `'height'` step.
+   */
+  setHeight(heightMeters: number): void
+  /**
    * Current elevation-driven height (metres above floor), or null
    * when not in the height step. Exposed for analytics/telemetry.
    */
@@ -514,6 +521,12 @@ export function createVrPlacement(
     updateHeight(elevationRad) {
       if (!placing || step !== 'height' || heightValue === null) return
       heightValue = elevationToHeight(elevationRad)
+      railMarker.position.y = heightValue
+    },
+
+    setHeight(heightMeters) {
+      if (!placing || step !== 'height' || heightValue === null) return
+      heightValue = Math.max(HEIGHT_MIN, Math.min(HEIGHT_MAX, heightMeters))
       railMarker.position.y = heightValue
     },
 

@@ -26,8 +26,10 @@ import { setVrTourOverlaySink } from '../ui/tourUI'
 import { createVrInteraction, type VrInteractionHandle } from './vrInteraction'
 import { createVrLoading, type VrLoadingHandle } from './vrLoading'
 import { createVrZoomOverlay, type VrZoomOverlayHandle } from '../ui/vrZoomOverlay'
+import { createVrPlacementTouch, type VrPlacementTouchHandle } from '../ui/vrPlacementTouch'
 import { MAX_GLOBE_SCALE, MIN_GLOBE_SCALE } from './vrScene'
 import { createVrPlacement, type VrPlacementHandle } from './vrPlacement'
+import { computeGazeSpawnPosition } from './vrSpawn'
 import {
   clearPersistedAnchorHandle,
   loadPersistedAnchorHandle,
@@ -466,7 +468,27 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     // extension). Core to the "globe actually stays on my table"
     // UX. Optional because not all UAs implement anchors yet.
     optionalFeatures.push('anchors')
+    // dom-overlay lets the browser render a DOM subtree on top of
+    // the handheld-AR camera feed — without it the in-DOM zoom
+    // slider / placement touch layer never becomes visible during
+    // the session. Optional because Quest browsers don't implement
+    // it and must not fail the request.
+    optionalFeatures.push('dom-overlay')
   }
+  // Root element handed to the dom-overlay module. Chrome on Android
+  // renders this subtree over the camera feed; see index.html.
+  const domOverlayRoot = isAr ? document.getElementById('xr-dom-overlay') : null
+  /**
+   * Build the session init for one request attempt. `domOverlay`
+   * isn't in the TS DOM lib's XRSessionInit yet — same
+   * `as unknown as` pattern as the hit-test / anchor requests below.
+   */
+  const buildSessionInit = (required: string[]): XRSessionInit =>
+    ({
+      requiredFeatures: required,
+      ...(optionalFeatures.length > 0 ? { optionalFeatures } : {}),
+      ...(domOverlayRoot ? { domOverlay: { root: domOverlayRoot } } : {}),
+    }) as unknown as XRSessionInit
   // Reference-space contract for the rest of the session. `local-floor`
   // gives the globe a stable Y above the user's actual floor; `local`
   // anchors at the head pose at session start with no floor offset.
@@ -475,10 +497,7 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
   let referenceSpaceType: 'local-floor' | 'local' = 'local-floor'
   let session: XRSession
   try {
-    session = await navigator.xr.requestSession(sessionMode, {
-      requiredFeatures: ['local-floor'],
-      ...(optionalFeatures.length > 0 ? { optionalFeatures } : {}),
-    })
+    session = await navigator.xr.requestSession(sessionMode, buildSessionInit(['local-floor']))
   } catch (err) {
     // Only retry on a feature-unsupported failure (HoloLens 2 Edge in
     // early builds, certain WebXR polyfills). Permission denial,
@@ -497,10 +516,7 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     }
     logger.debug('[VR] local-floor unavailable, retrying with local:', err)
     try {
-      session = await navigator.xr.requestSession(sessionMode, {
-        requiredFeatures: ['local'],
-        ...(optionalFeatures.length > 0 ? { optionalFeatures } : {}),
-      })
+      session = await navigator.xr.requestSession(sessionMode, buildSessionInit(['local']))
       referenceSpaceType = 'local'
     } catch (retryErr) {
       canvas.remove()
@@ -549,7 +565,17 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
   // pickup, hand-tracking toggles in/out on Quest, transient pointers
   // fire per pinch on Vision Pro).
   const updateInputClass = (): void => {
-    const next = getInputArchetype(session)
+    let next = getInputArchetype(session)
+    // Latch the `screen` archetype for the session lifetime: the
+    // transient screen input source only exists for the duration of
+    // a tap, so every tap release fires `inputsourceschange` back to
+    // zero sources (`unknown`). Without the latch, dependent UI
+    // (the DOM zoom overlay) would unmount/remount on every tap.
+    // Controller / transient archetypes still recompute freely — a
+    // real controller appearing later still wins over the latch.
+    if (sessionTelemetry.inputClass === 'screen' && next === 'unknown') {
+      next = 'screen'
+    }
     if (next !== sessionTelemetry.inputClass) {
       logger.debug(
         `[VR] inputClass: ${sessionTelemetry.inputClass} -> ${next}`,
@@ -559,6 +585,18 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
   }
   updateInputClass()
   session.addEventListener('inputsourceschange', updateInputClass)
+
+  // Whether the session actually granted the DOM overlay. Requested
+  // as optional above, so Quest browsers (which don't implement the
+  // dom-overlays module) silently skip it and this reads false —
+  // every DOM-dependent affordance below must gate on it, not on
+  // the request alone. `domOverlayState` isn't in the TS DOM lib
+  // yet — same cast pattern as the other optional-feature reads.
+  const domOverlayActive =
+    isAr &&
+    domOverlayRoot !== null &&
+    (session as unknown as { domOverlayState?: { type?: string } })
+      .domOverlayState?.type === 'screen'
 
   // Lazy-load the controller-model addon alongside Three.js. The
   // factory fetches per-controller glTF models from a CDN at runtime
@@ -899,6 +937,117 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     }
   }
 
+  // --- Place-mode handlers, shared by XR selects and the DOM touch
+  // layer. Named closures (rather than inline in the interaction
+  // context below) so the XR select path (vrInteraction) and the
+  // handheld-AR touch layer (vrPlacementTouch) funnel through the
+  // same confirm / cancel logic.
+  let placementTouch: VrPlacementTouchHandle | null = null
+  /**
+   * Single entry point for Place-mode transitions — keeps the
+   * placement state machine and the DOM touch layer (cancel button
+   * visibility, tap/drag interception) in lockstep.
+   */
+  const setPlacing = (placingNow: boolean): void => {
+    if (!placement) return
+    placement.setPlacing(placingNow)
+    placementTouch?.setPlacing(placingNow)
+  }
+  const onPlaceButton = (): void => {
+    // Toggle Place mode. Re-tap exits without placing.
+    setPlacing(!(placement?.isPlacing() ?? false))
+  }
+  const onPlaceConfirm = (): void => {
+    if (!placement) return
+    // Subtle touch feedback on handhelds. Guarded feature detect —
+    // returns false / is absent on headsets and desktops.
+    if (typeof navigator !== 'undefined' && navigator.vibrate) {
+      navigator.vibrate(15)
+    }
+    // Position step → advance to the height step. No globe move
+    // yet; the rail appears and the user picks a height.
+    if (placement.getStep() === 'position') {
+      placement.advanceStep()
+      return
+    }
+    // Height step → finalise. Read the combined base XZ + chosen
+    // height. Fall back to the live reticle if the height step
+    // somehow has no value (defensive).
+    const target = placement.getPlacementPosition()
+      ?? placement.getReticlePosition()
+    if (!target) return
+    // Capture the chosen height as an offset above the surface so
+    // the per-frame anchor sync keeps it. basePosition.y is the
+    // surface reticle Y frozen in the position step; target.y is
+    // the elevation-driven height. Their difference is portable
+    // across local-floor re-bases (both are in the same space at
+    // confirm time). VR has no anchor, so the offset is unused
+    // there but harmless to compute.
+    const base = placement.getBasePosition()
+    placementHeightOffset = base ? target.y - base.y : 0
+    // Move the globe right away so the visual response is
+    // immediate. The anchor creation (below) is async; the anchor
+    // sync applies placementHeightOffset so there's no jump when
+    // tracking takes over.
+    scene.globe.position.copy(target)
+    setPlacing(false)
+
+    // Create a system-tracked anchor from the raw hit-test
+    // result. The anchor stays bolted to the real surface even
+    // when the local-floor coord frame shifts (which happens
+    // every new session). Replaces any previous anchor. VR has
+    // no hit-test result (no real geometry), so it skips
+    // anchoring entirely and keeps the placed world position.
+    const hitResult = placement.getLastHitTestResult()
+    const createFn = hitResult?.createAnchor
+    if (!hitResult || !createFn) {
+      emit({
+        event_type: 'vr_placement',
+        layer_id: ctx.getDatasetId() ?? '',
+        persisted: false,
+      })
+      return
+    }
+
+    void createFn.call(hitResult).then(async anchor => {
+      // Swap out any prior anchor. Only one active at a time —
+      // the previous placement's anchor is no longer needed.
+      if (currentAnchor) {
+        try { currentAnchor.delete() } catch { /* already gone */ }
+      }
+      currentAnchor = anchor
+
+      // Persistent handle for cross-session restore. Meta Quest
+      // exposes this via the Anchors module extension; other
+      // browsers may not. Non-fatal if it throws — the anchor
+      // still tracks within this session.
+      const requestFn = anchor.requestPersistentHandle
+      let persisted = false
+      if (requestFn) {
+        try {
+          const handle = await requestFn.call(anchor)
+          savePersistedAnchorHandle(handle)
+          persisted = true
+          logger.info('[VR] Saved persistent placement anchor')
+        } catch (err) {
+          logger.debug('[VR] Anchor persistent handle not available:', err)
+        }
+      }
+      emit({
+        event_type: 'vr_placement',
+        layer_id: ctx.getDatasetId() ?? '',
+        persisted,
+      })
+    }).catch(err => {
+      logger.warn('[VR] Failed to create placement anchor:', err)
+      emit({
+        event_type: 'vr_placement',
+        layer_id: ctx.getDatasetId() ?? '',
+        persisted: false,
+      })
+    })
+  }
+
   const interaction = createVrInteraction(THREE_, XRControllerModelFactory, {
     scene: scene.scene,
     globe: scene.globe,
@@ -977,95 +1126,8 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
         )
       }
     },
-    onPlaceButton: () => {
-      // Toggle Place mode. Re-tap exits without placing.
-      placement?.setPlacing(!placement.isPlacing())
-    },
-    onPlaceConfirm: () => {
-      if (!placement) return
-      // Position step → advance to the height step. No globe move
-      // yet; the rail appears and the user picks a height.
-      if (placement.getStep() === 'position') {
-        placement.advanceStep()
-        return
-      }
-      // Height step → finalise. Read the combined base XZ + chosen
-      // height. Fall back to the live reticle if the height step
-      // somehow has no value (defensive).
-      const target = placement.getPlacementPosition()
-        ?? placement.getReticlePosition()
-      if (!target) return
-      // Capture the chosen height as an offset above the surface so
-      // the per-frame anchor sync keeps it. basePosition.y is the
-      // surface reticle Y frozen in the position step; target.y is
-      // the elevation-driven height. Their difference is portable
-      // across local-floor re-bases (both are in the same space at
-      // confirm time). VR has no anchor, so the offset is unused
-      // there but harmless to compute.
-      const base = placement.getBasePosition()
-      placementHeightOffset = base ? target.y - base.y : 0
-      // Move the globe right away so the visual response is
-      // immediate. The anchor creation (below) is async; the anchor
-      // sync applies placementHeightOffset so there's no jump when
-      // tracking takes over.
-      scene.globe.position.copy(target)
-      placement.setPlacing(false)
-
-      // Create a system-tracked anchor from the raw hit-test
-      // result. The anchor stays bolted to the real surface even
-      // when the local-floor coord frame shifts (which happens
-      // every new session). Replaces any previous anchor. VR has
-      // no hit-test result (no real geometry), so it skips
-      // anchoring entirely and keeps the placed world position.
-      const hitResult = placement.getLastHitTestResult()
-      const createFn = hitResult?.createAnchor
-      if (!hitResult || !createFn) {
-        emit({
-          event_type: 'vr_placement',
-          layer_id: ctx.getDatasetId() ?? '',
-          persisted: false,
-        })
-        return
-      }
-
-      void createFn.call(hitResult).then(async anchor => {
-        // Swap out any prior anchor. Only one active at a time —
-        // the previous placement's anchor is no longer needed.
-        if (currentAnchor) {
-          try { currentAnchor.delete() } catch { /* already gone */ }
-        }
-        currentAnchor = anchor
-
-        // Persistent handle for cross-session restore. Meta Quest
-        // exposes this via the Anchors module extension; other
-        // browsers may not. Non-fatal if it throws — the anchor
-        // still tracks within this session.
-        const requestFn = anchor.requestPersistentHandle
-        let persisted = false
-        if (requestFn) {
-          try {
-            const handle = await requestFn.call(anchor)
-            savePersistedAnchorHandle(handle)
-            persisted = true
-            logger.info('[VR] Saved persistent placement anchor')
-          } catch (err) {
-            logger.debug('[VR] Anchor persistent handle not available:', err)
-          }
-        }
-        emit({
-          event_type: 'vr_placement',
-          layer_id: ctx.getDatasetId() ?? '',
-          persisted,
-        })
-      }).catch(err => {
-        logger.warn('[VR] Failed to create placement anchor:', err)
-        emit({
-          event_type: 'vr_placement',
-          layer_id: ctx.getDatasetId() ?? '',
-          persisted: false,
-        })
-      })
-    },
+    onPlaceButton,
+    onPlaceConfirm,
     onExit: () => {
       void session.end().catch(err =>
         logger.warn('[VR] session.end() from grip failed:', err),
@@ -1073,16 +1135,37 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     },
   })
 
+  // --- Handheld-AR placement touch layer ---
+  // Only when the session actually granted the DOM overlay (Android
+  // `screen` input): taps/drags on empty screen then arrive as DOM
+  // touch events, enabling tap-vs-drag disambiguation, drag-to-adjust
+  // height, and a DOM cancel button during Place mode. Controller
+  // sessions keep tilt + the raycast Place button. See
+  // vrPlacementTouch.ts for the full rationale.
+  if (domOverlayActive && domOverlayRoot && placement) {
+    placementTouch = createVrPlacementTouch({
+      onConfirm: onPlaceConfirm,
+      onCancel: () => setPlacing(false),
+      isHeightStep: () => placement.getStep() === 'height',
+      getHeight: () => placement.getHeight(),
+      setHeight: (h) => placement.setHeight(h),
+    })
+    placementTouch.mount(domOverlayRoot)
+  }
+
   // --- Phase 1 phone-AR zoom slider ---
   // Mount the DOM zoom overlay reactively when `inputClass` resolves
   // to `screen`. Controller sessions never see it (their thumbstick
   // already does this job); transient-pointer devices get widened in
   // Phase 2 PR 4. The listener runs the sync now (in case inputClass
   // resolved during the slow Three.js + setSession path above) and
-  // on every subsequent inputsourceschange.
+  // on every subsequent inputsourceschange. Gated on the DOM overlay
+  // being granted — without it the slider is invisible mid-session
+  // anyway — and mounted INTO the overlay root so the browser renders
+  // it on top of the AR camera feed.
   let zoomOverlay: VrZoomOverlayHandle | null = null
   const syncZoomOverlay = (): void => {
-    const wantOverlay = sessionTelemetry.inputClass === 'screen'
+    const wantOverlay = sessionTelemetry.inputClass === 'screen' && domOverlayActive
     if (wantOverlay && !zoomOverlay) {
       zoomOverlay = createVrZoomOverlay({
         onZoom: (raw) => {
@@ -1093,7 +1176,7 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
         minScale: MIN_GLOBE_SCALE,
         maxScale: MAX_GLOBE_SCALE,
       })
-      zoomOverlay.mount(document.body)
+      zoomOverlay.mount(domOverlayRoot ?? document.body)
     } else if (!wantOverlay && zoomOverlay) {
       zoomOverlay.dispose()
       zoomOverlay = null
@@ -1112,6 +1195,8 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
       session.removeEventListener('inputsourceschange', syncZoomOverlay)
       zoomOverlay?.dispose()
       zoomOverlay = null
+      placementTouch?.dispose()
+      placementTouch = null
     },
     browse,
     tourControls,
@@ -1179,6 +1264,19 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
   // with performance.now() from pre-loop init, which can be on a
   // different clock and produce a huge first delta.
   let lastTime: number | null = null
+  /**
+   * One-shot gaze-based spawn (both modes). The hardcoded GLOBE_POSITION
+   * assumes the user faces -Z at session start; instead, on the first
+   * frame with a valid viewer pose we place the globe in front of
+   * wherever they're actually looking (see vrSpawn.ts). In AR the
+   * globe floats mid-air at eye height until placed — same as today's
+   * hardcoded spawn — and a restored placement anchor still wins: the
+   * per-frame anchor sync below overwrites this position as soon as
+   * the anchor pose resolves. The HUD / Place button re-anchor to the
+   * globe every frame below, and secondary globes follow the primary
+   * in scene.update(), so no other object needs an explicit respawn.
+   */
+  let pendingGazeSpawn = true
   renderer.setAnimationLoop((time, frame) => {
     // `??` instead of `||` — some XR implementations emit a valid
     // timestamp of 0 on the very first frame, which `||` would
@@ -1191,6 +1289,24 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
 
     if (!active) return
     sessionTelemetry.frames++
+
+    // Gaze-based spawn — runs once, on the first frame where the
+    // viewer pose is available. `renderer.xr.getReferenceSpace()` is
+    // the space Three.js resolves all camera/scene coords in, so the
+    // pose and globe.position share a frame regardless of whether the
+    // session got local-floor or the local fallback.
+    if (pendingGazeSpawn && frame) {
+      const refSpace = renderer.xr.getReferenceSpace()
+      const pose = refSpace ? frame.getViewerPose(refSpace) : null
+      if (pose) {
+        pendingGazeSpawn = false
+        const spawn = computeGazeSpawnPosition(
+          pose.transform.position,
+          pose.transform.orientation,
+        )
+        active.scene.globe.position.set(spawn.x, spawn.y, spawn.z)
+      }
+    }
 
     // Spatial placement — per-frame work, but only while in Place mode.
     // Two position sources, one height step:
@@ -1210,17 +1326,22 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
         active.camera.getWorldDirection(scratchGazeDir)
         active.placement.updateGaze(scratchCamPos, scratchGazeDir)
       }
-      // Height step — both modes use headset pitch. Drive the globe
-      // LIVE along the chosen height so the user sees it slide as
-      // they tilt their head, instead of a frozen globe that only
-      // jumps on confirm (which read as "nothing locked"). The
+      // Height step — both modes use headset pitch, except when the
+      // handheld-AR touch layer owns the height (drag in flight, or a
+      // drag already set it this activation — releasing the finger
+      // must not snap the globe back to the tilt-driven height).
+      // Drive the globe LIVE along the chosen height so the user sees
+      // it slide as they tilt/drag, instead of a frozen globe that
+      // only jumps on confirm (which read as "nothing locked"). The
       // chosen XZ is frozen from the position step; only Y moves.
       if (active.placement.getStep() === 'height') {
-        active.camera.getWorldDirection(scratchGazeDir)
-        const elevation = Math.asin(
-          Math.max(-1, Math.min(1, scratchGazeDir.y)),
-        )
-        active.placement.updateHeight(elevation)
+        if (!placementTouch?.ownsHeight()) {
+          active.camera.getWorldDirection(scratchGazeDir)
+          const elevation = Math.asin(
+            Math.max(-1, Math.min(1, scratchGazeDir.y)),
+          )
+          active.placement.updateHeight(elevation)
+        }
         const preview = active.placement.getPlacementPosition()
         if (preview) {
           active.scene.globe.position.copy(preview)
