@@ -1061,6 +1061,11 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     tourOverlay,
     placement,
     renderer,
+    // Latched input archetype — lets vrInteraction suppress touch-
+    // driven scale paths on handheld AR (the DOM slider is the
+    // exclusive zoom control there). Reads the live value so the
+    // lazy archetype resolution (first tap) is picked up.
+    isScreenInput: () => sessionTelemetry.inputClass === 'screen',
     onCameraSettled: () => {
       const state = captureVrCameraState()
       if (!state) return
@@ -1137,15 +1142,18 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
 
   // --- Handheld-AR placement touch layer ---
   // Only when the session actually granted the DOM overlay (Android
-  // `screen` input): taps/drags on empty screen then arrive as DOM
-  // touch events, enabling tap-vs-drag disambiguation, drag-to-adjust
-  // height, and a DOM cancel button during Place mode. Controller
-  // sessions keep tilt + the raycast Place button. See
+  // `screen` input): touches on empty screen then arrive as DOM touch
+  // events, enabling explicit Place / Cancel buttons, drag-to-adjust
+  // height, and a Re-place corner button. Stray screen taps during
+  // placement are swallowed by the layer (beforexrselect dedup) and
+  // never reach the XR confirm short-circuit. Controller sessions
+  // keep trigger-to-confirm + the raycast Place button. See
   // vrPlacementTouch.ts for the full rationale.
   if (domOverlayActive && domOverlayRoot && placement) {
     placementTouch = createVrPlacementTouch({
       onConfirm: onPlaceConfirm,
       onCancel: () => setPlacing(false),
+      onRePlace: onPlaceButton,
       isHeightStep: () => placement.getStep() === 'height',
       getHeight: () => placement.getHeight(),
       setHeight: (h) => placement.setHeight(h),

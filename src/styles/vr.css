@@ -150,8 +150,9 @@ body.browse-open #vr-enter-btn {
  * Chrome on Android renders this subtree on top of the camera feed
  * mid-session. Default pointer-events: none so taps fall through to
  * the XR session as selects (globe rotate, HUD taps); vrPlacementTouch
- * flips the -active class during Place mode to capture taps/drags
- * for tap-vs-drag disambiguation. Inert and invisible off-XR. */
+ * flips the -active class during Place mode to capture touches so
+ * stray taps are swallowed instead of confirming. Inert and
+ * invisible off-XR. */
 #xr-dom-overlay {
     position: fixed;
     inset: 0;
@@ -163,14 +164,14 @@ body.browse-open #vr-enter-btn {
     pointer-events: auto;
 }
 
-/* "Cancel placement" button — shown by vrPlacementTouch during Place
- * mode on handheld AR. Bottom-center so it clears both the zoom
- * slider (inline-end edge) and the globe in the middle of the view. */
-.vr-place-cancel {
+/* --- Placement chrome (handheld AR, vrPlacementTouch) ---
+ * Shared glass-button base for the Place / Cancel / Re-place buttons.
+ * All positioned clear of the zoom slider (inline-end edge, vertically
+ * centered) and the globe (middle of the view). */
+.vr-place-accept,
+.vr-place-cancel,
+.vr-place-replace {
     position: fixed;
-    bottom: calc(1rem * var(--ui-scale));
-    left: 50%;
-    transform: translateX(-50%);
     z-index: 950;
     padding: calc(0.55rem * var(--ui-scale)) calc(1.1rem * var(--ui-scale));
     background: var(--glass-bg);
@@ -188,8 +189,60 @@ body.browse-open #vr-enter-btn {
     min-height: max(44px, calc(44px * var(--ui-scale)));
 }
 
-.vr-place-cancel:hover,
-.vr-place-cancel:focus-visible {
+/* "Place" — the primary acceptance button for each placement step.
+ * Bottom-center, accent-filled so it reads as THE action. */
+.vr-place-accept {
+    bottom: calc(1rem * var(--ui-scale));
+    left: 50%;
+    transform: translateX(-50%);
     background: var(--color-accent);
     color: #fff;
+    font-weight: 600;
+}
+
+/* "Cancel placement" — sits beside Place during Place mode. */
+.vr-place-cancel {
+    bottom: calc(1rem * var(--ui-scale));
+    inset-inline-start: calc(1rem * var(--ui-scale));
+}
+
+/* "Re-place" — small, unobtrusive corner button shown whenever NOT
+ * placing; re-enters the two-step placement flow. */
+.vr-place-replace {
+    bottom: calc(1rem * var(--ui-scale));
+    inset-inline-end: calc(1rem * var(--ui-scale));
+    padding: calc(0.35rem * var(--ui-scale)) calc(0.7rem * var(--ui-scale));
+    font-size: calc(0.72rem * var(--ui-scale));
+    min-height: max(36px, calc(36px * var(--ui-scale)));
+    opacity: 0.85;
+}
+
+.vr-place-accept:hover,
+.vr-place-accept:focus-visible,
+.vr-place-cancel:hover,
+.vr-place-cancel:focus-visible,
+.vr-place-replace:hover,
+.vr-place-replace:focus-visible {
+    background: var(--color-accent);
+    color: #fff;
+    opacity: 1;
+}
+
+/* Step hint pill — top-center, non-interactive. */
+.vr-place-hint {
+    position: fixed;
+    top: calc(1rem * var(--ui-scale));
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 950;
+    padding: calc(0.4rem * var(--ui-scale)) calc(0.9rem * var(--ui-scale));
+    background: var(--glass-bg);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
+    border: var(--glass-border);
+    border-radius: calc(14px * var(--ui-scale));
+    color: var(--color-text);
+    font-size: calc(0.75rem * var(--ui-scale));
+    letter-spacing: 0.03em;
+    pointer-events: none;
 }

@@ -200,6 +200,17 @@ export interface VrInteractionContext {
   /** Fired on a long-press grip (~800 ms hold) away from the globe — caller ends the session. */
   onExit: () => void
   /**
+   * True while the session's input archetype is handheld-AR screen
+   * touch. Two simultaneous screen touches register as two transient
+   * input sources, so an incidental second finger would otherwise
+   * drive the two-hand pinch-scale path — on this class the DOM zoom
+   * slider is the EXCLUSIVE zoom control, and every touch-driven
+   * scale write is suppressed. Rotation (single- and two-finger) is
+   * unaffected. Optional so controller-only callers/tests can omit
+   * it (defaults to false — no suppression).
+   */
+  isScreenInput?: () => boolean
+  /**
    * Fired when globe manipulation settles: trigger-drag release
    * (to idle, not inertia), two-hand pinch release, flick-inertia
    * decay stop, or thumbstick-zoom release. Caller computes the
@@ -1340,12 +1351,20 @@ export function createVrInteraction(
     if (currentDistance < 0.001) return
 
     // Pinch zoom: scale is proportional to the distance ratio,
-    // clamped to the globe's configured min/max.
-    const scale = Math.max(
-      MIN_GLOBE_SCALE,
-      Math.min(MAX_GLOBE_SCALE, mode.startScale * (currentDistance / mode.startDistance)),
-    )
-    ctx.globe.scale.setScalar(scale)
+    // clamped to the globe's configured min/max. SUPPRESSED on the
+    // screen input class (handheld AR): two simultaneous touches
+    // register as two transient input sources, so an incidental
+    // second finger would pinch-scale the globe — there the DOM
+    // zoom slider is the exclusive zoom control. Rigid-body rotation
+    // below still applies (two-finger twist rotates, matching the
+    // single-finger drag the class already supports).
+    if (!ctx.isScreenInput?.()) {
+      const scale = Math.max(
+        MIN_GLOBE_SCALE,
+        Math.min(MAX_GLOBE_SCALE, mode.startScale * (currentDistance / mode.startDistance)),
+      )
+      ctx.globe.scale.setScalar(scale)
+    }
 
     // Rotation: full rigid-body delta. Earlier version only
     // considered the axis direction between the hands, so wrist
@@ -1540,6 +1559,10 @@ export function createVrInteraction(
     // the former is indexed 1:1 with `controllers[i]` / `rayOnBrowse[i]`,
     // the latter can interleave transient-pointer / gaze sources
     // that throw off index-based lookups.
+    //
+    // Screen-class (handheld AR) input never reaches the scale write:
+    // transient screen sources have no gamepad, so the `if (!gp)`
+    // guard below skips them — the DOM slider is the only zoom there.
     const session = ctx.renderer.xr.getSession()
     if (!session) return
     let zoomAxis = 0

@@ -221,6 +221,10 @@
   "vr.controllerTooltip.trigger": "Floating tooltip above the user's VR controllers indicating what the trigger does. Keep short — drawn into a fixed-size canvas above each hand. 'Trigger' refers to the index-finger button on a VR controller.",
   "vr.error.unsupported": "Error banner text shown when the browser exposes the WebXR API but neither immersive-ar nor immersive-vr sessions are supported (e.g. no headset reachable, unsupported device). Explains why the Enter AR/VR button is hidden.",
   "vr.placement.cancel": "Label for the on-screen button shown during globe placement on handheld AR (Android phones/tablets). Tapping it exits placement mode without placing the globe. Keep short.",
+  "vr.placement.place": "Label for the primary acceptance button during globe placement on handheld AR (Android phones/tablets). Tapped once to accept the globe's position and again to accept its height. Keep very short.",
+  "vr.placement.replace": "Label for the small corner button shown on handheld AR when not placing. Tapping it restarts the two-step globe placement flow. Keep very short.",
+  "vr.placement.stepHeight": "Hint pill text shown during the second placement step on handheld AR, where a vertical touch drag raises or lowers the globe. Keep short — shown in a small pill at the top of the screen.",
+  "vr.placement.stepPosition": "Hint pill text shown during the first placement step on handheld AR, where the user aims a reticle at a real surface. Keep short — shown in a small pill at the top of the screen.",
   "vr.zoomSlider.aria": "ARIA label for the in-AR vertical zoom slider on phones. Describes its function for screen readers; not visible text.",
   "vr.zoomSlider.label": "Visible label printed above the in-AR zoom slider on phones. Single short word — the column it sits in is narrow.",
   "vr.zoomSlider.title": "Tooltip on the in-AR zoom slider when hovered with a pointer. Brief — appears as a native browser tooltip."
