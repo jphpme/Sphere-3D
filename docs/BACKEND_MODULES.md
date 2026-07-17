@@ -89,6 +89,8 @@ design rationale in the `docs/CATALOG_*` plan docs.
 | `functions/api/v1/featured-hero.ts` | Route: GET /api/v1/featured-hero |
 | `functions/api/v1/featured.ts` | Route: GET /api/v1/featured |
 | `functions/api/v1/logout.ts` | GET /api/v1/logout |
+| `functions/api/v1/account/login.ts` | GET /api/v1/account/login — redirect to the configured account/team login URL (same-origin `return_to` sanitization) |
+| `functions/api/v1/account/me.ts` | GET /api/v1/account/me — current account identity from the Access JWT (incl. the loopback-only `DEV_BYPASS_ACCESS` path) |
 | `functions/api/v1/search.ts` | Route: GET /api/v1/search?q=.. |
 | `functions/api/v1/tours.ts` | GET /api/v1/tours |
 
@@ -188,3 +190,4 @@ through the Pages origin instead of the R2 bucket directly.
 | `functions/_realtimeAssetProxy.ts` | Shared helper - proxies `/realtime/*` and `/forecast/*` to the R2 origin with CORS + Range support |
 | `functions/realtime/[[path]].ts` | Route: GET /realtime/* (realtime DASH assets) |
 | `functions/forecast/[[path]].ts` | Route: GET /forecast/* (forecast DASH assets) |
+| `functions/dash/[[path]].ts` | Route: GET /dash/* (realtime/forecast DASH assets) |

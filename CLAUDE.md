@@ -117,6 +117,7 @@ npm run screenshots:smoke   # gating interaction tests (search, Orbit, nav)
 | `src/services/zipDownloadService.ts` | Web-only "package a dataset as a `.zip`" entry point |
 | `src/services/heroService.ts` | Picks the single "Right now" hero candidate for the catalog landing surface |
 | `src/services/generalFeedbackService.ts` | Posts app-level feedback (bug / feature / other) to `/api/general-feedback` |
+| `src/services/accountService.ts` | Fetches the signed-in account state from `/api/v1/account/me` (Access identity, login/logout URLs) |
 | `src/services/playlistService.ts` | CRUD over user-curated dataset sequences (localStorage) |
 | `src/services/playlistPlayback.ts` | "Active playlist" state machine |
 | `src/services/datasetFilter.ts` | Catalog filter predicate engine — shared by the chip rail and the Graph / Map / Timeline views |
@@ -150,6 +151,7 @@ npm run screenshots:smoke   # gating interaction tests (search, Orbit, nav)
 | `src/ui/toolsMenuUI.ts` | Tools popover — Browse button, view toggles (labels, borders, terrain, auto-rotate, info, legend), layout picker, Orbit settings entry point, Meet Orbit link (web only) |
 | `src/ui/vrButton.ts` | Enter AR / Enter VR button — feature-gated (hidden on non-WebXR browsers), lazy-loads Three.js on tap |
 | `src/ui/vrZoomOverlay.ts` | DOM zoom slider mounted on screen-tap AR sessions (phone via ARCore Chrome). Drives `globe.scale` through a callback; log-mapped so each unit of slider travel is a constant multiplicative zoom. Lives under `src/ui/` so the i18n string lint covers it. |
+| `src/ui/vrPlacementTouch.ts` | Touch layer for handheld-AR Place mode (dom-overlay sessions) — tap-vs-drag disambiguation via `beforexrselect` suppression, drag-to-adjust placement height, DOM cancel button |
 | `src/services/vrSession.ts` | WebXR session lifecycle — requests `immersive-ar` or `immersive-vr`, wires renderer.xr, drives the per-frame loop, handles anchor persistence, falls back to `local` reference space if `local-floor` is unsupported |
 | `src/services/vrScene.ts` | VR scene framing — background (space blue vs transparent passthrough) + globe placement; delegates the Earth stack to `photorealEarth.ts` |
 | `src/services/photorealEarth.ts` | Reusable photoreal Earth factory — diffuse / night lights / specular / atmosphere / clouds / sun / ground shadow with day/night shading; shared by VR view and Orbit character page |
@@ -158,6 +160,7 @@ npm run screenshots:smoke   # gating interaction tests (search, Orbit, nav)
 | `src/services/vrPlacement.ts` | Spatial placement — reticle + Place button; two-step `position`→`height` machine. AR uses WebXR hit-test to anchor the globe on a real surface; VR (no geometry) projects the headset gaze ray onto a virtual floor |
 | `src/services/vrHeightControl.ts` | Pure math for the placement height step — maps headset pitch to a globe height (elevation→height) and projects a gaze ray onto a horizontal plane (ray→floor XZ); unit-tested, no WebGL dependency |
 | `src/services/vrLoading.ts` | 3D loading scene — orbiting rings, progress bar, status text; fades out when dataset is ready |
+| `src/services/vrSpawn.ts` | Pure math for the gaze-based VR globe spawn — projects the first-frame viewer pose onto the XZ plane so the globe spawns in front of where the user is actually looking |
 | `src/utils/vrCapability.ts` | Feature detection — `navigator.xr`, `immersive-vr`, `immersive-ar` support — plus `getInputArchetype()` (controller / screen / transient) and `classifyXrDevice(ua, mode)` (UA-based bucket for `vr_session_started.device_class`) |
 | `src/utils/vrPersistence.ts` | WebXR anchor persistent-handle save/load (localStorage) for cross-session placement stability |
 | `src/utils/viewPreferences.ts` | Persists Dataset info + Legend toggle state to localStorage |
@@ -193,6 +196,7 @@ npm run screenshots:smoke   # gating interaction tests (search, Orbit, nav)
 | `src/ui/playlistUI.ts` | Playlist manager panel + the "Add to playlist" popover from browse cards / info panel |
 | `src/ui/tourUI.ts` | 2D tour control bar + overlay types (VR equivalent is `vrTourOverlay.ts`) |
 | `src/ui/helpUI.ts` | Help panel — Guide tab + Feedback form |
+| `src/ui/accountUI.ts` | Account chip in the app chrome — initials avatar / Sign in link driven by `accountService` |
 | `src/ui/creditsPanel.ts` | Credits panel (Tools → Credits) |
 | `src/ui/heroPanelUI.ts` | "Right now" hero panel UI (Phase 7 §9.1 of `docs/WEB_CATALOG_FEATURES_PLAN.md`) |
 | `src/ui/downloadDialogUI.ts` | Web-only zip-download panel (§8.2) |

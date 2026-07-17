@@ -30,7 +30,7 @@ describe('parseArgs', () => {
       `--run-id=${ULID}`,
       `--workdir=/tmp/zw`,
     ])
-    expect(args).toMatchObject({ video: '/tmp/zw/output/dataset.mp4' })
+    expect(args).toMatchObject({ video: join('/tmp/zw', 'output', 'dataset.mp4') })
   })
 
   it('bounds the wait window', () => {

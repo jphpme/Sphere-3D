@@ -16,3 +16,8 @@
 public/*.png            -filter -diff -merge
 src-tauri/icons/*.png   -filter -diff -merge
 src-tauri/gen/**/*.png  -filter -diff -merge
+
+# The schema snapshot is compared byte-for-byte against an LF-only
+# in-memory render (scripts/seed-catalog.test.ts). Pin it to LF so a
+# Windows checkout with core.autocrlf=true can't flip it to CRLF.
+migrations/catalog-schema.sql text eol=lf

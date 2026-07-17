@@ -47,6 +47,10 @@ function freshFeedbackDb(): Database.Database {
 
 function setup() {
   const sqlite = freshFeedbackDb()
+  // Timestamps must stay relative to now: both dashboards date-gate
+  // their byDay/tag aggregations on `created_at >= now - days`, so
+  // fixed dates silently age out of the default 30-day window.
+  const hoursAgo = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString()
   sqlite
     .prepare(
       `INSERT INTO feedback (rating, comment, message_id, dataset_id, conversation, tags, model_config, user_message, assistant_message, created_at)
@@ -54,26 +58,26 @@ function setup() {
     )
     .run(
       'thumbs-up', 'great answer', 'msg-1', 'DS1', '["helpful"]',
-      '{"model":"llama-3.1-70b"}', 'what is ENSO?', 'ENSO is…', '2026-06-10T12:00:00.000Z',
+      '{"model":"llama-3.1-70b"}', 'what is ENSO?', 'ENSO is…', hoursAgo(30),
     )
   sqlite
     .prepare(
       `INSERT INTO feedback (rating, comment, message_id, dataset_id, conversation, tags, created_at)
        VALUES (?, ?, ?, ?, '[]', ?, ?)`,
     )
-    .run('thumbs-down', '', 'msg-2', null, '["wrong"]', '2026-06-10T13:00:00.000Z')
+    .run('thumbs-down', '', 'msg-2', null, '["wrong"]', hoursAgo(25))
   sqlite
     .prepare(
       `INSERT INTO general_feedback (kind, message, contact, platform, screenshot, created_at)
        VALUES (?, ?, ?, ?, ?, ?)`,
     )
-    .run('bug', 'globe is upside down', 'a@b.c', 'web', 'data:image/jpeg;base64,abc123', '2026-06-10T14:00:00.000Z')
+    .run('bug', 'globe is upside down', 'a@b.c', 'web', 'data:image/jpeg;base64,abc123', hoursAgo(5))
   sqlite
     .prepare(
       `INSERT INTO general_feedback (kind, message, created_at)
        VALUES (?, ?, ?)`,
     )
-    .run('feature', 'more datasets please', '2026-06-10T15:00:00.000Z')
+    .run('feature', 'more datasets please', hoursAgo(1))
   return { sqlite, env: { FEEDBACK_DB: asD1(sqlite) } }
 }
 

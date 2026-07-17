@@ -75,12 +75,16 @@ export function renderSchemaSnapshot(db: Database.Database): string {
     )
     .all() as Array<{ sql: string }>
 
+  // sqlite_master.sql preserves the migration file's raw text, so a
+  // CRLF checkout (Windows + core.autocrlf) would otherwise leak \r
+  // into the snapshot and make it platform-dependent. Normalise to
+  // LF so the dump and the smoke test agree on every OS.
   return (
     SCHEMA_HEADER +
     '\n-- Tables\n\n' +
-    tableRows.map(r => r.sql.trim() + ';').join('\n\n') +
+    tableRows.map(r => r.sql.replace(/\r\n/g, '\n').trim() + ';').join('\n\n') +
     '\n\n-- Indexes\n\n' +
-    indexRows.map(r => r.sql.trim() + ';').join('\n') +
+    indexRows.map(r => r.sql.replace(/\r\n/g, '\n').trim() + ';').join('\n') +
     '\n'
   )
 }
