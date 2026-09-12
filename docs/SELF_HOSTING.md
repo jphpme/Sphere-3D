@@ -1845,12 +1845,41 @@ Gatekeeper "damaged" warning.
 
 **15.3 `VITE_API_ORIGIN`.** Desktop webviews are served from
 `tauri://localhost`, so relative `/api/` paths don't resolve.
-`src/services/catalogSource.ts` rewrites them to an absolute
-origin, defaulting to `https://terraviz.zyra-project.org`. Set
+`src/config/endpoints.ts` resolves an absolute origin for them,
+defaulting to `https://terraviz.zyra-project.org`. Set
 `VITE_API_ORIGIN=https://<W2>` at build time so your app talks to
 *your* backend. The same value drives deep-link host recognition,
 so setting it also makes your node accept its own `/dataset/<id>`
 links.
+
+> **It also decides where your desktop app's telemetry goes.**
+> `/api/ingest` resolves through the same origin — one rule, so a
+> node's catalog and its analytics cannot disagree about where
+> "here" is. Two consequences worth reading twice. If you leave
+> this unset, your desktop builds POST their users' telemetry to
+> **upstream's** Analytics Engine, where it is indistinguishable
+> from upstream's own; that is the same default every other
+> `/api/` call already has, but it is data leaving your users
+> rather than content arriving, so it deserves a deliberate
+> decision rather than a shrug.
+>
+> One thing to verify rather than assume, on your node and ours
+> alike: `functions/api/ingest.ts` rejects any request whose
+> `Origin` header it does not recognise, and returns **403**,
+> which the client drops without retrying. `tauri://localhost`
+> and its Windows variants are already in `ALLOWED_ORIGINS`, so a
+> desktop request is accepted *if* it carries that header — but
+> the desktop path goes through the Tauri HTTP plugin, which
+> issues the request from Rust rather than from the webview, and
+> whether it forwards an `Origin` at all has not been confirmed
+> against a live deploy. If desktop rows never appear, that check
+> is the first place to look; the fix is one entry in
+> `ALLOWED_ORIGINS`, not a client change.
+>
+> On the **web** the endpoint stays relative and this variable is
+> irrelevant — the Pages Function that answers it is part of the
+> deploy that served the page, so a web fork already reports to
+> itself with no configuration.
 
 **15.4 Weblate.** `sync-weblate.yml` targets upstream's Weblate
 project and needs `WEBLATE_TOKEN`. Disable the workflow unless you
