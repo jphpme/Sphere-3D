@@ -1836,6 +1836,33 @@ handled inside hls.js and never reach either layer.
 
 #### 3. IPC channel goes silent
 
+> **Landed** (`src/output/linkWatchdog.ts`, the composition in
+> `outputLink`, the manager's resync reply, and a `link` field on
+> the debug HUD). The constants below were already in
+> `protocol.ts` and the `output_health_check` event already in the
+> schema — only the detector was missing, so nothing on either
+> side had ever measured silence.
+>
+> Four things the build settled that this section leaves open.
+> The watchdog's clock **starts at connect**, so an output nobody
+> ever broadcasts to goes stale — that is the case most worth
+> catching and a detector armed by the first message never fires
+> in it. **Orphaned is not terminal**: any message returns the
+> link to live, which is what makes the recovery paragraph below
+> work at all. Both thresholds measure from the **last message**
+> rather than from each other, so orphan is 60 s of quiet rather
+> than 65. And the manager answers a ping through the *same* path
+> as `output_ready` — which also means a ping is how an output
+> recovers when its announcement was lost.
+>
+> Still to come, and the reason this is not the whole of case 3:
+> the **stale badge** in the Outputs panel. The manager now knows
+> (it logs each ping) but `OutputRecord` carries no health field
+> and the panel has nothing to paint. That is the next slice. The
+> **boot scan** the recovery paragraph depends on is case 6 and
+> also unbuilt — so today an orphaned output recovers only if the
+> same manager comes back, not a relaunched one.
+
 **Detection.** Output expects a state diff at least every
 2 s during normal operation (the per-second timecode is
 the floor). 5 s with no message → output enters **stale

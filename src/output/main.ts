@@ -42,6 +42,7 @@ import {
   shouldRenderFrame,
   type OutputLayerInput,
 } from './outputScene'
+import type { LinkHealth } from './linkWatchdog'
 import type { SyncOutcome } from './outputSync'
 import { createFullscreenController, resolveChromeHost } from '../services/windowChrome'
 import type { OutputGlobeState, OutputRenderConfig } from '../services/multiOutput/protocol'
@@ -83,6 +84,19 @@ async function boot(): Promise<void> {
    *  the GL context, and `undefined` — not `null` — is the "not asked
    *  yet" marker, so a driver that *refuses* the query is not re-asked
    *  twice a second for the life of the installation. */
+  /**
+   * The link's health, read by the HUD before the link exists.
+   *
+   * The overlay is mounted unconditionally and the link attaches on
+   * desktop only, inside a `try` that is allowed to fail — so the HUD
+   * outlives every case where there is no link to ask. `live` is the
+   * honest default rather than a hedge: the static fixture page and a
+   * failed attach both have no control window to have gone quiet on
+   * them, and reporting `orphaned` there would put a fault on screen
+   * for a window that is working exactly as intended.
+   */
+  let readLinkHealth: () => LinkHealth = () => 'live'
+
   let gpu: string | null | undefined
   const gpuName = (): string | null => {
     if (gpu === undefined) gpu = scene.rendererName()
@@ -101,6 +115,10 @@ async function boot(): Promise<void> {
     driftS: lastSync?.driftS ?? null,
     syncKind: lastSync?.kind ?? null,
     fps,
+    // Read, never evaluated: `linkHealth()` is the pure getter, so
+    // painting the HUD cannot itself send a health-check ping. The
+    // evaluation happens once per frame in the loop below.
+    link: readLinkHealth(),
     gpu: gpuName(),
     framebuffer: scene.size,
   }))
@@ -118,6 +136,7 @@ async function boot(): Promise<void> {
 
     try {
       const link = await connectOutputLink(await createTauriLinkHost())
+      readLinkHealth = () => link.linkHealth()
 
       /**
        * Rebuild the composite from whatever the mirror currently holds.
@@ -227,6 +246,16 @@ async function boot(): Promise<void> {
         })
         // A seek changes the decoded frame without the scene knowing.
         if (before !== mirror.current()?.video?.currentTime) dirty = true
+        // Rides this loop rather than starting a timer (rung 13, case
+        // 3). The loop runs every frame and the loop's *draw* floors at
+        // 1 Hz, either of which is ample against a five-second
+        // threshold — and the watchdog rations its own pings, so
+        // calling it at the frame rate costs an integer compare.
+        // Deliberately **not** flagging the scene dirty on a health
+        // transition: the picture does not change when the link does,
+        // and a stale link that forced a redraw would spend GPU
+        // announcing that nothing is arriving.
+        link.checkHealth()
       }
       steerers.push(steer)
     } catch (err) {

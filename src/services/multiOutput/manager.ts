@@ -1046,7 +1046,27 @@ export class MultiOutputManager {
       // from a crash would have been overwritten by a heartbeat.
       record.announcedClosing = true
     }
-    if (event.type === 'output_ready') {
+    if (event.type === 'output_health_check') {
+      // The output has heard nothing for `IPC_STALE_MS` and is asking
+      // whether anyone is there (rung 13, case 3). Reaching this line
+      // is the answer.
+      logger.warn(
+        `[multiOutput] ${event.label} reports the link stale ` +
+          `(${event.silentMs} ms quiet) — resyncing`,
+      )
+    }
+    // A ping and an announcement are served by **one** path, not two.
+    // Both prove the same thing — the window is up and listening — and
+    // the config-before-state ordering below is load-bearing, so a
+    // second copy of it is a second place for it to drift.
+    //
+    // Serving a ping is also how an output recovers when its
+    // `output_ready` was missed: a manager restart, or the
+    // spawn-ordering race, would otherwise leave it un-served for the
+    // life of the window. And a resync is the right reply rather than
+    // a bare acknowledgement — whatever cost it the heartbeat may have
+    // cost it a diff, and a full snapshot is the same round trip.
+    if (event.type === 'output_ready' || event.type === 'output_health_check') {
       record.ready = true
       // Config first. A restored 8K output that received its state
       // before its resolution would render one or more frames at the

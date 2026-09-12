@@ -59,6 +59,7 @@
  */
 
 import { logger } from '../utils/logger'
+import type { LinkHealth } from './linkWatchdog'
 import type { SyncKind } from './outputSync'
 
 /** How often the HUD re-reads and repaints. */
@@ -79,6 +80,14 @@ export interface DebugOverlayReading {
    *  forecast as "sync just shows a dash" with no way to tell which. */
   syncKind: SyncKind | null
   fps: number
+  /** What the output believes about its link to the control window
+   *  (rung 13, case 3). Shown because it separates the two questions
+   *  an operator in front of a frozen sphere actually has — "is the
+   *  picture wrong?" from "has the control window stopped talking to
+   *  me?" — which every other field on this HUD leaves indistinguish-
+   *  able, since a stale link renders a perfectly good last frame
+   *  forever. */
+  link: LinkHealth
   gpu: string | null
   framebuffer: { width: number; height: number }
 }
@@ -92,7 +101,7 @@ export interface DebugOverlayReading {
  * hunting a lead output that is actually late.
  */
 export function formatOverlay(reading: DebugOverlayReading): string[] {
-  const { datasetId, driftS, fps, gpu, framebuffer, syncKind } = reading
+  const { datasetId, driftS, fps, gpu, framebuffer, syncKind, link } = reading
   const sync =
     driftS === null
       ? `sync  —${syncKind ? ` ${syncKind}` : ''}`
@@ -103,6 +112,10 @@ export function formatOverlay(reading: DebugOverlayReading): string[] {
   return [
     `data  ${datasetId ?? '—'}`,
     sync,
+    // Directly under `sync`, because the two are read together: a
+    // drift the correction cannot fix means something different when
+    // the link that supplies the target went quiet four seconds ago.
+    `link  ${link}`,
     `fps   ${fps.toFixed(1)}`,
     `buf   ${framebuffer.width}×${framebuffer.height}`,
     `gpu   ${gpu ?? 'unreported'}`,

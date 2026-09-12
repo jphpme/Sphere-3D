@@ -26,6 +26,7 @@ function reading(over: Partial<DebugOverlayReading> = {}): DebugOverlayReading {
     driftS: 0,
     syncKind: 'playing',
     fps: 30,
+    link: 'live',
     gpu: 'NVIDIA GeForce RTX 4090 Laptop GPU',
     framebuffer: { width: 4096, height: 2048 },
     ...over,

@@ -825,6 +825,79 @@ describe('event routing', () => {
   })
 })
 
+describe('a stale link (rung 13, case 3)', () => {
+  it('answers a health check with the config and a fresh snapshot', async () => {
+    // Reaching the handler *is* the answer to "is anyone there", so the
+    // reply is a resync rather than an acknowledgement: whatever cost
+    // the output its heartbeat may also have cost it a diff, and a full
+    // snapshot is the same round trip as a ping reply.
+    const fake = createFakeHost()
+    const manager = makeManager(fake.host)
+    await manager.start()
+    await manager.addOutput({ monitorIndex: 0 })
+    fake.send(ready('output-1'))
+    fake.emitted.length = 0
+
+    fake.send({ type: 'output_health_check', label: 'output-1', silentMs: 5000 })
+
+    expect(configEmits(fake.emitted)).toHaveLength(1)
+    const states = stateEmits(fake.emitted)
+    expect(states).toHaveLength(1)
+    expect((states[0].payload as OutputStateMessage).full).toBe(true)
+  })
+
+  it('sends the config before the state, as the ready path does', async () => {
+    // One serve path, not two. A restored 8K output that got its state
+    // first would render at the default and then reallocate — a
+    // resolution pop caused by nothing but ordering, and a second copy
+    // of that ordering is a second place for it to drift.
+    const fake = createFakeHost()
+    const manager = makeManager(fake.host)
+    await manager.start()
+    await manager.addOutput({ monitorIndex: 0, render: { framebufferWidth: 8192 } })
+    fake.send(ready('output-1'))
+    fake.emitted.length = 0
+
+    fake.send({ type: 'output_health_check', label: 'output-1', silentMs: 7000 })
+
+    expect(fake.emitted.map(e => e.event)).toEqual([
+      OUTPUT_RENDER_CONFIG_EVENT,
+      OUTPUT_STATE_EVENT,
+    ])
+  })
+
+  it('serves an output whose announcement was missed', async () => {
+    // A ping proves the window is up and listening, which is what
+    // `output_ready` proves. Without this an output that lost its
+    // announcement — a manager restart, or the spawn-ordering race —
+    // stays un-served for the life of the window.
+    const fake = createFakeHost()
+    const manager = makeManager(fake.host)
+    await manager.start()
+    await manager.addOutput({ monitorIndex: 0 })
+    // No `output_ready` at all.
+    expect(manager.outputs()[0].ready).toBe(false)
+    fake.emitted.length = 0
+
+    fake.send({ type: 'output_health_check', label: 'output-1', silentMs: 5000 })
+
+    expect(manager.outputs()[0].ready).toBe(true)
+    expect(stateEmits(fake.emitted)).toHaveLength(1)
+  })
+
+  it('ignores a ping from a label it does not know', async () => {
+    const fake = createFakeHost()
+    const manager = makeManager(fake.host)
+    await manager.start()
+    await manager.addOutput({ monitorIndex: 0 })
+    fake.emitted.length = 0
+
+    fake.send({ type: 'output_health_check', label: 'output-9', silentMs: 5000 })
+
+    expect(fake.emitted).toEqual([])
+  })
+})
+
 describe('lifecycle', () => {
   it('start() is idempotent — one listener, one timer', async () => {
     vi.useFakeTimers()

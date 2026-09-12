@@ -65,6 +65,7 @@ import {
   type OutputRenderConfig,
   type OutputStateMessage,
 } from '../services/multiOutput/protocol'
+import { createLinkWatchdog, type LinkHealth, type LinkWatchdog } from './linkWatchdog'
 import { logger } from '../utils/logger'
 
 /**
@@ -115,6 +116,16 @@ export interface OutputLinkHost {
    * host that has no such notion (the static fixture page has none).
    */
   onCloseRequested?(handler: () => void): Promise<void>
+
+  /**
+   * The clock the link-health watchdog reads (rung 13, case 3).
+   *
+   * Optional and defaulting to `Date.now`, because a real output has
+   * no reason to supply one and a test has every reason to: case 3's
+   * thresholds are five and sixty seconds, and driving those through a
+   * real clock is a minute-long test that fails on a loaded runner.
+   */
+  nowMs?(): number
 }
 
 /** What one accepted (or rejected) message did to the held state. */
@@ -367,6 +378,18 @@ export interface OutputLink {
    *  the keys that differ. Never called with an empty list — a
    *  heartbeat that changed nothing is not news. */
   onChange(listener: (changed: StateKey[], state: Readonly<OutputGlobeState>) => void): () => void
+  /**
+   * Evaluate the link's health and ping if one is due (rung 13, case
+   * 3). Ride an existing loop rather than starting a timer — the
+   * output's render loop already runs at ≥1 Hz, which is ample against
+   * a five-second threshold, and a second timer is a second thing to
+   * tear down. Same shape `playbackSettle` uses over
+   * `playbackController`'s rAF loop.
+   */
+  checkHealth(nowMs?: number): LinkHealth
+  /** What the last `checkHealth` concluded. A pure read for the debug
+   *  HUD, so painting the field cannot itself send a ping. */
+  linkHealth(): LinkHealth
   /** Detach the listener. Idempotent. */
   stop(): Promise<void>
 }
@@ -385,7 +408,22 @@ export async function connectOutputLink(
   const configListeners = new Set<(config: Readonly<OutputRenderConfig>) => void>()
   let currentConfig = defaultRenderConfig()
 
+  // Armed before the listeners, so its clock starts when the link was
+  // asked for rather than when something first arrived — an output
+  // nobody ever broadcasts to is the case worth detecting, and a
+  // watchdog started by the first message never fires in it.
+  const watchdog: LinkWatchdog = createLinkWatchdog(host.nowMs?.() ?? Date.now())
+  let health: LinkHealth = 'live'
+
   const unlisten = await host.listen(OUTPUT_STATE_EVENT, payload => {
+    // Contact recorded before the payload is judged. A message that
+    // fails to parse, or one the store discards as stale or
+    // unchanged, is still proof the control window is alive — which is
+    // the only question this watchdog asks. Recording it after the
+    // early returns below would let a perfectly healthy idle link,
+    // whose heartbeat repeats an unchanged snapshot every second, go
+    // stale in five.
+    watchdog.sawMessage(host.nowMs?.() ?? Date.now())
     if (!isStateMessage(payload)) {
       logger.warn('[output] dropping a payload that is not a state message')
       return
@@ -406,6 +444,10 @@ export async function connectOutputLink(
   })
 
   const unlistenConfig = await host.listen(OUTPUT_RENDER_CONFIG_EVENT, payload => {
+    // The other channel counts the same. Proof of life is proof of
+    // life, and a manager that only had a config change to send is
+    // still there.
+    watchdog.sawMessage(host.nowMs?.() ?? Date.now())
     if (!isRenderConfig(payload)) {
       logger.warn('[output] dropping a payload that is not a config message')
       return
@@ -454,6 +496,36 @@ export async function connectOutputLink(
       listeners.add(listener)
       return () => listeners.delete(listener)
     },
+    checkHealth(nowMs = host.nowMs?.() ?? Date.now()) {
+      // A stopped link is not a silent one — it is a link nobody is
+      // listening on by choice, and reporting it stale would put a
+      // wrong word on the HUD during teardown.
+      if (stopped) return health
+      const { health: next, shouldPing, silentMs } = watchdog.check(nowMs)
+      if (next !== health) {
+        logger.warn(`[output] link ${health} → ${next} after ${Math.round(silentMs)} ms quiet`)
+        health = next
+      }
+      if (shouldPing) {
+        // Fired, never awaited: this runs from the render loop, and a
+        // ping that cannot be delivered is exactly the situation being
+        // reported — letting its rejection propagate would turn a
+        // degraded link into a dropped frame.
+        void host
+          .emit(OUTPUT_EVENT, {
+            type: 'output_health_check',
+            label: host.label,
+            silentMs: Math.round(silentMs),
+          })
+          .catch(() => {
+            // Nothing to do and nowhere to say it. The transition above
+            // has already been logged, and a failing ping is the same
+            // news as an unanswered one.
+          })
+      }
+      return health
+    },
+    linkHealth: () => health,
     async stop() {
       if (stopped) return
       stopped = true
