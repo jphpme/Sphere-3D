@@ -47,7 +47,7 @@ import {
   type OutputConfigStore,
   type PersistedOutputConfig,
 } from './outputPersistence'
-import { CRASH_STORM_LIMIT } from './outputHealth'
+import { CRASH_STORM_LIMIT, STALE_REPORT_TTL_MS } from './outputHealth'
 
 /** Telemetry payloads of one event type, in the order they were sent. */
 function reported(eventType: string): Record<string, unknown>[] {
@@ -883,6 +883,72 @@ describe('a stale link (rung 13, case 3)', () => {
 
     expect(manager.outputs()[0].ready).toBe(true)
     expect(stateEmits(fake.emitted)).toHaveLength(1)
+  })
+
+  it('badges an output that reported the link stale, and notifies', async () => {
+    // The badge is the only place this surfaces. A stale output renders
+    // its last frame, which looks entirely correct on the sphere.
+    const fake = createFakeHost()
+    let clock = 0
+    const manager = makeManager(fake.host, { nowMs: () => clock })
+    await manager.start()
+    await manager.addOutput({ monitorIndex: 0 })
+    fake.send(ready('output-1'))
+    expect(manager.outputs()[0].health).toBe('live')
+    const seen = vi.fn()
+    manager.onOutputsChanged(seen)
+
+    fake.send({ type: 'output_health_check', label: 'output-1', silentMs: 5000 })
+
+    expect(manager.outputs()[0].health).toBe('stale')
+    expect(seen).toHaveBeenCalled()
+  })
+
+  it('clears the badge once the complaints stop', async () => {
+    // Nothing arrives to say the link recovered — the output simply
+    // goes quiet — so the heartbeat is the only thing that can notice.
+    const fake = createFakeHost()
+    let clock = 0
+    const manager = makeManager(fake.host, { nowMs: () => clock })
+    await manager.start()
+    await manager.addOutput({ monitorIndex: 0 })
+    fake.send(ready('output-1'))
+    fake.send({ type: 'output_health_check', label: 'output-1', silentMs: 5000 })
+    expect(manager.outputs()[0].health).toBe('stale')
+
+    clock += STALE_REPORT_TTL_MS
+    await manager.tick()
+
+    expect(manager.outputs()[0].health).toBe('live')
+  })
+
+  it('badges a spawned output as starting until it announces', async () => {
+    const fake = createFakeHost()
+    const manager = makeManager(fake.host)
+    await manager.start()
+    await manager.addOutput({ monitorIndex: 0 })
+
+    expect(manager.outputs()[0].health).toBe('starting')
+    fake.send(ready('output-1'))
+    expect(manager.outputs()[0].health).toBe('live')
+  })
+
+  it('does not persist the health fields', async () => {
+    // A complaint from last Tuesday means nothing to a window that has
+    // not been spawned yet. `toPersistedOutput` takes a `Pick`, so this
+    // holds by construction — asserted so a later field addition to
+    // that pick cannot quietly change it.
+    const fake = createFakeHost()
+    const store = memoryStore()
+    const manager = makeManager(fake.host, { store })
+    await manager.start()
+    await manager.addOutput({ monitorIndex: 0 })
+    fake.send(ready('output-1'))
+    fake.send({ type: 'output_health_check', label: 'output-1', silentMs: 5000 })
+
+    const [persisted] = store.current().outputs
+    expect(persisted).not.toHaveProperty('health')
+    expect(persisted).not.toHaveProperty('lastHealthCheckAtMs')
   })
 
   it('ignores a ping from a label it does not know', async () => {

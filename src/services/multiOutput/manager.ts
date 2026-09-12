@@ -90,6 +90,8 @@ import {
   classifyDeparture,
   createCrashStormGuard,
   monitorKeyOf,
+  outputHealthState,
+  type OutputHealth,
   type CrashStormGuard,
   type OutputDeparture,
 } from './outputHealth'
@@ -178,6 +180,9 @@ export interface MultiOutputHost {
 export interface MultiOutputDeps {
   store?: OutputConfigStore
   sleep?: (ms: number) => Promise<void>
+  /** Clock behind the stale badge's freshness window. Injected so a
+   *  test can age a complaint without waiting five seconds. */
+  nowMs?: () => number
   /**
    * How many panels the **control window** is holding.
    *
@@ -232,6 +237,27 @@ export interface OutputRecord {
    *  signed origin — a Windows display name alone is positional and
    *  reassignable. */
   monitor: OutputMonitor
+  /**
+   * When this output last reported that it had heard nothing (rung 13,
+   * case 3), or `null` if it never has.
+   *
+   * The raw fact; `health` below is what the panel reads. Deliberately
+   * **not** persisted — `toPersistedOutput` takes a `Pick`, so this
+   * stays out by construction, and a complaint from last Tuesday means
+   * nothing to a window that has not been spawned yet.
+   */
+  lastHealthCheckAtMs: number | null
+  /**
+   * The badge, derived from `ready` and `lastHealthCheckAtMs` and kept
+   * current by the heartbeat.
+   *
+   * Stored rather than derived at read time because the panel cannot
+   * derive it: every `multiOutput/` import in `outputUI.ts` is
+   * type-only, so calling `outputHealthState` there would pull this
+   * cluster into the web entry chunk. Same reason `framebufferWidths()`
+   * exists.
+   */
+  health: OutputHealth
   /** True once the output has emitted `output_ready` and been sent its
    *  first full snapshot. Diffs go only to ready outputs; one that is
    *  still booting would apply a diff against a state it never had. */
@@ -287,6 +313,7 @@ export class MultiOutputManager {
   private readonly store: OutputConfigStore
   /** Injectable so the restore stagger is testable without spending it. */
   private readonly sleep: (ms: number) => Promise<void>
+  private readonly nowMs: () => number
   private readonly controlPanels: () => number
   private readonly machineDecoderBudget: () => number
 
@@ -295,6 +322,7 @@ export class MultiOutputManager {
     this.store = deps.store ?? createOutputConfigStore()
     this.sleep =
       deps.sleep ?? (ms => new Promise<void>(resolve => setTimeout(resolve, ms)))
+    this.nowMs = deps.nowMs ?? (() => Date.now())
     this.controlPanels = deps.controlPanels ?? (() => 1)
     this.machineDecoderBudget = deps.machineDecoderBudget ?? maxVideoPanels
   }
@@ -468,6 +496,8 @@ export class MultiOutputManager {
       monitor,
       ready: false,
       lastEvent: null,
+      lastHealthCheckAtMs: null,
+      health: 'starting',
       departing: false,
       announcedClosing: false,
     }
@@ -766,6 +796,11 @@ export class MultiOutputManager {
    * nothing and would be one more thing for the output to handle.
    */
   async tick(): Promise<void> {
+    // Before the broadcast, because half the badge's transitions are an
+    // *absence*: an output stops complaining by going quiet, and no
+    // event arrives to say so. This is the only thing that runs on a
+    // schedule, so it is the only place that silence can be noticed.
+    if (this.refreshHealth()) this.notifyChange()
     const message = this.aggregator.apply({})
     if (message) {
       await this.broadcast(message)
@@ -1054,6 +1089,7 @@ export class MultiOutputManager {
         `[multiOutput] ${event.label} reports the link stale ` +
           `(${event.silentMs} ms quiet) — resyncing`,
       )
+      record.lastHealthCheckAtMs = this.nowMs()
     }
     // A ping and an announcement are served by **one** path, not two.
     // Both prove the same thing — the window is up and listening — and
@@ -1081,6 +1117,34 @@ export class MultiOutputManager {
     } else if (event.type === 'output_closing') {
       record.ready = false
     }
+    // Every branch above can move a badge — a ping makes one stale, an
+    // announcement takes one out of `starting`, a closing puts it back.
+    if (this.refreshHealth()) this.notifyChange()
+  }
+
+  /**
+   * Re-derive every output's badge, and say whether any of them moved.
+   *
+   * Called from `tick()` as well as from the event handler, because
+   * half the transitions are the *absence* of an event: an output stops
+   * complaining by going quiet, and nothing arrives to say so. The
+   * heartbeat is already running once a second for the broadcast, so
+   * this costs a subtraction per output and needs no timer of its own.
+   *
+   * Returns a boolean rather than notifying itself, so a caller that is
+   * about to notify for its own reasons does not fire twice.
+   */
+  private refreshHealth(): boolean {
+    const now = this.nowMs()
+    let changed = false
+    for (const record of this.records.values()) {
+      const next = outputHealthState(record, now)
+      if (next !== record.health) {
+        record.health = next
+        changed = true
+      }
+    }
+    return changed
   }
 }
 

@@ -50,6 +50,7 @@ import type {
   OutputMonitor,
   OutputRecord,
 } from '../services/multiOutput/manager'
+import type { OutputHealth } from '../services/multiOutput/outputHealth'
 import type { OutputRenderConfig } from '../services/multiOutput/protocol'
 import type { OutputViewSettings } from '../services/multiOutput/stateAggregator'
 
@@ -70,6 +71,16 @@ export interface OutputPanelManager {
    *  not say. Asked rather than inferred — see `MultiOutputHost`. */
   primaryMonitor(): Promise<OutputMonitor | null>
   outputs(): OutputRecord[]
+  /**
+   * Repaint trigger for changes the panel did not cause — a crash, or
+   * an output's link going stale and coming back.
+   *
+   * Optional so a fake need not implement it, but wired for real: the
+   * manager has fired this since rung 13a and **nothing subscribed**,
+   * so a crash stayed on screen until the panel was reopened, which is
+   * the opposite of what a health badge is for.
+   */
+  onOutputsChanged?(listener: () => void): () => void
   addOutput(options: AddOutputOptions): Promise<OutputRecord>
   removeOutput(label: string): Promise<void>
   setOutputView(label: string, view: Partial<OutputViewSettings>): Promise<void>
@@ -255,6 +266,8 @@ function monitorRowName(
 let source: OutputPanelSource | null = null
 let root: HTMLElement | null = null
 let lastTrigger: HTMLElement | null = null
+/** Live subscription to manager-side changes, dropped on close. */
+let unsubscribeChanges: (() => void) | null = null
 /**
  * Guards against an older refresh finishing last.
  *
@@ -327,6 +340,10 @@ export function closeOutputUI(): void {
   root.remove()
   root = null
   document.removeEventListener('keydown', onEscape, true)
+  // Before the token bump, so a notification racing the close cannot
+  // schedule a refresh into a detached body.
+  unsubscribeChanges?.()
+  unsubscribeChanges = null
   // Bump so a refresh still in flight cannot paint into the detached
   // body — harmless to the DOM, but it would also clear the error a
   // reopen is about to show.
@@ -375,6 +392,19 @@ async function refresh(body: HTMLElement): Promise<void> {
     return
   }
   if (token !== refreshToken) return
+
+  // Subscribed on the first successful refresh rather than at open,
+  // because that is the first point a manager exists to subscribe to —
+  // and re-subscribing on every repaint would stack listeners, so the
+  // previous one goes first. What it buys: a crash or a link going
+  // stale repaints an open panel, instead of waiting for the operator
+  // to close and reopen it, which is the one moment they are least
+  // likely to.
+  unsubscribeChanges?.()
+  unsubscribeChanges =
+    mgr.onOutputsChanged?.(() => {
+      if (root) void refresh(body)
+    }) ?? null
 
   const records = mgr.outputs()
   replace(
@@ -766,6 +796,38 @@ function buildList(
   return section
 }
 
+/**
+ * The health badge, or nothing at all when the output is fine.
+ *
+ * **`live` renders no element**, which is the decision worth stating.
+ * A row of green "OK" chips trains an operator to stop reading them,
+ * and the panel is a place someone goes when they suspect a problem —
+ * so the only thing worth drawing is the exception. That also keeps
+ * the steady state visually identical to what shipped before this,
+ * which is what a badge nobody needs should cost.
+ *
+ * The label carries the meaning and the colour only reinforces it: the
+ * capture-clean installations this feature exists for are also the
+ * ones most likely to be read over someone's shoulder on a projector,
+ * and `aria-label` says what a two-word chip cannot — that a stale
+ * output is still showing a picture, just not a current one, which is
+ * exactly why nobody would otherwise notice.
+ */
+function buildHealthBadge(health: OutputHealth): HTMLElement | null {
+  if (health === 'live') return null
+  const badge = document.createElement('span')
+  badge.className = `output-item-health is-${health}`
+  badge.textContent =
+    health === 'stale' ? t('outputs.item.health.stale') : t('outputs.item.health.starting')
+  badge.setAttribute(
+    'aria-label',
+    health === 'stale'
+      ? t('outputs.item.healthAria.stale')
+      : t('outputs.item.healthAria.starting'),
+  )
+  return badge
+}
+
 function buildRow(
   mgr: OutputPanelManager,
   record: OutputRecord,
@@ -807,7 +869,9 @@ function buildRow(
     void removeOutput(mgr, record.label, remove, body)
   })
 
-  head.append(name, meta, remove)
+  const badge = buildHealthBadge(record.health)
+  if (badge) head.append(name, meta, badge, remove)
+  else head.append(name, meta, remove)
   item.appendChild(head)
 
   item.appendChild(

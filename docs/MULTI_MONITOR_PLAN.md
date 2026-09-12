@@ -1855,13 +1855,23 @@ handled inside hls.js and never reach either layer.
 > as `output_ready` — which also means a ping is how an output
 > recovers when its announcement was lost.
 >
-> Still to come, and the reason this is not the whole of case 3:
-> the **stale badge** in the Outputs panel. The manager now knows
-> (it logs each ping) but `OutputRecord` carries no health field
-> and the panel has nothing to paint. That is the next slice. The
-> **boot scan** the recovery paragraph depends on is case 6 and
-> also unbuilt — so today an orphaned output recovers only if the
-> same manager comes back, not a relaunched one.
+> The **stale badge** has since landed too, and finding out how
+> it should work moved a constant: `LINK_PING_INTERVAL_MS` was in
+> `linkWatchdog.ts` on the argument that only the output sends
+> pings, so no shared timing was implied. That was wrong. Deciding
+> an output has *stopped* complaining means knowing how long a
+> silence must be before the last complaint is out of date — which
+> is the ping cadence — so it now sits with the other agreed
+> timings in `protocol.ts`. The badge itself draws nothing for a
+> healthy output: a row of green chips trains an operator to skip
+> the row that matters. Wiring it also revealed that
+> `onOutputsChanged` had been fired since 13a with **no
+> subscriber**, so a crash stayed on screen until the panel was
+> reopened.
+>
+> Still missing: the **boot scan** the recovery paragraph depends
+> on is case 6 and unbuilt — so today an orphaned output recovers
+> only if the same manager comes back, not a relaunched one.
 
 **Detection.** Output expects a state diff at least every
 2 s during normal operation (the per-second timecode is

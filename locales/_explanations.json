@@ -44,6 +44,8 @@
   "outputs.decoders.used": "Readout under the decoder-budget field. {used} and {budget} are counts of windows, not of datasets.",
   "outputs.item.framebuffer": "Label for a per-output control choosing the size of the rendered equirectangular frame. This is NOT the monitor's resolution — the output is always fullscreen on its display, and this picks the buffer drawn into it. Prefer a term meaning 'render buffer' over one meaning 'screen resolution'.",
   "outputs.item.framebufferOption": "One framebuffer size option. {width} and {height} are pixel counts; the height is always half the width. Keep the multiplication sign (×) rather than the letter x.",
+  "outputs.item.health.stale": "Badge on a multi-monitor output window whose link to the control window has gone quiet. It is still displaying a picture — the last one it received — so \"stale\" describes the data, not a blank screen.",
+  "outputs.item.health.starting": "Badge on a multi-monitor output window that has been opened but has not yet reported back. Transient, normally a second or two.",
   "outputs.monitor.mapSize": "Pixel size written inside one display's rectangle in the position diagram. Very little room, so keep it short. Keep the multiplication sign (×) rather than the letter x.",
   "outputs.monitor.optionPrimary": "One display in the add-an-output picker, when the operating system reports it as the primary display — the one carrying the desktop's main screen. {name} is the display's name, {width}/{height} its pixel size. Keep the multiplication sign (×) rather than the letter x.",
   "outputs.monitor.optionPrimaryInUse": "As outputs.monitor.optionPrimary, but this display already has an output window on it and cannot be picked again. Both markers apply at once.",

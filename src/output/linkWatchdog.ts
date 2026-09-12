@@ -47,7 +47,11 @@
  * off the constants.
  */
 
-import { IPC_ORPHAN_MS, IPC_STALE_MS } from '../services/multiOutput/protocol'
+import {
+  IPC_ORPHAN_MS,
+  IPC_STALE_MS,
+  LINK_PING_INTERVAL_MS,
+} from '../services/multiOutput/protocol'
 
 /** What the output believes about its link to the control window. */
 export type LinkHealth =
@@ -59,21 +63,10 @@ export type LinkHealth =
   /** Quiet past `IPC_ORPHAN_MS`. Still rendering; no longer pinging. */
   | 'orphaned'
 
-/**
- * How often to ping while stale.
- *
- * Deliberately **not** in `protocol.ts`, which holds the timings both
- * ends must agree on. Only the output sends these and the manager
- * answers whatever arrives, so a change here cannot desynchronise
- * anything — and putting it there would imply the manager depends on
- * the cadence, which is the kind of false coupling that stops people
- * touching a number.
- *
- * Twice the broadcast tick: frequent enough that a manager which comes
- * back mid-window resyncs within a couple of seconds, sparse enough
- * that the whole stale period costs about 27 pings rather than 55.
- */
-export const LINK_PING_INTERVAL_MS = 2000
+
+/** Re-exported from the contract, where it moved once the manager
+ *  turned out to need it too — see its docstring there. */
+export { LINK_PING_INTERVAL_MS }
 
 export interface LinkCheck {
   /** What the output should believe right now. */

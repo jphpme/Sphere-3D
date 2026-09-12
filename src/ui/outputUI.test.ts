@@ -37,6 +37,8 @@ function record(label: string, on: OutputMonitor): OutputRecord {
     render: defaultRenderConfig(),
     monitor: on,
     ready: false,
+    lastHealthCheckAtMs: null,
+    health: 'starting' as const,
     lastEvent: null,
     departing: false,
     announcedClosing: false,
@@ -58,6 +60,7 @@ function fakeManager(
   primary: OutputMonitor | null | undefined = undefined,
 ) {
   const records: OutputRecord[] = []
+  const changeListeners = new Set<() => void>()
   let restoreOnLaunch = false
   let decoderBudget: number | null = null
   const mgr = {
@@ -93,12 +96,25 @@ function fakeManager(
     setDecoderBudget: vi.fn((budget: number | null) => {
       decoderBudget = budget
     }),
+    onOutputsChanged: vi.fn((listener: () => void) => {
+      changeListeners.add(listener)
+      return () => changeListeners.delete(listener)
+    }),
     isRestoreOnLaunch: vi.fn(() => restoreOnLaunch),
     setRestoreOnLaunch: vi.fn((enabled: boolean) => {
       restoreOnLaunch = enabled
     }),
   }
-  return { mgr: mgr as unknown as OutputPanelManager, raw: mgr, records }
+  return {
+    mgr: mgr as unknown as OutputPanelManager,
+    raw: mgr,
+    records,
+    /** Fire what the real manager fires on a crash or a health change. */
+    notifyChanged: () => {
+      for (const listener of [...changeListeners]) listener()
+    },
+    liveListeners: () => changeListeners.size,
+  }
 }
 
 function mount(mgr: OutputPanelManager | null): void {
@@ -651,6 +667,85 @@ describe('the Outputs panel', () => {
  * operator reads it as the truth about their desk right up to the
  * moment a fullscreen window opens on the wrong display.
  */
+describe('the health badge', () => {
+  it('shows nothing for a healthy output', async () => {
+    // A row of green "OK" chips trains an operator to stop reading
+    // them, and this panel is where someone goes when they suspect a
+    // problem. The steady state should look exactly as it did before
+    // the badge existed.
+    const fake = fakeManager()
+    mount(fake.mgr)
+    await until(painted, 'the panel to settle')
+    await fake.mgr.addOutput({ monitorIndex: 0 })
+    fake.records[0].ready = true
+    fake.records[0].health = 'live'
+    fake.notifyChanged()
+    await until(() => $$('.output-item').length === 1, 'the row')
+
+    expect($('.output-item-health')).toBeNull()
+  })
+
+  it('badges a stale link, and says what that means', async () => {
+    const fake = fakeManager()
+    mount(fake.mgr)
+    await until(painted, 'the panel to settle')
+    await fake.mgr.addOutput({ monitorIndex: 0 })
+    fake.records[0].health = 'stale'
+    fake.notifyChanged()
+
+    await until(() => $('.output-item-health') !== null, 'the badge')
+    const badge = $<HTMLElement>('.output-item-health')
+    expect(badge?.classList.contains('is-stale')).toBe(true)
+    // The label is two words; the accessible name has to carry the part
+    // that is not obvious — that the sphere still shows a picture.
+    expect(badge?.getAttribute('aria-label') ?? '').toMatch(/last frame/i)
+  })
+
+  it('repaints on a change the panel did not cause', async () => {
+    // The manager has fired `onOutputsChanged` since rung 13a and
+    // nothing subscribed, so a crash stayed on screen until the panel
+    // was reopened — the one moment an operator is least likely to
+    // reach for.
+    const fake = fakeManager()
+    mount(fake.mgr)
+    await until(painted, 'the panel to settle')
+    await fake.mgr.addOutput({ monitorIndex: 0 })
+    fake.notifyChanged()
+    await until(() => $$('.output-item').length === 1, 'the row')
+
+    fake.records.length = 0
+    fake.notifyChanged()
+
+    await until(() => $$('.output-item').length === 0, 'the row to go')
+  })
+
+  it('drops its subscription when the panel closes', async () => {
+    const fake = fakeManager()
+    mount(fake.mgr)
+    await until(painted, 'the panel to settle')
+    expect(fake.liveListeners()).toBe(1)
+
+    closeOutputUI()
+
+    expect(fake.liveListeners()).toBe(0)
+  })
+
+  it('keeps exactly one subscription across repaints', async () => {
+    // Every refresh re-subscribes, so without dropping the previous one
+    // a panel left open through a few changes would repaint once per
+    // listener and grow from there.
+    const fake = fakeManager()
+    mount(fake.mgr)
+    await until(painted, 'the panel to settle')
+    fake.notifyChanged()
+    await until(() => fake.raw.outputs.mock.calls.length >= 2, 'a repaint')
+    fake.notifyChanged()
+    await until(() => fake.raw.outputs.mock.calls.length >= 3, 'another repaint')
+
+    expect(fake.liveListeners()).toBe(1)
+  })
+})
+
 describe('monitorLayout', () => {
   it('places a negative origin inside the box instead of off its edge', () => {
     // The arrangement the hardware spike behind this feature actually
