@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { renderDatasetForm } from './dataset-form'
 import { renderDatasetEditPage } from '../pages/dataset-edit'
@@ -180,6 +183,42 @@ describe('dataset form — data-encoded controls', () => {
     area.dispatchEvent(new Event('input'))
     const text = root.textContent ?? ''
     expect(text).toMatch(/dBZ/)
+  })
+
+  it('tells the publisher what viewers will actually see', () => {
+    // A sidecar in `kg m-3` topping out at 2e-7 is shown as 0 to 200
+    // µg m-3 on the globe. The publisher should learn that here rather
+    // than by loading the dataset and wondering what happened to it.
+    const { root } = mount()
+    openMedia(root)
+    const box = toggle(root)!
+    box.checked = true
+    box.dispatchEvent(new Event('change'))
+    openMedia(root)
+    const area = scaleBox(root)!
+    area.value = JSON.stringify({
+      stops: [{ t: 0, rgba: [255, 255, 255, 0] }, { t: 1, rgba: [90, 30, 10, 255] }],
+      vmin: 0,
+      vmax: 2e-7,
+      units: 'kg m-3',
+    })
+    area.dispatchEvent(new Event('input'))
+    const text = root.textContent ?? ''
+    expect(text).toMatch(/kg m-3/)
+    expect(text).toMatch(/200 µg m-3/)
+  })
+
+  it('stays quiet about readable units when nothing was restated', () => {
+    const { root } = mount()
+    openMedia(root)
+    const box = toggle(root)!
+    box.checked = true
+    box.dispatchEvent(new Event('change'))
+    openMedia(root)
+    const area = scaleBox(root)!
+    area.value = VALID_SCALE
+    area.dispatchEvent(new Event('input'))
+    expect(root.textContent ?? '').not.toMatch(/Viewers see this as/)
   })
 
   it('sends data-luma and the sidecar when enabled', async () => {

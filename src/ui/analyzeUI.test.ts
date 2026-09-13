@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * Tests for the Analyze panel and its CSV export.
  *
@@ -215,6 +218,23 @@ describe('buildCsvText', () => {
     expect(csv).toContain('dataset,Wildfire Smoke Overhead')
     expect(csv).toContain('units,mg m-2')
     expect(csv).toContain('quantisation_step,1')
+  })
+
+  it('names the publisher\'s own units when the scale was restated', () => {
+    // The export is the artefact somebody checks a claim against, quite
+    // possibly against the model output itself. `µg m-3` and `kg m-3`
+    // are the same measurement only if the file says which it is.
+    const restated = { ...SCALE, units: 'µg m-3', sourceUnits: 'kg m-3' }
+    const csv = buildCsvText(stats, buildHistogram(s, restated, OPTIONS), restated, {
+      datasetTitle: 'Smoke at ground level', scopeLabel: 'dataset',
+    })
+    expect(csv).toContain('units,µg m-3')
+    expect(csv).toContain('source_units,kg m-3')
+  })
+
+  it('omits the source-units row for a scale nothing was done to', () => {
+    const csv = buildCsvText(stats, hist, SCALE, { datasetTitle: null, scopeLabel: 'dataset' })
+    expect(csv).not.toContain('source_units')
   })
 
   it('carries the distribution, not just the summary', () => {

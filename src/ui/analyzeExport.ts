@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * CSV export for the Analyze panel.
  *
@@ -24,7 +27,8 @@ import {
   type TransectSample,
   type ZonalSample,
 } from '../services/datasetStats'
-import { lumaToValue, type ColorScale } from '../types/color-scale'
+import { lumaToValue } from '../types/color-scale'
+import type { DisplayColorScale } from '../types/unit-scale'
 
 type Cell = string | number | null | undefined
 
@@ -44,6 +48,21 @@ export interface CsvContext {
 }
 
 /**
+ * The unit rows every export shares.
+ *
+ * `source_units` appears only when the scale was restated for
+ * readability — `units, µg m-3` over a dataset the publisher stored as
+ * `kg m-3`. The file is the artefact somebody checks a claim against a
+ * week later, quite possibly against the model output itself, and the
+ * two are the same measurement only if the file says so.
+ */
+function unitRows(scale: DisplayColorScale): Cell[][] {
+  const list: Cell[][] = [['units', scale.units ?? '']]
+  if (scale.sourceUnits) list.push(['source_units', scale.sourceUnits])
+  return list
+}
+
+/**
  * Serialise a summary plus its distribution.
  *
  * Values are written at full precision rather than the three
@@ -55,14 +74,14 @@ export interface CsvContext {
 export function buildCsvText(
   stats: RegionStats,
   hist: LumaHistogram,
-  scale: ColorScale,
+  scale: DisplayColorScale,
   ctx: CsvContext,
 ): string {
   const step = Math.abs(scale.vmax - scale.vmin) / 255
   const head: Cell[][] = [
     ['dataset', ctx.datasetTitle ?? ''],
     ['region', ctx.scopeLabel],
-    ['units', scale.units ?? ''],
+    ...unitRows(scale),
     ['value_min', scale.vmin],
     ['value_max', scale.vmax],
     ['quantisation_step', step],
@@ -108,7 +127,7 @@ export function buildCsvText(
  */
 export function buildTransectCsvText(
   samples: readonly TransectSample[],
-  scale: ColorScale,
+  scale: DisplayColorScale,
   ctx: CsvContext,
 ): string {
   const step = Math.abs(scale.vmax - scale.vmin) / 255
@@ -117,7 +136,7 @@ export function buildTransectCsvText(
   const head: Cell[][] = [
     ['dataset', ctx.datasetTitle ?? ''],
     ['region', ctx.scopeLabel],
-    ['units', scale.units ?? ''],
+    ...unitRows(scale),
     ['value_min', scale.vmin],
     ['value_max', scale.vmax],
     ['quantisation_step', step],
@@ -148,7 +167,7 @@ export function buildTransectCsvText(
  */
 export function buildZonalCsvText(
   samples: readonly ZonalSample[],
-  scale: ColorScale,
+  scale: DisplayColorScale,
   ctx: CsvContext,
 ): string {
   const step = Math.abs(scale.vmax - scale.vmin) / 255
@@ -156,7 +175,7 @@ export function buildZonalCsvText(
   const head: Cell[][] = [
     ['dataset', ctx.datasetTitle ?? ''],
     ['region', ctx.scopeLabel],
-    ['units', scale.units ?? ''],
+    ...unitRows(scale),
     ['value_min', scale.vmin],
     ['value_max', scale.vmax],
     ['quantisation_step', step],

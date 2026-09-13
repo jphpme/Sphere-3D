@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 import { defineConfig, loadEnv } from 'vite'
 import path from 'path'
 import { readFileSync } from 'fs'
@@ -44,9 +47,14 @@ export default defineConfig(({ mode }) => {
       sourcemap: true,
       minify: true,
       rollupOptions: {
+        // ADD entries here; never rewrite this object. Authoring a
+        // fresh `input` silently drops the others — see
+        // `docs/MULTI_MONITOR_PLAN.md` §7, and the test in
+        // `src/output/outputScene.test.ts` that pins all three.
         input: {
           main: path.resolve(__dirname, 'src/index.html'),
           orbit: path.resolve(__dirname, 'src/orbit.html'),
+          output: path.resolve(__dirname, 'src/output/output.html'),
         },
       },
     },

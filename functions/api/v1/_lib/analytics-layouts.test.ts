@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * Round-trip tests for the analytics layout registry: every event
  * type is encoded through the REAL `toDataPoint()` from
@@ -280,6 +283,26 @@ const FIXTURES: { [K in TelemetryEventType]: EventFor<K> } = {
     event_type: 'publisher_action',
     action: 'draft_saved',
     dataset_id: 'a1b2c3d4e5f6',
+    client_offset_ms: 100,
+  },
+  output_added: {
+    event_type: 'output_added',
+    mode: 'sos-equirect',
+    framebuffer_bucket: '4k',
+    monitor_index: 1,
+    client_offset_ms: 100,
+  },
+  output_removed: {
+    event_type: 'output_removed',
+    mode: 'sos-equirect',
+    reason: 'crash',
+    client_offset_ms: 100,
+  },
+  output_failure: {
+    event_type: 'output_failure',
+    kind: 'crash',
+    retries: 0,
+    recovered: false,
     client_offset_ms: 100,
   },
   dwell: {

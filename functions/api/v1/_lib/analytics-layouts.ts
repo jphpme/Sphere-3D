@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * Positional blob/double layouts for every telemetry event type —
  * the decode side of `toDataPoint()` in `functions/api/ingest.ts`.
@@ -209,6 +212,24 @@ export const EVENT_LAYOUTS = {
   publisher_action: {
     blobs: ['action', 'dataset_id'],
     doubles: ['client_offset_ms'],
+  },
+  // Multi-monitor output windows (docs/MULTI_MONITOR_PLAN.md rung 13).
+  // Emitted by the control window only; the outputs stay capture-clean
+  // and phone nothing home.
+  output_added: {
+    blobs: ['framebuffer_bucket', 'mode'],
+    doubles: ['client_offset_ms', 'monitor_index'],
+  },
+  output_removed: {
+    blobs: ['mode', 'reason'],
+    doubles: ['client_offset_ms'],
+  },
+  output_failure: {
+    // `recovered` sorts before `retries` — 'rec' < 'ret' — so the
+    // boolean takes blob6 and the count takes double2.
+    blobs: ['kind', 'recovered'],
+    booleans: ['recovered'],
+    doubles: ['client_offset_ms', 'retries'],
   },
   // --- Tier B ---
   dwell: {

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * Time utilities for parsing and formatting temporal data
  */
@@ -272,7 +275,7 @@ export const SIBLING_HARD_SEEK_THRESHOLD_S = 0.15
  * out-of-range, post-stall, scrub) and acceptable because it's rare.
  */
 const SYNC_RATE_GAIN = 0.5
-const SYNC_MAX_RATE_TRIM = 0.25
+export const SYNC_MAX_RATE_TRIM = 0.25
 
 /**
  * How close (seconds) a sibling must already be to its target before a
