@@ -16,9 +16,70 @@ import { describe, it, expect } from 'vitest'
 import {
   CRASH_STORM_LIMIT,
   CRASH_STORM_WINDOW_MS,
+  STALE_REPORT_TTL_MS,
   classifyDeparture,
   createCrashStormGuard,
+  outputHealthState,
 } from './outputHealth'
+import { LINK_PING_INTERVAL_MS } from './protocol'
+
+describe('outputHealthState', () => {
+  it('is starting until the output announces itself', () => {
+    expect(
+      outputHealthState({ ready: false, lastHealthCheckAtMs: null }, 0),
+    ).toBe('starting')
+  })
+
+  it('is live once announced with no complaint', () => {
+    expect(outputHealthState({ ready: true, lastHealthCheckAtMs: null }, 0)).toBe('live')
+  })
+
+  it('is stale while a complaint is current', () => {
+    expect(
+      outputHealthState({ ready: true, lastHealthCheckAtMs: 1_000 }, 1_000),
+    ).toBe('stale')
+    expect(
+      outputHealthState(
+        { ready: true, lastHealthCheckAtMs: 1_000 },
+        1_000 + STALE_REPORT_TTL_MS - 1,
+      ),
+    ).toBe('stale')
+  })
+
+  it('goes back to live once the complaints stop', () => {
+    // An output stops complaining by going quiet — nothing arrives to
+    // say the link recovered, so the badge has to age out on its own.
+    expect(
+      outputHealthState(
+        { ready: true, lastHealthCheckAtMs: 1_000 },
+        1_000 + STALE_REPORT_TTL_MS,
+      ),
+    ).toBe('live')
+  })
+
+  it('rides out a single dropped ping without flickering', () => {
+    // A stale output pings every `LINK_PING_INTERVAL_MS`. If the window
+    // were one interval the badge would blink whenever a ping was late,
+    // which answers the opposite question to the one an operator is
+    // asking when they open this panel.
+    expect(STALE_REPORT_TTL_MS).toBeGreaterThan(LINK_PING_INTERVAL_MS * 2)
+    expect(
+      outputHealthState(
+        { ready: true, lastHealthCheckAtMs: 0 },
+        LINK_PING_INTERVAL_MS * 2,
+      ),
+    ).toBe('stale')
+  })
+
+  it('reports starting rather than stale for a window still booting', () => {
+    // An output that never announced has nothing to be stale *from*,
+    // and a degraded-link badge would send an operator looking at the
+    // wrong thing.
+    expect(
+      outputHealthState({ ready: false, lastHealthCheckAtMs: 0 }, 0),
+    ).toBe('starting')
+  })
+})
 
 describe('classifyDeparture', () => {
   it('calls a silent destroy a crash', () => {

@@ -27,6 +27,7 @@ import {
   type OutputLinkHost,
   type StateKey,
 } from './outputLink'
+import { IPC_ORPHAN_MS, IPC_STALE_MS } from '../services/multiOutput/protocol'
 import { IDENTITY_PARAMS } from './equirectRtt'
 import {
   OUTPUT_EVENT,
@@ -271,6 +272,10 @@ function fakeHost(): OutputLinkHost & {
   deliver: (payload: unknown) => void
   deliverConfig: (payload: unknown) => void
   listenedBefore: () => boolean
+  /** Move the link's clock. Case 3's thresholds are 5 s and 60 s, so
+   *  a real clock would mean a minute-long test that fails on a
+   *  loaded runner. */
+  advance: (ms: number) => void
 } {
   // Keyed by event: the link listens on two channels now, and a fake
   // that kept one handler would silently route state to the config
@@ -286,8 +291,13 @@ function fakeHost(): OutputLinkHost & {
   const emit = vi.fn(async () => {
     emitted = true
   })
+  let clock = 0
   return {
     label: 'output-3',
+    nowMs: () => clock,
+    advance: (ms: number) => {
+      clock += ms
+    },
     monitorName: async () => '\\\\.\\DISPLAY2',
     listen: async (event, h) => {
       handlers.set(event, h)
@@ -637,5 +647,113 @@ describe('announcing a close (rung 13)', () => {
     const host = fakeHost()
     delete host.onCloseRequested
     await expect(connectOutputLink(host)).resolves.toBeTruthy()
+  })
+})
+
+
+describe('link health (rung 13, case 3)', () => {
+  it('starts live and stays live while the heartbeat lands', async () => {
+    const host = fakeHost()
+    const link = await connectOutputLink(host)
+
+    expect(link.checkHealth()).toBe('live')
+    host.advance(IPC_STALE_MS - 1)
+    host.deliver(diff(1, { simulationDate: '2026-01-01T00:00:00.000Z' }))
+    host.advance(IPC_STALE_MS - 1)
+
+    expect(link.checkHealth()).toBe('live')
+  })
+
+  it('goes stale and pings, carrying how long it has been quiet', async () => {
+    const host = fakeHost()
+    const link = await connectOutputLink(host)
+    host.emit.mockClear()
+
+    host.advance(IPC_STALE_MS)
+
+    expect(link.checkHealth()).toBe('stale')
+    expect(host.emit).toHaveBeenCalledWith(OUTPUT_EVENT, {
+      type: 'output_health_check',
+      label: 'output-3',
+      silentMs: IPC_STALE_MS,
+    })
+  })
+
+  it('counts an unchanged heartbeat as contact', async () => {
+    // The manager's idle heartbeat repeats a full snapshot every
+    // second, and the store discards it as changing nothing. Recording
+    // contact only for messages that changed something would take a
+    // perfectly healthy idle link stale in five seconds — which is the
+    // single most likely way to get this wrong.
+    const host = fakeHost()
+    const link = await connectOutputLink(host)
+    const idle = full(1, { simulationDate: '2026-01-01T00:00:00.000Z' })
+
+    for (let t = 0; t < IPC_STALE_MS * 3; t += 1000) {
+      host.advance(1000)
+      host.deliver(idle)
+    }
+
+    expect(link.checkHealth()).toBe('live')
+  })
+
+  it('counts a config message as contact too', async () => {
+    const host = fakeHost()
+    const link = await connectOutputLink(host)
+
+    host.advance(IPC_STALE_MS - 1)
+    host.deliverConfig({ framebufferWidth: 2048, debugOverlay: false })
+    host.advance(IPC_STALE_MS - 1)
+
+    expect(link.checkHealth()).toBe('live')
+  })
+
+  it('stops pinging once orphaned', async () => {
+    const host = fakeHost()
+    const link = await connectOutputLink(host)
+    host.advance(IPC_ORPHAN_MS)
+    host.emit.mockClear()
+
+    expect(link.checkHealth()).toBe('orphaned')
+    expect(host.emit).not.toHaveBeenCalled()
+  })
+
+  it('recovers when the manager comes back', async () => {
+    // The plan's recovery path: a relaunched control window finds the
+    // window through `getAll()` and sends a fresh snapshot, and the
+    // output "exits stale state on receipt".
+    const host = fakeHost()
+    const link = await connectOutputLink(host)
+    host.advance(IPC_ORPHAN_MS * 2)
+    expect(link.checkHealth()).toBe('orphaned')
+
+    host.deliver(full(9, { simulationDate: '2026-02-02T00:00:00.000Z' }))
+
+    expect(link.checkHealth()).toBe('live')
+  })
+
+  it('does not let a ping rejection escape into the render loop', async () => {
+    // `checkHealth` runs per frame. A ping that cannot be delivered is
+    // precisely the situation being reported, so letting its rejection
+    // propagate would turn a degraded link into a dropped frame.
+    const host = fakeHost()
+    const link = await connectOutputLink(host)
+    host.emit.mockRejectedValue(new Error('channel gone'))
+    host.advance(IPC_STALE_MS)
+
+    expect(() => link.checkHealth()).not.toThrow()
+    expect(link.linkHealth()).toBe('stale')
+  })
+
+  it('reports through linkHealth() without sending anything', async () => {
+    // The HUD paints twice a second off this reader; if it evaluated,
+    // opening the overlay would change the ping cadence.
+    const host = fakeHost()
+    const link = await connectOutputLink(host)
+    host.advance(IPC_STALE_MS)
+    host.emit.mockClear()
+
+    expect(link.linkHealth()).toBe('live')
+    expect(host.emit).not.toHaveBeenCalled()
   })
 })

@@ -48,6 +48,8 @@
  * together and the wrong one is read first.
  */
 
+import { LINK_PING_INTERVAL_MS } from './protocol'
+
 /**
  * Identity of a monitor, as a comparable string.
  *
@@ -78,6 +80,66 @@ export function monitorKeyOf(monitor: {
   position: { x: number; y: number }
 }): string {
   return `${monitor.name ?? ''}@${monitor.position.x},${monitor.position.y}`
+}
+
+/**
+ * What the Outputs panel should say about an output that is still
+ * there (`docs/MULTI_MONITOR_PLAN.md` §3 "Failure recovery", case 3 —
+ * the stale badge).
+ *
+ * Three states, and the useful thing is what separates them. The
+ * manager cannot observe the link directly — it can only broadcast
+ * and see whether anyone complains — so the badge is built from the
+ * two facts it does have: whether the output has ever announced
+ * itself, and whether it has complained *recently*.
+ */
+export type OutputHealth =
+  /** Spawned, has not announced `output_ready`. Normal for a second or
+   *  two; sustained, it means the window is not coming up. */
+  | 'starting'
+  /** Announced, and not currently complaining. */
+  | 'live'
+  /** The output reported that it has heard nothing — it is rendering
+   *  its last known frame, which looks perfectly correct on the sphere
+   *  and is why this badge is the only place anyone would find out. */
+  | 'stale'
+
+/**
+ * How long a complaint stays current.
+ *
+ * A stale output pings every `LINK_PING_INTERVAL_MS`, so the question
+ * "is it still complaining?" is really "has a ping arrived lately?".
+ * Two and a half intervals rather than one, so a single dropped or
+ * late ping does not flicker the badge back to `live` and then
+ * straight out again — the operator is reading this to decide whether
+ * something is wrong, and a value that blinks answers the opposite
+ * question to the one they asked.
+ *
+ * There is no timer behind it. The manager already ticks once a second
+ * to broadcast, and re-deriving there costs a subtraction per output.
+ */
+export const STALE_REPORT_TTL_MS = LINK_PING_INTERVAL_MS * 2.5
+
+/**
+ * Derive the badge.
+ *
+ * Takes the two fields it reads rather than an `OutputRecord`, which
+ * lives in `manager.ts` — importing it would point this module at its
+ * own consumer, and the manager is the thing that must stay
+ * constructible without a window.
+ *
+ * `starting` outranks `stale`: an output that never announced has
+ * nothing to be stale *from*, and reporting a degraded link for a
+ * window that has not finished booting would send an operator looking
+ * at the wrong thing.
+ */
+export function outputHealthState(
+  output: { ready: boolean; lastHealthCheckAtMs: number | null },
+  nowMs: number,
+): OutputHealth {
+  if (!output.ready) return 'starting'
+  if (output.lastHealthCheckAtMs === null) return 'live'
+  return nowMs - output.lastHealthCheckAtMs < STALE_REPORT_TTL_MS ? 'stale' : 'live'
 }
 
 /** What happened to a window that is no longer there. */

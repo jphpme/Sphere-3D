@@ -649,6 +649,26 @@ export const STATE_TICK_MS = 1000
 export const IPC_STALE_MS = 5000
 
 /**
+ * How often a stale output pings while it waits to be heard.
+ *
+ * **Moved here from `linkWatchdog.ts`, where it was first written with
+ * an argument that this slice falsified.** That argument was: only the
+ * output sends these and the manager answers whatever arrives, so a
+ * shared constant would imply a coupling that does not exist. True
+ * until the Outputs panel needed a stale *badge* — because deciding
+ * that an output has *stopped* complaining means knowing how long a
+ * silence has to be before the last complaint is out of date, and that
+ * is the ping cadence. A manager holding its own guess would flicker
+ * the badge whenever the two numbers disagreed, which is precisely the
+ * "both ends must agree" test this block exists for.
+ *
+ * Twice the broadcast tick: frequent enough that a manager which comes
+ * back mid-window resyncs within a couple of seconds, sparse enough
+ * that the whole stale period costs about 27 pings rather than 55.
+ */
+export const LINK_PING_INTERVAL_MS = 2000
+
+/**
  * Silence after which the output considers itself orphaned and stops
  * pinging.
  *

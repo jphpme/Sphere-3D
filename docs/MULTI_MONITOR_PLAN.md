@@ -1836,6 +1836,43 @@ handled inside hls.js and never reach either layer.
 
 #### 3. IPC channel goes silent
 
+> **Landed** (`src/output/linkWatchdog.ts`, the composition in
+> `outputLink`, the manager's resync reply, and a `link` field on
+> the debug HUD). The constants below were already in
+> `protocol.ts` and the `output_health_check` event already in the
+> schema — only the detector was missing, so nothing on either
+> side had ever measured silence.
+>
+> Four things the build settled that this section leaves open.
+> The watchdog's clock **starts at connect**, so an output nobody
+> ever broadcasts to goes stale — that is the case most worth
+> catching and a detector armed by the first message never fires
+> in it. **Orphaned is not terminal**: any message returns the
+> link to live, which is what makes the recovery paragraph below
+> work at all. Both thresholds measure from the **last message**
+> rather than from each other, so orphan is 60 s of quiet rather
+> than 65. And the manager answers a ping through the *same* path
+> as `output_ready` — which also means a ping is how an output
+> recovers when its announcement was lost.
+>
+> The **stale badge** has since landed too, and finding out how
+> it should work moved a constant: `LINK_PING_INTERVAL_MS` was in
+> `linkWatchdog.ts` on the argument that only the output sends
+> pings, so no shared timing was implied. That was wrong. Deciding
+> an output has *stopped* complaining means knowing how long a
+> silence must be before the last complaint is out of date — which
+> is the ping cadence — so it now sits with the other agreed
+> timings in `protocol.ts`. The badge itself draws nothing for a
+> healthy output: a row of green chips trains an operator to skip
+> the row that matters. Wiring it also revealed that
+> `onOutputsChanged` had been fired since 13a with **no
+> subscriber**, so a crash stayed on screen until the panel was
+> reopened.
+>
+> Still missing: the **boot scan** the recovery paragraph depends
+> on is case 6 and unbuilt — so today an orphaned output recovers
+> only if the same manager comes back, not a relaunched one.
+
 **Detection.** Output expects a state diff at least every
 2 s during normal operation (the per-second timecode is
 the floor). 5 s with no message → output enters **stale

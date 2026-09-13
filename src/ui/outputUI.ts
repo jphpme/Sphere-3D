@@ -45,11 +45,13 @@
 
 import { t } from '../i18n'
 import { logger } from '../utils/logger'
+import { announcePolite } from './domUtils'
 import type {
   AddOutputOptions,
   OutputMonitor,
   OutputRecord,
 } from '../services/multiOutput/manager'
+import type { OutputHealth } from '../services/multiOutput/outputHealth'
 import type { OutputRenderConfig } from '../services/multiOutput/protocol'
 import type { OutputViewSettings } from '../services/multiOutput/stateAggregator'
 
@@ -70,6 +72,16 @@ export interface OutputPanelManager {
    *  not say. Asked rather than inferred — see `MultiOutputHost`. */
   primaryMonitor(): Promise<OutputMonitor | null>
   outputs(): OutputRecord[]
+  /**
+   * Repaint trigger for changes the panel did not cause — a crash, or
+   * an output's link going stale and coming back.
+   *
+   * Optional so a fake need not implement it, but wired for real: the
+   * manager has fired this since rung 13a and **nothing subscribed**,
+   * so a crash stayed on screen until the panel was reopened, which is
+   * the opposite of what a health badge is for.
+   */
+  onOutputsChanged?(listener: () => void): () => void
   addOutput(options: AddOutputOptions): Promise<OutputRecord>
   removeOutput(label: string): Promise<void>
   setOutputView(label: string, view: Partial<OutputViewSettings>): Promise<void>
@@ -255,6 +267,18 @@ function monitorRowName(
 let source: OutputPanelSource | null = null
 let root: HTMLElement | null = null
 let lastTrigger: HTMLElement | null = null
+/** Live subscription to manager-side changes, dropped on close. */
+let unsubscribeChanges: (() => void) | null = null
+/**
+ * Health per output label as of the last paint, or `null` for "the
+ * panel has not painted yet".
+ *
+ * The `null` is what stops the panel announcing the state it opened
+ * on: an operator who just opened it is about to read it, and being
+ * told what is already on screen is the noise that teaches people to
+ * ignore the channel. Cleared on close so a reopen is silent again.
+ */
+let lastHealth: Map<string, OutputHealth> | null = null
 /**
  * Guards against an older refresh finishing last.
  *
@@ -277,6 +301,7 @@ export function resetOutputUIForTests(): void {
   closeOutputUI()
   source = null
   refreshToken = 0
+  lastHealth = null
 }
 
 export function openOutputUI(triggeredBy?: HTMLElement | null): HTMLElement {
@@ -327,6 +352,11 @@ export function closeOutputUI(): void {
   root.remove()
   root = null
   document.removeEventListener('keydown', onEscape, true)
+  // Before the token bump, so a notification racing the close cannot
+  // schedule a refresh into a detached body.
+  unsubscribeChanges?.()
+  unsubscribeChanges = null
+  lastHealth = null
   // Bump so a refresh still in flight cannot paint into the detached
   // body — harmless to the DOM, but it would also clear the error a
   // reopen is about to show.
@@ -376,7 +406,21 @@ async function refresh(body: HTMLElement): Promise<void> {
   }
   if (token !== refreshToken) return
 
+  // Subscribed on the first successful refresh rather than at open,
+  // because that is the first point a manager exists to subscribe to —
+  // and re-subscribing on every repaint would stack listeners, so the
+  // previous one goes first. What it buys: a crash or a link going
+  // stale repaints an open panel, instead of waiting for the operator
+  // to close and reopen it, which is the one moment they are least
+  // likely to.
+  unsubscribeChanges?.()
+  unsubscribeChanges =
+    mgr.onOutputsChanged?.(() => {
+      if (root) void refresh(body)
+    }) ?? null
+
   const records = mgr.outputs()
+  announceHealthChanges(records, monitors)
   replace(
     body,
     buildAdder(mgr, monitors, records, primary, body),
@@ -766,6 +810,113 @@ function buildList(
   return section
 }
 
+/**
+ * Say out loud what the badge only draws.
+ *
+ * The badge exists because rung 13a's `onOutputsChanged` repaints an
+ * open panel when an output crashes or its link goes quiet, so an
+ * operator does not have to close and reopen the one surface that
+ * would tell them. For a screen-reader operator that repaint delivers
+ * nothing at all: `refresh` replaces the whole panel body, and a
+ * subtree swapped out from under someone is silent — which leaves the
+ * badge solving the problem for people who can see it and reproducing
+ * it, one layer down, for people who cannot.
+ *
+ * So the announcement goes through the app-wide `#a11y-announcer`,
+ * which lives outside this panel and therefore survives the swap. Two
+ * rules make it worth listening to:
+ *
+ * - **Only transitions.** `refresh` also runs after every toggle,
+ *   add and remove, and re-reading the same health each time is how a
+ *   live region becomes something people tune out.
+ * - **One utterance.** The announcer is `aria-atomic` and each write
+ *   replaces the last, so a control window that goes quiet — taking
+ *   every output stale in the same tick — has to arrive as one string
+ *   or all but the last output is silently dropped.
+ *
+ * A departing output is deliberately not announced. The row vanishing
+ * covers a crash and an operator's own Remove alike, and the panel
+ * cannot tell those apart from here; saying "gone" for the removal
+ * they just asked for is the noise this function is written against.
+ */
+function announceHealthChanges(
+  records: readonly OutputRecord[],
+  monitors: readonly OutputMonitor[],
+): void {
+  const next = new Map(records.map(r => [r.label, r.health]))
+  const previous = lastHealth
+  lastHealth = next
+  if (!previous) return
+
+  const said: string[] = []
+  for (const record of records) {
+    const was = previous.get(record.label)
+    if (was === undefined || was === record.health) continue
+    const monitor = monitorRowName(record.monitor, monitors)
+    said.push(
+      record.health === 'stale'
+        ? t('outputs.item.healthAnnounce.stale', { monitor })
+        : record.health === 'starting'
+          ? t('outputs.item.healthAnnounce.starting', { monitor })
+          : t('outputs.item.healthAnnounce.live', { monitor }),
+    )
+  }
+  if (said.length > 0) announcePolite(said.join(' '))
+}
+
+/**
+ * The health badge, or nothing at all when the output is fine.
+ *
+ * **`live` renders no element**, which is the decision worth stating.
+ * A row of green "OK" chips trains an operator to stop reading them,
+ * and the panel is a place someone goes when they suspect a problem —
+ * so the only thing worth drawing is the exception. That also keeps
+ * the steady state visually identical to what shipped before this,
+ * which is what a badge nobody needs should cost.
+ *
+ * The label carries the meaning and the colour only reinforces it: the
+ * capture-clean installations this feature exists for are also the
+ * ones most likely to be read over someone's shoulder on a projector,
+ * and the explanation says what a two-word chip cannot — that a stale
+ * output is still showing a picture, just not a current one, which is
+ * exactly why nobody would otherwise notice.
+ *
+ * **That explanation is visually-hidden text, not `aria-label`**, and
+ * the difference is the whole reason this function is documented.
+ * `aria-label` shipped here first and does nothing: ARIA forbids
+ * naming an element whose role is `generic`, which is what a bare
+ * `<span>` maps to, so the attribute is discarded and only the
+ * two-word chip is announced — the half a sighted operator already
+ * has. Naming from *content* is the one mechanism that needs no role
+ * and is honoured everywhere, so the chip and its explanation are both
+ * text and the badge reads as one phrase. Giving the span a role that
+ * supports author naming (`status`, say) would also expose the label,
+ * but `status` is a live region and this one could never announce:
+ * `refresh` rebuilds the whole panel body, so a region born with its
+ * content is never registered before the content changes. The
+ * announcing is done where it can work, in `announceHealthChanges`.
+ */
+function buildHealthBadge(health: OutputHealth): HTMLElement | null {
+  if (health === 'live') return null
+  const badge = document.createElement('span')
+  badge.className = `output-item-health is-${health}`
+
+  const label = document.createElement('span')
+  label.className = 'output-item-health-label'
+  label.textContent =
+    health === 'stale' ? t('outputs.item.health.stale') : t('outputs.item.health.starting')
+
+  const detail = document.createElement('span')
+  detail.className = 'sr-only'
+  detail.textContent =
+    health === 'stale'
+      ? t('outputs.item.healthAria.stale')
+      : t('outputs.item.healthAria.starting')
+
+  badge.append(label, detail)
+  return badge
+}
+
 function buildRow(
   mgr: OutputPanelManager,
   record: OutputRecord,
@@ -807,7 +958,9 @@ function buildRow(
     void removeOutput(mgr, record.label, remove, body)
   })
 
-  head.append(name, meta, remove)
+  const badge = buildHealthBadge(record.health)
+  if (badge) head.append(name, meta, badge, remove)
+  else head.append(name, meta, remove)
   item.appendChild(head)
 
   item.appendChild(

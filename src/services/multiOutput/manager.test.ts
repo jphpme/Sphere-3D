@@ -47,7 +47,7 @@ import {
   type OutputConfigStore,
   type PersistedOutputConfig,
 } from './outputPersistence'
-import { CRASH_STORM_LIMIT } from './outputHealth'
+import { CRASH_STORM_LIMIT, STALE_REPORT_TTL_MS } from './outputHealth'
 
 /** Telemetry payloads of one event type, in the order they were sent. */
 function reported(eventType: string): Record<string, unknown>[] {
@@ -820,6 +820,145 @@ describe('event routing', () => {
     fake.emitted.length = 0
 
     await manager.applyState({ simulationDate: '2026-05-05T00:00:00Z' })
+
+    expect(fake.emitted).toEqual([])
+  })
+})
+
+describe('a stale link (rung 13, case 3)', () => {
+  it('answers a health check with the config and a fresh snapshot', async () => {
+    // Reaching the handler *is* the answer to "is anyone there", so the
+    // reply is a resync rather than an acknowledgement: whatever cost
+    // the output its heartbeat may also have cost it a diff, and a full
+    // snapshot is the same round trip as a ping reply.
+    const fake = createFakeHost()
+    const manager = makeManager(fake.host)
+    await manager.start()
+    await manager.addOutput({ monitorIndex: 0 })
+    fake.send(ready('output-1'))
+    fake.emitted.length = 0
+
+    fake.send({ type: 'output_health_check', label: 'output-1', silentMs: 5000 })
+
+    expect(configEmits(fake.emitted)).toHaveLength(1)
+    const states = stateEmits(fake.emitted)
+    expect(states).toHaveLength(1)
+    expect((states[0].payload as OutputStateMessage).full).toBe(true)
+  })
+
+  it('sends the config before the state, as the ready path does', async () => {
+    // One serve path, not two. A restored 8K output that got its state
+    // first would render at the default and then reallocate — a
+    // resolution pop caused by nothing but ordering, and a second copy
+    // of that ordering is a second place for it to drift.
+    const fake = createFakeHost()
+    const manager = makeManager(fake.host)
+    await manager.start()
+    await manager.addOutput({ monitorIndex: 0, render: { framebufferWidth: 8192 } })
+    fake.send(ready('output-1'))
+    fake.emitted.length = 0
+
+    fake.send({ type: 'output_health_check', label: 'output-1', silentMs: 7000 })
+
+    expect(fake.emitted.map(e => e.event)).toEqual([
+      OUTPUT_RENDER_CONFIG_EVENT,
+      OUTPUT_STATE_EVENT,
+    ])
+  })
+
+  it('serves an output whose announcement was missed', async () => {
+    // A ping proves the window is up and listening, which is what
+    // `output_ready` proves. Without this an output that lost its
+    // announcement — a manager restart, or the spawn-ordering race —
+    // stays un-served for the life of the window.
+    const fake = createFakeHost()
+    const manager = makeManager(fake.host)
+    await manager.start()
+    await manager.addOutput({ monitorIndex: 0 })
+    // No `output_ready` at all.
+    expect(manager.outputs()[0].ready).toBe(false)
+    fake.emitted.length = 0
+
+    fake.send({ type: 'output_health_check', label: 'output-1', silentMs: 5000 })
+
+    expect(manager.outputs()[0].ready).toBe(true)
+    expect(stateEmits(fake.emitted)).toHaveLength(1)
+  })
+
+  it('badges an output that reported the link stale, and notifies', async () => {
+    // The badge is the only place this surfaces. A stale output renders
+    // its last frame, which looks entirely correct on the sphere.
+    const fake = createFakeHost()
+    let clock = 0
+    const manager = makeManager(fake.host, { nowMs: () => clock })
+    await manager.start()
+    await manager.addOutput({ monitorIndex: 0 })
+    fake.send(ready('output-1'))
+    expect(manager.outputs()[0].health).toBe('live')
+    const seen = vi.fn()
+    manager.onOutputsChanged(seen)
+
+    fake.send({ type: 'output_health_check', label: 'output-1', silentMs: 5000 })
+
+    expect(manager.outputs()[0].health).toBe('stale')
+    expect(seen).toHaveBeenCalled()
+  })
+
+  it('clears the badge once the complaints stop', async () => {
+    // Nothing arrives to say the link recovered — the output simply
+    // goes quiet — so the heartbeat is the only thing that can notice.
+    const fake = createFakeHost()
+    let clock = 0
+    const manager = makeManager(fake.host, { nowMs: () => clock })
+    await manager.start()
+    await manager.addOutput({ monitorIndex: 0 })
+    fake.send(ready('output-1'))
+    fake.send({ type: 'output_health_check', label: 'output-1', silentMs: 5000 })
+    expect(manager.outputs()[0].health).toBe('stale')
+
+    clock += STALE_REPORT_TTL_MS
+    await manager.tick()
+
+    expect(manager.outputs()[0].health).toBe('live')
+  })
+
+  it('badges a spawned output as starting until it announces', async () => {
+    const fake = createFakeHost()
+    const manager = makeManager(fake.host)
+    await manager.start()
+    await manager.addOutput({ monitorIndex: 0 })
+
+    expect(manager.outputs()[0].health).toBe('starting')
+    fake.send(ready('output-1'))
+    expect(manager.outputs()[0].health).toBe('live')
+  })
+
+  it('does not persist the health fields', async () => {
+    // A complaint from last Tuesday means nothing to a window that has
+    // not been spawned yet. `toPersistedOutput` takes a `Pick`, so this
+    // holds by construction — asserted so a later field addition to
+    // that pick cannot quietly change it.
+    const fake = createFakeHost()
+    const store = memoryStore()
+    const manager = makeManager(fake.host, { store })
+    await manager.start()
+    await manager.addOutput({ monitorIndex: 0 })
+    fake.send(ready('output-1'))
+    fake.send({ type: 'output_health_check', label: 'output-1', silentMs: 5000 })
+
+    const [persisted] = store.current().outputs
+    expect(persisted).not.toHaveProperty('health')
+    expect(persisted).not.toHaveProperty('lastHealthCheckAtMs')
+  })
+
+  it('ignores a ping from a label it does not know', async () => {
+    const fake = createFakeHost()
+    const manager = makeManager(fake.host)
+    await manager.start()
+    await manager.addOutput({ monitorIndex: 0 })
+    fake.emitted.length = 0
+
+    fake.send({ type: 'output_health_check', label: 'output-9', silentMs: 5000 })
 
     expect(fake.emitted).toEqual([])
   })

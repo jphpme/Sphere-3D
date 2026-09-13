@@ -133,6 +133,15 @@ or both:
 - **Kill switch.** `/api/ingest` honours a `KILL_TELEMETRY=1` env
   var; the function returns 410 and the client cools down for the
   rest of the session.
+- **Where a batch goes.** Relative `/api/ingest` on the web — the
+  Pages Function answering it belongs to the deploy that served
+  the page, so a fork reports to its own node with no
+  configuration. On **desktop** the webview origin is
+  `tauri://localhost`, so the path is resolved against
+  `getApiOrigin()` (`src/config/endpoints.ts`), the same origin
+  `/api/v1/*` uses, overridable with `VITE_API_ORIGIN`. An
+  un-configured fork's desktop build therefore reports upstream;
+  `docs/SELF_HOSTING.md` §15.3 is where that is spelled out.
 
 `PRIVACY.md` is the user-facing version of this list. If anything in
 this doc drifts from `PRIVACY.md`, **`PRIVACY.md` wins** and this doc
