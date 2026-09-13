@@ -1082,6 +1082,15 @@ export function createVrInteraction(
       return
     }
 
+    // Handheld-AR manipulation is DOM-driven, not XR-driven: the touch
+    // layer (vrTouchControls) moves the globe with one finger and
+    // pinches it with two, so the transient screen ray must NOT also
+    // grab-and-rotate — a phone drag would rotate and move at once, and
+    // two fingers would fight the pinch. Every branch above still runs,
+    // so HUD / browse / tour / Place-button taps keep working exactly as
+    // they did; only the globe grab is declined on this input class.
+    if (ctx.isScreenInput?.()) return
+
     // Any globe hit (primary or secondary) — flip this trigger's
     // rotation bit and capture which globe was grabbed so the
     // surface-pinned drag math uses the right center point.

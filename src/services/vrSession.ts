@@ -37,6 +37,7 @@ import {
 import { getSharedLumaSampler } from './glLumaSampler'
 import { createVrZoomOverlay, type VrZoomOverlayHandle } from '../ui/vrZoomOverlay'
 import { createVrPlacementTouch, type VrPlacementTouchHandle } from '../ui/vrPlacementTouch'
+import { createVrTouchControls, type VrTouchControlsHandle } from '../ui/vrTouchControls'
 import { MAX_GLOBE_SCALE, MIN_GLOBE_SCALE } from './vrScene'
 import { createVrPlacement, type VrPlacementHandle } from './vrPlacement'
 import { computeGazeSpawnPosition } from './vrSpawn'
@@ -1068,6 +1069,23 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
   // same confirm / cancel logic.
   let placementTouch: VrPlacementTouchHandle | null = null
   /**
+   * Handheld-AR globe manipulation layer (one finger moves, two pinch
+   * to scale, two twist to rotate). Mounted only for the `screen`
+   * input class with a granted DOM overlay, and armed only OUTSIDE
+   * Place mode — the placement flow owns the globe's position while it
+   * is active.
+   */
+  let touchControls: VrTouchControlsHandle | null = null
+  /**
+   * World offset the AR touch layer has dragged the globe by, on top of
+   * whatever the placement/anchor sync writes. Kept as three numbers
+   * rather than a Vector3 because this module imports Three as a type
+   * only — the vectors below come from `loadThree()`.
+   */
+  let touchOffsetX = 0
+  let touchOffsetY = 0
+  let touchOffsetZ = 0
+  /**
    * Single entry point for Place-mode transitions — keeps the
    * placement state machine and the DOM touch layer (cancel button
    * visibility, tap/drag interception) in lockstep.
@@ -1109,6 +1127,12 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     // there but harmless to compute.
     const base = placement.getBasePosition()
     placementHeightOffset = base ? target.y - base.y : 0
+    // A fresh placement re-bases the globe: a drag offset from the
+    // PREVIOUS placement would slide the new one off the surface the
+    // user just picked.
+    touchOffsetX = 0
+    touchOffsetY = 0
+    touchOffsetZ = 0
     // Move the globe right away so the visual response is
     // immediate. The anchor creation (below) is async; the anchor
     // sync applies placementHeightOffset so there's no jump when
@@ -1317,6 +1341,77 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
   syncZoomOverlay()
   session.addEventListener('inputsourceschange', syncZoomOverlay)
 
+  // --- Handheld-AR globe manipulation (move / pinch / twist) ---
+  // The screen class has no grip and no thumbstick, and its XR select
+  // stream carries a ray whose origin is the device rather than the
+  // touch point — so one finger cannot mean "move" through the XR path,
+  // and two fingers arrive as two unrelated transient sources. This DOM
+  // layer sees the real touch points instead: one finger drags the
+  // globe, two pinch to scale it, two twist to rotate it. See
+  // src/ui/vrTouchControls.ts for the gesture contract and
+  // vrInteraction's isScreenInput guard for how the XR path stands down.
+  const touchCamPos = new THREE_.Vector3()
+  const touchGlobePos = new THREE_.Vector3()
+  const touchRight = new THREE_.Vector3()
+  const touchUp = new THREE_.Vector3()
+  const touchAxis = new THREE_.Vector3()
+
+  const syncTouchControls = (): void => {
+    const wantControls = sessionTelemetry.inputClass === 'screen' && domOverlayActive
+    if (wantControls && !touchControls) {
+      touchControls = createVrTouchControls({
+        onMove: (delta) => {
+          if (currentAnchor) {
+            // An anchor rewrites globe.position every frame — carry the
+            // drag as an offset on top of it instead of losing it.
+            touchOffsetX += delta.x
+            touchOffsetY += delta.y
+            touchOffsetZ += delta.z
+          } else {
+            // No anchor (VR, or AR without the anchors module): nothing
+            // re-bases the position per frame, so drag it directly.
+            scene.globe.position.x += delta.x
+            scene.globe.position.y += delta.y
+            scene.globe.position.z += delta.z
+          }
+        },
+        onScale: (scale) => {
+          scene.globe.scale.setScalar(scale)
+        },
+        onRotate: (delta) => {
+          if (delta === 0) return
+          // Twist spins the globe about the axis the user is looking
+          // down — the screen-normal, which is what "twist the phone"
+          // means to the person holding it.
+          camera.getWorldDirection(touchAxis)
+          scene.globe.rotateOnWorldAxis(touchAxis, delta)
+        },
+        getScale: () => scene.globe.scale.x,
+        getMinScale: () => MIN_GLOBE_SCALE,
+        getMaxScale: () => MAX_GLOBE_SCALE,
+        getViewDistance: () => {
+          camera.getWorldPosition(touchCamPos)
+          scene.globe.getWorldPosition(touchGlobePos)
+          return touchCamPos.distanceTo(touchGlobePos)
+        },
+        getFovYRad: () => (camera.fov * Math.PI) / 180,
+        getCameraBasis: () => {
+          // Camera local X/Y in world space — the exact plane the
+          // finger is dragging in, roll included.
+          const m = camera.matrixWorld.elements
+          touchRight.set(m[0], m[1], m[2]).normalize()
+          touchUp.set(m[4], m[5], m[6]).normalize()
+          return { right: touchRight, up: touchUp }
+        },
+      })
+    } else if (!wantControls && touchControls) {
+      touchControls.dispose()
+      touchControls = null
+    }
+  }
+  syncTouchControls()
+  session.addEventListener('inputsourceschange', syncTouchControls)
+
   active = {
     session,
     renderer,
@@ -1327,6 +1422,9 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
       session.removeEventListener('inputsourceschange', syncZoomOverlay)
       zoomOverlay?.dispose()
       zoomOverlay = null
+      session.removeEventListener('inputsourceschange', syncTouchControls)
+      touchControls?.dispose()
+      touchControls = null
       placementTouch?.dispose()
       placementTouch = null
     },
@@ -1481,6 +1579,16 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
       }
     }
 
+    // Arm the touch layer only when nothing else owns the touch: the
+    // placement flow owns the globe's position while it is active, and
+    // an open browse panel owns a drag as a list scroll (that scroll
+    // runs through the XR ray, so without this a drag across the panel
+    // would scroll the list AND shove the globe). `setEnabled` is a
+    // no-op when the state has not changed.
+    touchControls?.setEnabled(
+      !active.placement?.isPlacing() && !active.browse.isVisible(),
+    )
+
     // Sync globe position from the system-tracked anchor, if any.
     // The anchor's anchorSpace is resolved in local-floor coords
     // each frame — but critically, the system adjusts what
@@ -1494,10 +1602,15 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
       const anchorPose = frame.getPose(currentAnchor.anchorSpace, active.refSpace)
       if (anchorPose) {
         const ap = anchorPose.transform.position
+        // The touch layer's drag offset rides on top of the anchor pose
+        // (and of the chosen height): the anchor bolts the globe to the
+        // real surface, and the offset is where the user has pushed it
+        // since. Both are in reference space, so the sum survives a
+        // local-floor re-base together.
         active.scene.globe.position.set(
-          ap.x,
-          ap.y + placementHeightOffset,
-          ap.z,
+          ap.x + touchOffsetX,
+          ap.y + placementHeightOffset + touchOffsetY,
+          ap.z + touchOffsetZ,
         )
       }
     }
