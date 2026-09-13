@@ -26,21 +26,21 @@ import { LINK_PING_INTERVAL_MS } from './protocol'
 describe('outputHealthState', () => {
   it('is starting until the output announces itself', () => {
     expect(
-      outputHealthState({ ready: false, lastHealthCheckAtMs: null }, 0),
+      outputHealthState({ ready: false, lastHealthCheckAtMs: null, gpuLost: false }, 0),
     ).toBe('starting')
   })
 
   it('is live once announced with no complaint', () => {
-    expect(outputHealthState({ ready: true, lastHealthCheckAtMs: null }, 0)).toBe('live')
+    expect(outputHealthState({ ready: true, lastHealthCheckAtMs: null, gpuLost: false }, 0)).toBe('live')
   })
 
   it('is stale while a complaint is current', () => {
     expect(
-      outputHealthState({ ready: true, lastHealthCheckAtMs: 1_000 }, 1_000),
+      outputHealthState({ ready: true, lastHealthCheckAtMs: 1_000, gpuLost: false }, 1_000),
     ).toBe('stale')
     expect(
       outputHealthState(
-        { ready: true, lastHealthCheckAtMs: 1_000 },
+        { ready: true, lastHealthCheckAtMs: 1_000, gpuLost: false },
         1_000 + STALE_REPORT_TTL_MS - 1,
       ),
     ).toBe('stale')
@@ -51,7 +51,7 @@ describe('outputHealthState', () => {
     // say the link recovered, so the badge has to age out on its own.
     expect(
       outputHealthState(
-        { ready: true, lastHealthCheckAtMs: 1_000 },
+        { ready: true, lastHealthCheckAtMs: 1_000, gpuLost: false },
         1_000 + STALE_REPORT_TTL_MS,
       ),
     ).toBe('live')
@@ -65,10 +65,43 @@ describe('outputHealthState', () => {
     expect(STALE_REPORT_TTL_MS).toBeGreaterThan(LINK_PING_INTERVAL_MS * 2)
     expect(
       outputHealthState(
-        { ready: true, lastHealthCheckAtMs: 0 },
+        { ready: true, lastHealthCheckAtMs: 0, gpuLost: false },
         LINK_PING_INTERVAL_MS * 2,
       ),
     ).toBe('stale')
+  })
+
+  it('reports a lost GPU context over everything else', () => {
+    // The other two are inferences the manager draws from silence; this
+    // is the output stating outright that it is showing nothing. It is
+    // also the only failure a *healthy* link can carry, so without the
+    // precedence an output can read `live` by every other measure with
+    // a black sphere in front of an audience.
+    expect(
+      outputHealthState({ ready: true, lastHealthCheckAtMs: null, gpuLost: true }, 0),
+    ).toBe('gpu-lost')
+    // Over `stale`…
+    expect(
+      outputHealthState({ ready: true, lastHealthCheckAtMs: 0, gpuLost: true }, 0),
+    ).toBe('gpu-lost')
+    // …and over `starting`, because a window that reported this has
+    // plainly spoken, whatever else it has not said yet.
+    expect(
+      outputHealthState({ ready: false, lastHealthCheckAtMs: null, gpuLost: true }, 0),
+    ).toBe('gpu-lost')
+  })
+
+  it('never ages the GPU latch out the way a stale link ages out', () => {
+    // A stale link expires because the output stops complaining by
+    // going quiet. A lost context is announced once and then nothing
+    // further is said, so a TTL here would call a black projector
+    // healthy a few seconds later.
+    expect(
+      outputHealthState(
+        { ready: true, lastHealthCheckAtMs: 0, gpuLost: true },
+        STALE_REPORT_TTL_MS * 1000,
+      ),
+    ).toBe('gpu-lost')
   })
 
   it('reports starting rather than stale for a window still booting', () => {
@@ -76,7 +109,7 @@ describe('outputHealthState', () => {
     // and a degraded-link badge would send an operator looking at the
     // wrong thing.
     expect(
-      outputHealthState({ ready: false, lastHealthCheckAtMs: 0 }, 0),
+      outputHealthState({ ready: false, lastHealthCheckAtMs: 0, gpuLost: false }, 0),
     ).toBe('starting')
   })
 })

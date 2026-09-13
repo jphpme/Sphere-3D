@@ -793,3 +793,55 @@ describe('link health (rung 13, case 3)', () => {
     expect(host.emit).not.toHaveBeenCalled()
   })
 })
+
+describe('reporting the GPU context (rung 13, case 5)', () => {
+  it('emits a loss and a recovery on the shared event channel', async () => {
+    const host = fakeHost()
+    const link = await connectOutputLink(host)
+    host.emit.mockClear()
+
+    link.reportGpuState('lost')
+    link.reportGpuState('restored')
+
+    expect(host.emit.mock.calls).toEqual([
+      [OUTPUT_EVENT, { type: 'output_gpu_lost', label: 'output-3' }],
+      [OUTPUT_EVENT, { type: 'output_gpu_recovered', label: 'output-3' }],
+    ])
+  })
+
+  it('says nothing for live, which is the boot state and not a transition', async () => {
+    // The scene only ever *leaves* `live`, so there is no third
+    // message. `main.ts` pushes the current state once at connect —
+    // that push is the one that would otherwise announce a healthy
+    // window to the manager on every launch.
+    const host = fakeHost()
+    const link = await connectOutputLink(host)
+    host.emit.mockClear()
+
+    link.reportGpuState('live')
+
+    expect(host.emit).not.toHaveBeenCalled()
+  })
+
+  it('does not let a failed report escape into a DOM event handler', async () => {
+    // This is called from `webglcontextlost`. A report that cannot be
+    // delivered is a worse link, not a reason to throw inside the
+    // handler for the failure being reported.
+    const host = fakeHost()
+    const link = await connectOutputLink(host)
+    host.emit.mockRejectedValue(new Error('channel gone'))
+
+    expect(() => link.reportGpuState('lost')).not.toThrow()
+  })
+
+  it('stays quiet once the link is stopped', async () => {
+    const host = fakeHost()
+    const link = await connectOutputLink(host)
+    await link.stop()
+    host.emit.mockClear()
+
+    link.reportGpuState('lost')
+
+    expect(host.emit).not.toHaveBeenCalled()
+  })
+})

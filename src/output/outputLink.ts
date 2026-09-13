@@ -54,6 +54,7 @@
  */
 
 import { IDENTITY_PARAMS } from './equirectRtt'
+import type { GpuContextState } from './outputScene'
 import { sameValue } from '../services/multiOutput/stateEquality'
 import {
   OUTPUT_EVENT,
@@ -391,6 +392,23 @@ export interface OutputLink {
   /** What the last `checkHealth` concluded. A pure read for the debug
    *  HUD, so painting the field cannot itself send a ping. */
   linkHealth(): LinkHealth
+  /**
+   * Tell the manager this window's GPU context changed (rung 13, case
+   * 5).
+   *
+   * The one report that travels *because* the link is healthy rather
+   * than to say it is not. Every other failure the manager detects is
+   * an absence — a destroy with no `output_closing`, a window that
+   * never answers a poke — and a GPU loss is invisible to all of them:
+   * the window is up, the channel is fine, the heartbeat is answered,
+   * and the sphere is black.
+   *
+   * Fired, never awaited, for `checkHealth`'s reason: this is called
+   * from a DOM event handler on the render loop's thread, and a report
+   * that cannot be delivered is a worse link, not a reason to throw
+   * inside a `webglcontextlost` handler.
+   */
+  reportGpuState(state: GpuContextState): void
   /** Detach the listener. Idempotent. */
   stop(): Promise<void>
 }
@@ -563,6 +581,19 @@ export async function connectOutputLink(
       return health
     },
     linkHealth: () => health,
+    reportGpuState(state) {
+      // `live` is the boot state, not a transition anyone reaches: the
+      // scene only ever leaves it, so there is no third message and no
+      // "recovered to healthy" the manager would have to interpret.
+      if (state === 'live') return
+      if (stopped) return
+      void host
+        .emit(OUTPUT_EVENT, {
+          type: state === 'lost' ? 'output_gpu_lost' : 'output_gpu_recovered',
+          label: host.label,
+        })
+        .catch(err => logger.warn('[output] could not report the GPU state:', err))
+    },
     async stop() {
       if (stopped) return
       stopped = true

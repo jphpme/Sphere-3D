@@ -298,6 +298,15 @@
   background: rgba(255, 255, 255, 0.12);
 }
 
+/* Red rather than the stale amber, and the step up is deliberate: a
+   stale output is still putting a picture on the sphere, this one is
+   putting up nothing. The two sit in the same list and an operator
+   scanning it needs to reach this row first. */
+.output-item-health.is-gpu-lost {
+  color: var(--color-danger-text, #2b0000);
+  background: var(--color-danger, #e5534b);
+}
+
 .output-toggle {
   display: flex;
   align-items: center;

@@ -266,8 +266,26 @@ export interface OutputRecord {
    */
   lastHealthCheckAtMs: number | null
   /**
-   * The badge, derived from `ready` and `lastHealthCheckAtMs` and kept
-   * current by the heartbeat.
+   * Whether this output last said its WebGL context was gone (rung 13,
+   * case 5).
+   *
+   * A latch rather than a timestamp, unlike `lastHealthCheckAtMs`
+   * beside it, because the two facts decay differently. A stale-link
+   * complaint expires — the output stops pinging when it recovers, and
+   * silence is how the manager learns that. A lost context does not:
+   * the output says so once and stays quiet about it, so the only
+   * thing that can clear this is the matching
+   * `output_gpu_recovered`. Ageing it out on a TTL would quietly
+   * declare a black projector healthy after five seconds.
+   *
+   * Not persisted, for `lastHealthCheckAtMs`' reason: `toPersistedOutput`
+   * takes a `Pick`, and a GPU that failed last Tuesday says nothing
+   * about a window that has not been spawned yet.
+   */
+  gpuLost: boolean
+  /**
+   * The badge, derived from `ready`, `lastHealthCheckAtMs` and
+   * `gpuLost`, and kept current by the heartbeat.
    *
    * Stored rather than derived at read time because the panel cannot
    * derive it: every `multiOutput/` import in `outputUI.ts` is
@@ -515,6 +533,7 @@ export class MultiOutputManager {
       ready: false,
       lastEvent: null,
       lastHealthCheckAtMs: null,
+      gpuLost: false,
       health: 'starting',
       departing: false,
       announcedClosing: false,
@@ -828,6 +847,7 @@ export class MultiOutputManager {
         ready: false,
         lastEvent: null,
         lastHealthCheckAtMs: null,
+        gpuLost: false,
         health: 'starting',
         departing: false,
         announcedClosing: false,
@@ -1350,6 +1370,31 @@ export class MultiOutputManager {
       )
       record.lastHealthCheckAtMs = this.nowMs()
     }
+    if (event.type === 'output_gpu_lost') {
+      // The one failure a *healthy* link reports (rung 13, case 5).
+      // Every other detector here reads an absence, and all of them
+      // are blind to this: the window is up, the channel works, the
+      // heartbeat is answered, and the sphere is black.
+      logger.error(`[multiOutput] ${event.label} lost its WebGL context — it is showing nothing`)
+      record.gpuLost = true
+      // `retries: 0, recovered: false`, and both are literal rather
+      // than lazy. This detector reports without repairing — the
+      // recovery, if there is one, is Three's `initGLContext()` inside
+      // the output — so it has attempted nothing and knows nothing
+      // about the outcome yet. That is exactly the case
+      // `reportOutputFailure` refuses to default for.
+      //
+      // Emitted on the loss alone, never again on the restore. One row
+      // per incident answers the question this Tier A event exists for
+      // ("how often do outputs lose their context?") without
+      // double-counting the ones that come back, and expressing the
+      // outcome would need a schema change this slice does not make.
+      reportOutputFailure({ kind: 'gpu-loss', retries: 0, recovered: false })
+    }
+    if (event.type === 'output_gpu_recovered') {
+      logger.warn(`[multiOutput] ${event.label} says its WebGL context is back`)
+      record.gpuLost = false
+    }
     // A ping and an announcement are served by **one** path, not two.
     // Both prove the same thing — the window is up and listening — and
     // the config-before-state ordering below is load-bearing, so a
@@ -1377,7 +1422,9 @@ export class MultiOutputManager {
       record.ready = false
     }
     // Every branch above can move a badge — a ping makes one stale, an
-    // announcement takes one out of `starting`, a closing puts it back.
+    // announcement takes one out of `starting`, a closing puts it back,
+    // and the two GPU reports set and clear the latch that outranks all
+    // of them.
     if (this.refreshHealth()) this.notifyChange()
   }
 

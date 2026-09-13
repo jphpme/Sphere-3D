@@ -38,6 +38,7 @@ function record(label: string, on: OutputMonitor): OutputRecord {
     monitor: on,
     ready: false,
     lastHealthCheckAtMs: null,
+  gpuLost: false,
     health: 'starting' as const,
     lastEvent: null,
     departing: false,
@@ -711,6 +712,26 @@ describe('the health badge', () => {
     expect(badge?.hasAttribute('aria-label')).toBe(false)
     // The visible chip stays two words — the explanation is for AT.
     expect($('.output-item-health-label')?.textContent).toBe('Link stale')
+  })
+
+  it('badges a lost GPU context, and says the sphere is blank rather than stale', async () => {
+    // The distinction is the entire value of the badge. A stale output
+    // is showing an old picture; this one is showing nothing at all,
+    // and on a projector both look like "something on the wall" until
+    // someone reads the row.
+    const fake = fakeManager()
+    mount(fake.mgr)
+    await until(painted, 'the panel to settle')
+    await fake.mgr.addOutput({ monitorIndex: 0 })
+    fake.records[0].health = 'gpu-lost'
+    fake.notifyChanged()
+
+    await until(() => $('.output-item-health') !== null, 'the badge')
+    const badge = $<HTMLElement>('.output-item-health')
+    expect(badge?.classList.contains('is-gpu-lost')).toBe(true)
+    expect($('.output-item-health-label')?.textContent).toBe('Display lost')
+    expect(badge?.textContent ?? '').toMatch(/nothing at all/i)
+    expect(badge?.hasAttribute('aria-label')).toBe(false)
   })
 
   it('announces a transition, because the repaint itself is silent', async () => {

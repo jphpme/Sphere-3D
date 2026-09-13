@@ -1382,7 +1382,7 @@
       "id": 25,
       "type": "table",
       "title": "Multi-monitor outputs — failures by kind",
-      "description": "Rung 13: output_failure, the installation-health half. Split by kind and by whether the output carried on afterwards, with the worst retry count seen — bounded auto-recovery collapses into one event carrying its count, so a flapping installation shows a rising max_retries rather than a rising event rate. Today only kind='crash' has a detector (and reports retries=0, recovered=false, because §3's table gives a crash no auto-recovery); hls-stalled / ipc-silence / gpu-loss / monitor-unplug arrive with failure-recovery cases 2-5 and need no change here. AE positional layout: blob5=kind, blob6=recovered ('true'/'false'), double2=retries.",
+      "description": "Rung 13: output_failure, the installation-health half. Split by kind and by whether the output carried on afterwards, with the worst retry count seen — bounded auto-recovery collapses into one event carrying its count, so a flapping installation shows a rising max_retries rather than a rising event rate. Detectors so far: kind='crash' (retries=0, recovered=false — §3's table gives a crash no auto-recovery), 'ipc-silence' from case 6's boot scan (recovered=true when the orphan answered the poke, false when it did not), and 'gpu-loss' from case 5 (retries=0, recovered=false, emitted on the loss and NOT again on the restore — one row per incident, since that detector reports without repairing and the schema has no field for the outcome). hls-stalled / monitor-unplug arrive with cases 2 and 4 and need no change here. AE positional layout: blob5=kind, blob6=recovered ('true'/'false'), double2=retries.",
       "gridPos": {
         "x": 18,
         "y": 66,

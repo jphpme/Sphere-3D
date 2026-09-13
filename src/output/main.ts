@@ -150,6 +150,21 @@ async function boot(): Promise<void> {
       const link = await connectOutputLink(await createTauriLinkHost())
       readLinkHealth = () => link.linkHealth()
 
+      // The manager cannot find this out any other way (rung 13, case
+      // 5). Its other detectors all read an *absence* — a destroy with
+      // no `output_closing`, a window that never answers a poke — and
+      // a GPU loss defeats every one of them: this window stays up, the
+      // channel stays healthy, the heartbeat keeps being answered, and
+      // the sphere is black. Subscribed after the link exists rather
+      // than beside the dirty-flag subscription above, because a
+      // report before there is anywhere to send it is not a report;
+      // the current state is pushed once immediately for the same
+      // reason `link.renderConfig()` is read once — a context lost
+      // during boot, which on a crowded machine is exactly when
+      // eviction happens, would otherwise never be mentioned.
+      link.reportGpuState(scene.gpuState())
+      scene.onGpuStateChange(state => link.reportGpuState(state))
+
       /**
        * Rebuild the composite from whatever the mirror currently holds.
        *

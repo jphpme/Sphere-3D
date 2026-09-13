@@ -622,7 +622,30 @@ export interface OutputDatasetStalledEvent extends OutputEventBase {
   datasetId: string | null
 }
 
-/** A lost WebGL context came back and the scene was rebuilt. */
+/**
+ * This window's WebGL context went away (rung 13, case 5).
+ *
+ * It exists because the manager has no other way to learn this. The
+ * window is alive, the link is fine, the heartbeat is answered — and
+ * the sphere is black. Every other failure signal the manager has is
+ * an *absence*, and this one is the opposite: a healthy channel
+ * reporting an unhealthy picture, which is exactly the case the
+ * absence-based detectors are blind to.
+ */
+export interface OutputGpuLostEvent extends OutputEventBase {
+  type: 'output_gpu_lost'
+}
+
+/**
+ * A lost WebGL context came back.
+ *
+ * Deliberately **not** a claim that the picture did. Three rebuilds its
+ * GL state on restore and re-uploads on the next draw, which for the
+ * output's scene should be the whole of it — but that is read from
+ * Three's source rather than observed on hardware, and the two states
+ * are reported separately so the difference stays visible if it turns
+ * out not to hold.
+ */
 export interface OutputGpuRecoveredEvent extends OutputEventBase {
   type: 'output_gpu_recovered'
 }
@@ -654,6 +677,7 @@ export type OutputEvent =
   | OutputReadyEvent
   | OutputHealthCheckEvent
   | OutputDatasetStalledEvent
+  | OutputGpuLostEvent
   | OutputGpuRecoveredEvent
   | OutputFrameStaleEvent
   | OutputClosingEvent

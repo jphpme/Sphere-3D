@@ -853,16 +853,42 @@ function announceHealthChanges(
     const was = previous.get(record.label)
     if (was === undefined || was === record.health) continue
     const monitor = monitorRowName(record.monitor, monitors)
-    said.push(
-      record.health === 'stale'
-        ? t('outputs.item.healthAnnounce.stale', { monitor })
-        : record.health === 'starting'
-          ? t('outputs.item.healthAnnounce.starting', { monitor })
-          : t('outputs.item.healthAnnounce.live', { monitor }),
-    )
+    said.push(t(HEALTH_ANNOUNCE[record.health], { monitor }))
   }
   if (said.length > 0) announcePolite(said.join(' '))
 }
+
+/**
+ * Health → message key, as tables rather than the nested ternaries
+ * these were.
+ *
+ * `satisfies Record<…, string>` over the union is the point: adding a
+ * state to `OutputHealth` fails to compile here instead of quietly
+ * falling through to whichever branch was last. A badge that silently
+ * reports the wrong condition is worse than no badge, and the whole
+ * reason this panel exists is that nothing else in the app can tell an
+ * operator what a projector is doing.
+ */
+const HEALTH_ANNOUNCE = {
+  'gpu-lost': 'outputs.item.healthAnnounce.gpuLost',
+  stale: 'outputs.item.healthAnnounce.stale',
+  starting: 'outputs.item.healthAnnounce.starting',
+  live: 'outputs.item.healthAnnounce.live',
+} as const satisfies Record<OutputHealth, string>
+
+/** The chip's two words. No entry for `live` — it draws nothing. */
+const HEALTH_LABEL = {
+  'gpu-lost': 'outputs.item.health.gpuLost',
+  stale: 'outputs.item.health.stale',
+  starting: 'outputs.item.health.starting',
+} as const satisfies Record<Exclude<OutputHealth, 'live'>, string>
+
+/** The visually-hidden half, which carries what two words cannot. */
+const HEALTH_DETAIL = {
+  'gpu-lost': 'outputs.item.healthAria.gpuLost',
+  stale: 'outputs.item.healthAria.stale',
+  starting: 'outputs.item.healthAria.starting',
+} as const satisfies Record<Exclude<OutputHealth, 'live'>, string>
 
 /**
  * The health badge, or nothing at all when the output is fine.
@@ -903,15 +929,11 @@ function buildHealthBadge(health: OutputHealth): HTMLElement | null {
 
   const label = document.createElement('span')
   label.className = 'output-item-health-label'
-  label.textContent =
-    health === 'stale' ? t('outputs.item.health.stale') : t('outputs.item.health.starting')
+  label.textContent = t(HEALTH_LABEL[health])
 
   const detail = document.createElement('span')
   detail.className = 'sr-only'
-  detail.textContent =
-    health === 'stale'
-      ? t('outputs.item.healthAria.stale')
-      : t('outputs.item.healthAria.starting')
+  detail.textContent = t(HEALTH_DETAIL[health])
 
   badge.append(label, detail)
   return badge

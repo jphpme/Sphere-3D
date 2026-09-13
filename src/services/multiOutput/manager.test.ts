@@ -997,6 +997,140 @@ describe('a stale link (rung 13, case 3)', () => {
   })
 })
 
+describe('a lost GPU context (rung 13, case 5)', () => {
+  const gpuLost = (label: string) => ({ type: 'output_gpu_lost' as const, label })
+  const gpuBack = (label: string) => ({ type: 'output_gpu_recovered' as const, label })
+
+  it('badges the output and notifies the panel', async () => {
+    const fake = createFakeHost()
+    const manager = makeManager(fake.host)
+    await manager.start()
+    await manager.addOutput({ monitorIndex: 0 })
+    fake.send(ready('output-1'))
+    expect(manager.outputs()[0].health).toBe('live')
+    const seen = vi.fn()
+    manager.onOutputsChanged(seen)
+
+    fake.send(gpuLost('output-1'))
+
+    expect(manager.outputs()[0].health).toBe('gpu-lost')
+    expect(seen).toHaveBeenCalled()
+  })
+
+  it('outranks a stale link, because it is a report rather than a guess', async () => {
+    // An output can be both: its context goes, and separately the
+    // control window stops reaching it. `stale` is inferred from
+    // silence and says the sphere holds an old frame; `gpu-lost` is
+    // the window stating outright that it holds nothing. The specific
+    // claim wins.
+    const fake = createFakeHost()
+    let clock = 0
+    const manager = makeManager(fake.host, { nowMs: () => clock })
+    await manager.start()
+    await manager.addOutput({ monitorIndex: 0 })
+    fake.send(ready('output-1'))
+
+    fake.send({ type: 'output_health_check', label: 'output-1', silentMs: 5000 })
+    expect(manager.outputs()[0].health).toBe('stale')
+
+    fake.send(gpuLost('output-1'))
+    expect(manager.outputs()[0].health).toBe('gpu-lost')
+  })
+
+  it('does NOT age out the way a stale link does', async () => {
+    // The two facts decay differently and this is the one that must
+    // not. An output stops complaining about its link by going quiet,
+    // so `stale` has to expire on a TTL — but a lost context is
+    // announced once and then nothing more is said about it, so the
+    // same treatment would declare a black projector healthy five
+    // seconds later. Only the matching recovery clears it.
+    const fake = createFakeHost()
+    let clock = 0
+    const manager = makeManager(fake.host, { nowMs: () => clock })
+    await manager.start()
+    await manager.addOutput({ monitorIndex: 0 })
+    fake.send(ready('output-1'))
+    fake.send(gpuLost('output-1'))
+
+    clock += STALE_REPORT_TTL_MS * 100
+    await manager.tick()
+
+    expect(manager.outputs()[0].health).toBe('gpu-lost')
+  })
+
+  it('clears the badge when the output says the context came back', async () => {
+    const fake = createFakeHost()
+    const manager = makeManager(fake.host)
+    await manager.start()
+    await manager.addOutput({ monitorIndex: 0 })
+    fake.send(ready('output-1'))
+    fake.send(gpuLost('output-1'))
+    expect(manager.outputs()[0].health).toBe('gpu-lost')
+
+    fake.send(gpuBack('output-1'))
+
+    expect(manager.outputs()[0].health).toBe('live')
+  })
+
+  it('reports one Tier A failure, on the loss and not again on the recovery', async () => {
+    // One row per incident. Emitting again on the restore would
+    // double-count every output that came back, and the schema has no
+    // field that could express the outcome without a change this slice
+    // does not make.
+    const fake = createFakeHost()
+    const manager = makeManager(fake.host)
+    await manager.start()
+    await manager.addOutput({ monitorIndex: 0 })
+    fake.send(ready('output-1'))
+    vi.mocked(emit).mockClear()
+
+    fake.send(gpuLost('output-1'))
+    fake.send(gpuBack('output-1'))
+
+    const failures = vi
+      .mocked(emit)
+      .mock.calls.map(c => c[0])
+      .filter(e => e.event_type === 'output_failure')
+    expect(failures).toEqual([
+      // `0` and `false` literally: this detector reports without
+      // repairing, so it has attempted nothing and knows nothing about
+      // the outcome. That is the case `reportOutputFailure` refuses to
+      // supply defaults for.
+      { event_type: 'output_failure', kind: 'gpu-loss', retries: 0, recovered: false },
+    ])
+  })
+
+  it('does not persist the GPU latch', async () => {
+    // Same `Pick` that keeps `health` and `lastHealthCheckAtMs` out. A
+    // GPU that failed last Tuesday says nothing about a window that has
+    // not been spawned yet.
+    const fake = createFakeHost()
+    const store = memoryStore()
+    const manager = makeManager(fake.host, { store })
+    await manager.start()
+    await manager.addOutput({ monitorIndex: 0 })
+    fake.send(ready('output-1'))
+    fake.send(gpuLost('output-1'))
+
+    const [persisted] = store.current().outputs
+    expect(persisted).not.toHaveProperty('gpuLost')
+  })
+
+  it('ignores a report from a label it does not know', async () => {
+    const fake = createFakeHost()
+    const manager = makeManager(fake.host)
+    await manager.start()
+    await manager.addOutput({ monitorIndex: 0 })
+    fake.send(ready('output-1'))
+    vi.mocked(emit).mockClear()
+
+    fake.send(gpuLost('output-9'))
+
+    expect(manager.outputs()[0].health).toBe('live')
+    expect(vi.mocked(emit)).not.toHaveBeenCalled()
+  })
+})
+
 describe('lifecycle', () => {
   it('start() is idempotent — one listener, one timer', async () => {
     vi.useFakeTimers()
