@@ -557,6 +557,34 @@ export function isFullState<S>(
  * channel is another name to audit. The manager discriminates on
  * `type`.
  */
+/**
+ * Manager → one output: *are you still there, and please say so.*
+ *
+ * The boot scan for orphaned windows (`docs/MULTI_MONITOR_PLAN.md` §3
+ * "Failure recovery", case 6). A control window whose webview reloaded
+ * or crashed leaves its `output-*` windows alive and rendering, with a
+ * fresh manager that has never heard of them — so the manager finds
+ * them with `existingOutputs()` and pokes each one here.
+ *
+ * **It carries nothing, and the reply is `output_ready`, not a
+ * dedicated pong.** Both choices are the same choice: an output that
+ * re-announces is served by the one path that already serves a first
+ * announcement and a health-check ping, so a reattached window gets its
+ * render config before its first snapshot exactly like every other
+ * window does. A bespoke reply would need a second serve path, and the
+ * config-before-state ordering in it is load-bearing.
+ *
+ * Targeted with `emitTo`, so the payload needs no label: the window
+ * that receives it is the window being asked.
+ *
+ * The 60-second `IPC_ORPHAN_MS` is why this exists at all. Inside that
+ * window an out-of-contact output is still pinging, and a fresh manager
+ * hears it the moment it registers a record — no poke required. Past
+ * it the output has stopped talking, by design, and nothing would ever
+ * arrive again unless the manager spoke first.
+ */
+export const OUTPUT_REATTACH_EVENT = 'output_reattach'
+
 export const OUTPUT_EVENT = 'output_event'
 
 /**

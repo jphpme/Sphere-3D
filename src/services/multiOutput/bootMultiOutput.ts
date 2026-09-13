@@ -208,19 +208,38 @@ export function startMultiOutput(
       // aggregator synchronously before its first await, so a loop of
       // un-awaited calls still applies them in order.
       for (const patch of queued.splice(0)) forward(manager, patch)
-      // Unconditional, and cheap by construction: `restoreOutputs`
-      // returns before enumerating a monitor or opening the IPC link
-      // unless the operator opted in *and* left something configured.
-      // Putting the opt-in test here instead would be a second reader
-      // of the same flag, free to disagree with the manager's.
+      // Both unconditional, and both cheap by construction: the scan
+      // returns after one call unless this app already owns `output-*`
+      // windows, and `restoreOutputs` returns before enumerating a
+      // monitor or opening the IPC link unless the operator opted in
+      // *and* left something configured. Putting either test here
+      // instead would be a second reader of the same state, free to
+      // disagree with the manager's.
+      //
+      // **Chained, not raced.** A window that survived a reload holds
+      // its label, and the restore spawns from the same persisted
+      // entries by label — so a restore that started first would ask
+      // Tauri for a second window under a label that already exists,
+      // on a monitor that already has one. The scan claims those labels
+      // into `records`, and the restore skips them.
       //
       // Not awaited into `ready`: an operator's three projectors are
-      // paced ~250 ms apart, and blocking the handle on that would
-      // block whatever boot does next behind a stagger that exists to
-      // keep spawns *off* the critical path.
-      void manager.restoreOutputs().catch(err => {
-        logger.warn('[multiOutput] restore failed:', err)
-      })
+      // paced ~250 ms apart and a scan waits five seconds for a reply,
+      // so blocking the handle would put both on the critical path that
+      // this un-awaiting exists to keep them off.
+      void manager
+        .adoptOrphanedOutputs()
+        .catch(err => {
+          // Swallowed rather than rethrown, so a scan that failed still
+          // lets the restore run: they recover different things, and an
+          // installation should not lose its configured outputs because
+          // the platform would not enumerate its windows.
+          logger.warn('[multiOutput] orphan scan failed:', err)
+        })
+        .then(() => manager?.restoreOutputs())
+        .catch(err => {
+          logger.warn('[multiOutput] restore failed:', err)
+        })
       return manager
     } catch (err) {
       logger.warn(

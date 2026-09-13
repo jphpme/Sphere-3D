@@ -27,6 +27,7 @@ vi.mock('../../analytics', () => ({ emit: vi.fn() }))
 import { emit } from '../../analytics'
 import {
   DEFAULT_FRAMEBUFFER_WIDTH,
+  OUTPUT_REATTACH_EVENT,
   OUTPUT_RENDER_CONFIG_EVENT,
   OUTPUT_STATE_EVENT,
   type OutputEvent,
@@ -133,6 +134,12 @@ interface FakeOptions {
    *  `createWindow`, so its boot runs concurrently with everything the
    *  manager does afterwards. */
   announceReadyAt?: 'setPosition' | 'setSize' | 'setFullscreen' | 'show'
+  /** Windows this app already owns before the manager boots — the
+   *  control-window reload case 6 exists for. */
+  existing?: string[]
+  /** Labels among `existing` that answer the reattach poke. Omit for
+   *  "all of them"; pass `[]` for a window that has gone unresponsive. */
+  answerReattach?: string[]
 }
 
 function createFakeHost(options: FakeOptions = {}) {
@@ -148,6 +155,26 @@ function createFakeHost(options: FakeOptions = {}) {
    *  hands that promise back so a test awaits the real chain instead
    *  of guessing how many turns it takes. */
   const destroyers = new Map<string, () => unknown>()
+
+  /** The parts of a handle that are the same however the window came
+   *  to exist — which is exactly what adopting one has to prove. */
+  const handleFor = (label: string): OutputWindowHandle => ({
+    setPosition: async () => {},
+    setSize: async () => {},
+    setFullscreen: async () => {},
+    show: async () => {},
+    close: async () => {
+      calls.push(`close:${label}`)
+      if (options.failClose) throw new Error('close rejected')
+      closed.push(label)
+    },
+    // Captured rather than ignored so a test can destroy a window the
+    // way the OS would — which is the only way to reach the crash path
+    // at all.
+    onDestroyed: async handler => {
+      destroyers.set(label, handler)
+    },
+  })
 
   const host: MultiOutputHost = {
     availableMonitors: async () => monitors,
@@ -166,28 +193,34 @@ function createFakeHost(options: FakeOptions = {}) {
         if (options.announceReadyAt === name) send(ready(label))
         if (options.failAt === name) throw new Error(`${name} rejected`)
       }
-      const handle: OutputWindowHandle = {
+      return {
+        ...handleFor(label),
         setPosition: (x, y) => step('setPosition', `setPosition:${label}:${x},${y}`),
         setSize: (w, h) => step('setSize', `setSize:${label}:${w}x${h}`),
         setFullscreen: on => step('setFullscreen', `setFullscreen:${label}:${on}`),
         show: () => step('show', `show:${label}`),
-        close: async () => {
-          calls.push(`close:${label}`)
-          if (options.failClose) throw new Error('close rejected')
-          closed.push(label)
-        },
-        // Captured rather than ignored so a test can destroy a window
-        // the way the OS would — which is the only way to reach the
-        // crash path at all.
-        onDestroyed: async handler => {
-          destroyers.set(label, handler)
-        },
       }
-      return handle
+    },
+
+    // The real host returns every `output-*` window the app owns,
+    // spawned by this manager or a previous one. The fake's are always
+    // from a previous one, which is the case worth exercising.
+    async existingOutputs() {
+      calls.push('existingOutputs')
+      return (options.existing ?? []).map(label => ({ label, handle: handleFor(label) }))
     },
 
     async emitTo(label, event, payload) {
       emitted.push({ label, event, payload: payload as OutputStateMessage })
+      // A real output answers the poke by re-announcing over the link,
+      // which is what makes the manager's one serve path do the rest.
+      // Synchronous here rather than deferred: the manager awaits the
+      // emit and then sleeps, so anything the window says lands well
+      // inside that window either way.
+      if (event === OUTPUT_REATTACH_EVENT) {
+        const answers = options.answerReattach ?? options.existing ?? []
+        if (answers.includes(label)) send(ready(label))
+      }
     },
 
     async listen(event, handler) {
@@ -1238,18 +1271,21 @@ describe('the decoder budget', () => {
 
 })
 
-describe('restoreOutputs', () => {
-  const persistedOn = (label: string, monitor: OutputMonitor) => ({
-    label,
-    monitorName: monitor.name,
-    monitorOrigin: { x: monitor.position.x, y: monitor.position.y },
-    mode: 'sos-equirect' as const,
-    trackOperatorCamera: true,
-    split: false,
-    framebufferWidth: DEFAULT_FRAMEBUFFER_WIDTH,
-    debugOverlay: false,
-  })
+/** One persisted output, as a previous launch left it. Shared by the
+ *  restore and the boot scan, which read the same entries by label —
+ *  the coupling case 6's ordering rule exists for. */
+const persistedOn = (label: string, monitor: OutputMonitor) => ({
+  label,
+  monitorName: monitor.name,
+  monitorOrigin: { x: monitor.position.x, y: monitor.position.y },
+  mode: 'sos-equirect' as const,
+  trackOperatorCamera: true,
+  split: false,
+  framebufferWidth: DEFAULT_FRAMEBUFFER_WIDTH,
+  debugOverlay: false,
+})
 
+describe('restoreOutputs', () => {
   it('costs nothing when the operator never opted in', async () => {
     const fake = createFakeHost()
     const monitors = vi.spyOn(fake.host, 'availableMonitors')
@@ -1905,5 +1941,231 @@ describe('telemetry', () => {
     const payloads = JSON.stringify(vi.mocked(emit).mock.calls)
     expect(payloads).not.toContain('DISPLAY')
     expect(payloads).not.toContain('output-1')
+  })
+})
+
+/**
+ * The boot scan for windows that outlived their manager
+ * (`docs/MULTI_MONITOR_PLAN.md` §3 "Failure recovery", case 6).
+ *
+ * The case is a control window whose *page* reloaded — not a process
+ * that died, which would take the outputs with it. What a test can
+ * express is the state that leaves behind: `output-*` windows the
+ * platform still owns, and a manager whose `records` map has never
+ * heard of them.
+ */
+describe('adoptOrphanedOutputs', () => {
+  it('costs a launch with no orphans exactly one call', async () => {
+    const fake = createFakeHost()
+    const monitors = vi.spyOn(fake.host, 'availableMonitors')
+
+    const adopted = await makeManager(fake.host).adoptOrphanedOutputs()
+
+    // Unconditional, so it has to be cheap: no monitor enumeration and
+    // no IPC link on the overwhelmingly common launch, which is the
+    // same property `restoreOutputs` protects.
+    expect(adopted).toEqual([])
+    expect(monitors).not.toHaveBeenCalled()
+    expect(fake.activeListeners()).toBe(0)
+    expect(fake.calls).toEqual(['existingOutputs'])
+  })
+
+  it('adopts a survivor with the settings it had, and serves it', async () => {
+    const fake = createFakeHost({ existing: ['output-1'] })
+    const store = memoryStore({
+      outputs: [
+        { ...persistedOn('output-1', MONITORS[1]), trackOperatorCamera: false, split: true },
+      ],
+    })
+
+    const adopted = await makeManager(fake.host, { store }).adoptOrphanedOutputs()
+
+    expect(adopted).toHaveLength(1)
+    expect(adopted[0].label).toBe('output-1')
+    expect(adopted[0].view).toEqual({ trackCamera: false, split: true })
+    expect(adopted[0].monitor).toEqual(MONITORS[1])
+    // No window was created: the whole point is that the imagery on the
+    // projector never went away.
+    expect(fake.calls).not.toContain(`create:output-1:${OUTPUT_ENTRY_URL}`)
+    expect(fake.closed).toEqual([])
+  })
+
+  it('serves a reattached output through the one path, config before state', async () => {
+    const fake = createFakeHost({ existing: ['output-1'] })
+    const store = memoryStore({ outputs: [persistedOn('output-1', MONITORS[0])] })
+
+    await makeManager(fake.host, { store }).adoptOrphanedOutputs()
+
+    // A reattachment is answered by the same serve path a first
+    // announcement is, so the ordering that stops a restored 8K output
+    // popping resolution has to hold here too.
+    const order = fake.emitted
+      .filter(e => e.label === 'output-1')
+      .map(e => e.event)
+    expect(order[0]).toBe(OUTPUT_REATTACH_EVENT)
+    expect(order[1]).toBe(OUTPUT_RENDER_CONFIG_EVENT)
+    expect(order[2]).toBe(OUTPUT_STATE_EVENT)
+  })
+
+  it('closes a window no persisted entry describes', async () => {
+    const fake = createFakeHost({ existing: ['output-7'] })
+    const store = memoryStore({ outputs: [] })
+
+    const manager = makeManager(fake.host, { store })
+    const adopted = await manager.adoptOrphanedOutputs()
+
+    // There is nothing to build a truthful record from — no monitor, no
+    // view, not even a mode to report a removal with. A row that
+    // guessed would be the name-only monitor match in another costume.
+    expect(adopted).toEqual([])
+    expect(fake.closed).toEqual(['output-7'])
+    expect(manager.outputs()).toEqual([])
+  })
+
+  it('closes a survivor whose monitor is no longer there', async () => {
+    const gone = {
+      name: 'UNPLUGGED',
+      position: { x: 5000, y: 0 },
+      size: { width: 1920, height: 1080 },
+      scaleFactor: 1,
+    }
+    const fake = createFakeHost({ existing: ['output-1'] })
+    const store = memoryStore({ outputs: [persistedOn('output-1', gone)] })
+    vi.mocked(emit).mockClear()
+
+    const adopted = await makeManager(fake.host, { store }).adoptOrphanedOutputs()
+
+    expect(adopted).toEqual([])
+    expect(fake.closed).toEqual(['output-1'])
+    expect(reported('output_removed')).toEqual([
+      { event_type: 'output_removed', mode: 'sos-equirect', reason: 'monitor-gone' },
+    ])
+  })
+
+  it('closes a survivor that never answers, and says the recovery failed', async () => {
+    const fake = createFakeHost({ existing: ['output-1'], answerReattach: [] })
+    const store = memoryStore({ outputs: [persistedOn('output-1', MONITORS[0])] })
+    vi.mocked(emit).mockClear()
+
+    const manager = makeManager(fake.host, { store })
+    const adopted = await manager.adoptOrphanedOutputs()
+
+    // Absence is the signal here exactly as it is for a departure: a
+    // window that will not answer is a window nothing can drive.
+    expect(adopted).toEqual([])
+    expect(manager.outputs()).toEqual([])
+    expect(fake.closed).toEqual(['output-1'])
+    expect(reported('output_removed')).toEqual([
+      { event_type: 'output_removed', mode: 'sos-equirect', reason: 'crash' },
+    ])
+    expect(reported('output_failure')).toEqual([
+      { event_type: 'output_failure', kind: 'ipc-silence', retries: 1, recovered: false },
+    ])
+  })
+
+  it('reports a recovered output as the case-3 failure it was', async () => {
+    const fake = createFakeHost({ existing: ['output-1'] })
+    const store = memoryStore({ outputs: [persistedOn('output-1', MONITORS[0])] })
+    vi.mocked(emit).mockClear()
+
+    await makeManager(fake.host, { store }).adoptOrphanedOutputs()
+
+    // No `output_added`: no window was created, and counting a reload
+    // as new outputs would inflate the metric every time a dev saves a
+    // file. The failure it *did* experience is its control window going
+    // quiet — which is case 3's name for it, deliberately.
+    expect(reported('output_added')).toEqual([])
+    expect(reported('output_failure')).toEqual([
+      { event_type: 'output_failure', kind: 'ipc-silence', retries: 1, recovered: true },
+    ])
+  })
+
+  it('leaves nothing for the restore to respawn', async () => {
+    const fake = createFakeHost({ existing: ['output-1'] })
+    const store = memoryStore({
+      autoRestoreOnLaunch: true,
+      outputs: [persistedOn('output-1', MONITORS[0])],
+    })
+
+    const manager = makeManager(fake.host, { store })
+    await manager.adoptOrphanedOutputs()
+    const restored = await manager.restoreOutputs()
+
+    // The ordering rule the boot wiring depends on. Without the skip,
+    // this asks Tauri for a second window under a label that already
+    // exists, on a monitor that already has one.
+    expect(restored).toEqual([])
+    expect(fake.calls).not.toContain(`create:output-1:${OUTPUT_ENTRY_URL}`)
+    expect(manager.outputs().map(r => r.label)).toEqual(['output-1'])
+  })
+
+  it('advances the label counter past what it adopted', async () => {
+    const fake = createFakeHost({ existing: ['output-3'] })
+    const store = memoryStore({ outputs: [persistedOn('output-3', MONITORS[0])] })
+
+    const manager = makeManager(fake.host, { store })
+    await manager.adoptOrphanedOutputs()
+    const added = await manager.addOutput({ monitorIndex: 1 })
+
+    // A fresh manager's counter starts at 1, so without this the
+    // operator's next Add mints `output-1`… and then `output-3` again.
+    expect(added.label).toBe('output-4')
+  })
+
+  it('leaves a configured output that was not on screen alone', async () => {
+    // The scan adopts what it finds; it must not rewrite the config
+    // with only that. `output-2` was configured and is simply not
+    // running — the chained `restoreOutputs()` is what brings it back,
+    // and it can only do that if the entry is still there to read.
+    const fake = createFakeHost({ existing: ['output-1'] })
+    const store = memoryStore({
+      autoRestoreOnLaunch: true,
+      outputs: [persistedOn('output-1', MONITORS[0]), persistedOn('output-2', MONITORS[1])],
+    })
+
+    const manager = makeManager(fake.host, { store })
+    await manager.adoptOrphanedOutputs()
+
+    expect(store.current().outputs.map(o => o.label)).toEqual(['output-1', 'output-2'])
+
+    // And the restore then actually does bring it back.
+    const restored = await manager.restoreOutputs()
+    expect(restored.map(r => r.label)).toEqual(['output-2'])
+  })
+
+  it('keeps an unanswering output configured, the way a crash is kept', async () => {
+    // `commitDeparture` persists a hand-close and deliberately does not
+    // persist a crash: the operator still wants that output, something
+    // took it away. A reattach timeout is the same case, and dropping
+    // it would make a transient IPC outage permanent.
+    const fake = createFakeHost({ existing: ['output-1'], answerReattach: [] })
+    const store = memoryStore({ outputs: [persistedOn('output-1', MONITORS[0])] })
+
+    await makeManager(fake.host, { store }).adoptOrphanedOutputs()
+
+    expect(fake.closed).toEqual(['output-1'])
+    expect(store.current().outputs.map(o => o.label)).toEqual(['output-1'])
+  })
+
+  it('reserves the label of a window it could not close', async () => {
+    // A `close()` that rejects leaves the window — and its label — on
+    // screen. Minting that label again asks Tauri for a duplicate.
+    const fake = createFakeHost({ existing: ['output-2'], failClose: true })
+    const store = memoryStore({ outputs: [] })
+
+    const manager = makeManager(fake.host, { store })
+    await manager.adoptOrphanedOutputs()
+    const added = await manager.addOutput({ monitorIndex: 0 })
+
+    expect(added.label).toBe('output-3')
+  })
+
+  it('survives a host that will not enumerate its windows', async () => {
+    const fake = createFakeHost()
+    vi.spyOn(fake.host, 'existingOutputs').mockRejectedValue(new Error('nope'))
+
+    // Costs the scan and nothing else — the restore behind it still has
+    // to run, so this must not reject.
+    await expect(makeManager(fake.host).adoptOrphanedOutputs()).resolves.toEqual([])
   })
 })

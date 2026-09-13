@@ -56,6 +56,7 @@
 import {
   FRAMEBUFFER_WIDTHS,
   OUTPUT_EVENT,
+  OUTPUT_REATTACH_EVENT,
   OUTPUT_RENDER_CONFIG_EVENT,
   OUTPUT_STATE_EVENT,
   STATE_TICK_MS,
@@ -87,6 +88,7 @@ import {
 } from './outputPersistence'
 import {
   OUTPUT_CLOSING_GRACE_MS,
+  OUTPUT_REATTACH_TIMEOUT_MS,
   classifyDeparture,
   createCrashStormGuard,
   monitorKeyOf,
@@ -102,6 +104,7 @@ import {
   reportOutputRemoved,
 } from './outputTelemetry'
 import { maxVideoPanels } from '../../utils/deviceCapability'
+import type { OutputRemovedReason } from '../../types'
 import { logger } from '../../utils/logger'
 
 /** Where the output bundle lands in the build. `vite.config.ts` roots
@@ -167,6 +170,21 @@ export interface MultiOutputHost {
   /** Create the window **hidden and undecorated**, navigated to `url`.
    *  Placement is the manager's job, not the constructor's. */
   createWindow(label: string, url: string): Promise<OutputWindowHandle>
+  /**
+   * Output windows this app already owns, by label (case 6).
+   *
+   * Non-empty only when a *previous* manager spawned them and this one
+   * has never heard of them — a control-window webview that reloaded or
+   * crashed and came back, leaving its `output-*` siblings alive and
+   * still rendering. Everything else the platform has open is filtered
+   * out here: the label grammar is the whole membership test, and it is
+   * the same grammar the Tauri capability glob scopes on.
+   *
+   * A host with no notion of sibling windows returns `[]`, which is
+   * also what a healthy first launch returns — so the manager's scan
+   * costs one call and stops.
+   */
+  existingOutputs(): Promise<{ label: string; handle: OutputWindowHandle }[]>
   emitTo(label: string, event: string, payload: unknown): Promise<void>
   /** Subscribe to an event; resolves to the unlisten function. */
   listen(event: string, handler: (payload: unknown) => void): Promise<() => void>
@@ -558,6 +576,18 @@ export class MultiOutputManager {
    *  that is already gone — the operator closing a window by hand and
    *  the panel's remove button race, and neither should throw. */
   async removeOutput(label: string): Promise<void> {
+    await this.discard(label, 'operator-close')
+  }
+
+  /**
+   * Close one window, forget it, and say why it went.
+   *
+   * Shared by the operator's Remove and by the boot scan's timeout for
+   * the reason `spawn()` is shared by Add and restore: the *ordering*
+   * is the correctness content, and a second copy is a second place for
+   * it to drift. Only the reported reason differs.
+   */
+  private async discard(label: string, reason: OutputRemovedReason): Promise<void> {
     const handle = this.handles.get(label)
     // Before the close, not after: `onDestroyed` can fire while the
     // close is still being awaited, and a departure read in that window
@@ -577,7 +607,7 @@ export class MultiOutputManager {
     }
     this.handles.delete(label)
     this.records.delete(label)
-    // Only for a label that was actually here: this method is
+    // Only for a label that was actually here: `removeOutput` is
     // documented safe to call twice (the panel's Remove and a hand
     // close race), and a second call must not report a second removal.
     //
@@ -585,8 +615,21 @@ export class MultiOutputManager {
     // calls it would report one `operator-close` per output. Nothing
     // calls it outside tests today; when something does, it wants its
     // own reason rather than this one.
-    if (record) reportOutputRemoved({ mode: record.mode, reason: 'operator-close' })
-    this.persist()
+    if (record) reportOutputRemoved({ mode: record.mode, reason })
+    // **Persisted only for a deliberate removal**, which is
+    // `commitDeparture`'s rule and has to be the same rule here or the
+    // two disagree about what a crash costs. An output the operator
+    // shut by hand must not come back next launch; one that stopped
+    // for any other reason must, because they still want it and
+    // something took it away.
+    //
+    // This started as an unconditional persist, which was invisible
+    // while `removeOutput` was the only caller — every removal was
+    // deliberate. The boot scan's reattach timeout classifies as
+    // `crash`, so it quietly un-configured an output that failed to
+    // answer, turning a transient IPC outage into a permanent one.
+    // Caught in review.
+    if (reason === 'operator-close') this.persist()
   }
 
   async closeAll(): Promise<void> {
@@ -666,6 +709,216 @@ export class MultiOutputManager {
    * three projectors should not lose all three because one was
    * unplugged.
    */
+  /**
+   * Adopt `output-*` windows that outlived the manager that spawned
+   * them (`docs/MULTI_MONITOR_PLAN.md` §3 "Failure recovery", case 6).
+   *
+   * The case is a control window whose **webview** reloaded or crashed
+   * and came back — a dev reload, a renderer the OS recycled — leaving
+   * its sibling output windows alive and still rendering while a fresh
+   * `MultiOutputManager` boots with an empty `records` map. The plan
+   * frames this as a control-window *crash* and describes killing the
+   * process to reproduce it; that is not the same thing, and the
+   * distinction matters to anyone testing this. Every window belongs to
+   * one Tauri process, so killing it takes the outputs with it. What
+   * survives is a reload of the page, not a death of the app.
+   *
+   * Without this, those windows are unreachable in every sense that
+   * counts: `handleOutputEvent` drops an event whose label has no
+   * record, so their health pings go nowhere; the panel cannot list or
+   * remove them; the decoder budget does not count them; `closeAll()`
+   * cannot close them. They keep rendering a frame from before the
+   * reload, forever, which on a projector is indistinguishable from
+   * working.
+   *
+   * **Unconditional, unlike `restoreOutputs`.** The opt-in governs
+   * whether the manager *spawns* windows on launch; a window that is
+   * already on a projector exists whether or not anyone opted in, and
+   * refusing to adopt it would leave the operator with a display they
+   * cannot reach. It still costs a launch that has never used outputs
+   * exactly one call, because a host with nothing to report returns an
+   * empty array and this stops before enumerating a monitor or opening
+   * the link — the same property `restoreOutputs` protects.
+   *
+   * **Runs before `restoreOutputs`, and that ordering is load-bearing.**
+   * A surviving window holds its label, and the restore spawns from the
+   * same persisted entries by label — so without the scan first, a
+   * restore would try to create a second `output-1` on a monitor that
+   * already has one. Adopted labels are in `records` by the time the
+   * restore reads the config, and it skips them.
+   *
+   * Three things get closed rather than adopted, and each is the same
+   * judgement: the manager will not put a row in the panel it cannot
+   * describe truthfully.
+   *
+   * - **A label with no persisted entry.** There is nothing to build a
+   *   record from — no monitor, no view settings, no render config —
+   *   and `reportOutputRemoved` needs a `mode` this window has not
+   *   told us. Every alternative is a guess presented as fact, which is
+   *   the failure the name-only monitor match was rejected for. It
+   *   costs a projector going black on a path that needs the config to
+   *   have been reset while windows were live.
+   * - **A monitor that is no longer enumerated.** The same rule the
+   *   restore applies, and the reason `monitor-gone` exists.
+   * - **A window that does not answer the poke** within
+   *   `OUTPUT_REATTACH_TIMEOUT_MS`. Absence is the signal, exactly as
+   *   it is for a departure.
+   */
+  async adoptOrphanedOutputs(): Promise<OutputRecord[]> {
+    let existing: { label: string; handle: OutputWindowHandle }[]
+    try {
+      existing = await this.host.existingOutputs()
+    } catch (err) {
+      // A host that cannot enumerate its own windows costs the scan and
+      // nothing else — the restore behind it still runs, and on the
+      // overwhelmingly common launch there was nothing to find anyway.
+      logger.warn('[multiOutput] could not scan for orphaned outputs:', err)
+      return []
+    }
+    if (existing.length === 0) return []
+
+    // Reserve every label that is **on screen**, before deciding what
+    // to do with any of it — not just the ones that end up adopted.
+    // A window whose `close()` rejects is still out there holding its
+    // label, and minting that label again on the operator's next Add
+    // asks Tauri for a duplicate and fails. Doing this first also
+    // covers the labels closed below.
+    for (const { label } of existing) {
+      const index = outputLabelIndex(label)
+      if (index !== null) this.nextIndex = Math.max(this.nextIndex, index + 1)
+    }
+
+    const persisted = new Map(this.store.read().outputs.map(o => [o.label, o]))
+    const monitors = await this.host.availableMonitors()
+
+    // Started before the first poke, for the reason the restore starts
+    // before its first spawn: the answer to a poke is an `output_ready`
+    // over the link, and a listener installed afterwards races it.
+    await this.start()
+
+    const adopted: OutputRecord[] = []
+    for (const { label, handle } of existing) {
+      const config = persisted.get(label)
+      if (!config) {
+        logger.warn(`[multiOutput] closing ${label}: no persisted entry describes it`)
+        await this.closeUnowned(label, handle)
+        continue
+      }
+      const index = matchMonitorIndex(config, monitors)
+      if (index === null) {
+        logger.warn(
+          `[multiOutput] closing ${label}: no monitor matches ` +
+            `${config.monitorName ?? '(unnamed)'} at ` +
+            `${config.monitorOrigin.x},${config.monitorOrigin.y}`,
+        )
+        reportOutputRemoved({ mode: config.mode, reason: 'monitor-gone' })
+        await this.closeUnowned(label, handle)
+        continue
+      }
+
+      const record: OutputRecord = {
+        label,
+        mode: config.mode,
+        view: { trackCamera: config.trackOperatorCamera, split: config.split },
+        render: renderConfigFrom(config),
+        monitor: monitors[index],
+        // `false` until it answers, which is what the timeout below
+        // reads and what keeps the badge on `starting` meanwhile. An
+        // adopted window has not proved anything yet.
+        ready: false,
+        lastEvent: null,
+        lastHealthCheckAtMs: null,
+        health: 'starting',
+        departing: false,
+        announcedClosing: false,
+      }
+      // Registered before the poke for the reason `spawn()` registers
+      // before placement: the reply is an `output_ready`, and
+      // `handleOutputEvent` drops one whose label has no record.
+      this.records.set(label, record)
+      this.handles.set(label, handle)
+      adopted.push(record)
+
+      try {
+        await handle.onDestroyed(() => this.handleDeparture(label))
+      } catch (err) {
+        // Not fatal the way it is in `spawn()`, and the difference is
+        // reachability: there, a handle that cannot be watched belongs
+        // to a window nothing else can get at, so leaking it strands an
+        // undecorated window the operator cannot close. Here the window
+        // predates this manager, is already rendering correctly, and is
+        // in `records` — so the panel lists it and Remove still closes
+        // it through the same handle.
+        //
+        // The cost is worse than an earlier version of this comment
+        // said ("its departure goes unnoticed"): the record also holds
+        // a **decoder-budget slot** until someone removes it by hand,
+        // and the budget is a hard gate on adding outputs. Raised in
+        // review, which proposed closing the window instead. Not taken:
+        // that trades a projector showing correct imagery for a
+        // bookkeeping win, and this feature's stated policy is to
+        // preserve the last good visible state. Logged at error level
+        // so it is not the quiet kind of leak.
+        logger.error(`[multiOutput] could not watch ${label} for departure:`, err)
+      }
+      try {
+        await this.host.emitTo(label, OUTPUT_REATTACH_EVENT, {})
+      } catch (err) {
+        logger.warn(`[multiOutput] could not poke ${label}:`, err)
+      }
+    }
+
+    if (adopted.length === 0) return []
+
+    // One wait for the whole set rather than one per window: they were
+    // poked together and the timeout is a property of the slowest, so
+    // serialising it would multiply a five-second worst case by the
+    // number of projectors.
+    await this.sleep(OUTPUT_REATTACH_TIMEOUT_MS)
+
+    const live: OutputRecord[] = []
+    for (const record of adopted) {
+      // Re-read rather than trusting the captured object: a window can
+      // have departed on its own during the wait, in which case
+      // `commitDeparture` has already dealt with it.
+      const current = this.records.get(record.label)
+      if (!current) continue
+      if (current.ready) {
+        live.push(current)
+        // The failure being reported is case 3's, because that is what
+        // the output experienced: its control window went quiet. The
+        // poke is the one retry, and this one worked.
+        reportOutputFailure({ kind: 'ipc-silence', retries: 1, recovered: true })
+        logger.info(`[multiOutput] reattached ${current.label}`)
+        continue
+      }
+      logger.error(
+        `[multiOutput] ${current.label} did not answer the reattach poke — closing`,
+      )
+      reportOutputFailure({ kind: 'ipc-silence', retries: 1, recovered: false })
+      await this.discard(current.label, 'crash')
+    }
+
+    this.notifyChange()
+    return live
+  }
+
+  /**
+   * Close a window this manager never took a record for.
+   *
+   * Separate from `discard` because there is nothing to forget and
+   * nothing to report — no record, no mode, no persistence to rewrite.
+   * A rejection is absorbed for `discard`'s reason: one stuck window
+   * must not strand the scan.
+   */
+  private async closeUnowned(label: string, handle: OutputWindowHandle): Promise<void> {
+    try {
+      await handle.close()
+    } catch (err) {
+      logger.warn(`[multiOutput] could not close ${label}:`, err)
+    }
+  }
+
   async restoreOutputs(): Promise<OutputRecord[]> {
     const config = this.store.read()
     if (!config.autoRestoreOnLaunch || config.outputs.length === 0) return []
@@ -678,6 +931,12 @@ export class MultiOutputManager {
     const monitors = await this.host.availableMonitors()
     const restored: OutputRecord[] = []
     for (const output of config.outputs) {
+      // Already on screen and already ours — the boot scan adopted it
+      // before this ran (case 6). Spawning would ask Tauri for a second
+      // window under a label it already has, and the plan's whole
+      // premise for case 6 is that the imagery on the projector never
+      // went away.
+      if (this.records.has(output.label)) continue
       const index = matchMonitorIndex(output, monitors)
       if (index === null) {
         logger.warn(
@@ -1187,12 +1446,40 @@ function asOutputEvent(payload: unknown): OutputEvent | null {
  * the testable side of the seam.
  */
 export async function createTauriHost(): Promise<MultiOutputHost> {
-  const [{ WebviewWindow }, windowApi, eventApi] = await Promise.all([
+  const [{ WebviewWindow, getAllWebviewWindows }, windowApi, eventApi] = await Promise.all([
     import('@tauri-apps/api/webviewWindow'),
     import('@tauri-apps/api/window'),
     import('@tauri-apps/api/event'),
   ])
   const { PhysicalPosition, PhysicalSize, availableMonitors, primaryMonitor } = windowApi
+
+  /**
+   * One window, as the manager's handle.
+   *
+   * Shared by `createWindow` and `existingOutputs` because an adopted
+   * window has to be drivable in exactly the same ways a spawned one
+   * is — the manager closes it, watches it depart and counts it against
+   * the budget without knowing which it was.
+   */
+  const toHandle = (win: InstanceType<typeof WebviewWindow>): OutputWindowHandle => ({
+    setPosition: (x, y) => win.setPosition(new PhysicalPosition(x, y)),
+    setSize: (w, h) => win.setSize(new PhysicalSize(w, h)),
+    setFullscreen: on => win.setFullscreen(on),
+    show: () => win.show(),
+    close: () => win.close(),
+    async onDestroyed(handler) {
+      // `once`, not `on`: a window is destroyed exactly once, and the
+      // unlisten is therefore not worth threading back out — the
+      // subscription dies with the thing it is watching.
+      //
+      // This fires for *every* destroy, including the manager's own
+      // `close()`. Telling those apart is `classifyDeparture`'s job,
+      // not this seam's: a host that tried to filter here would need to
+      // know why the window is going, which is exactly the state the
+      // manager holds.
+      await win.once('tauri://destroyed', () => handler())
+    },
+  })
 
   type TauriMonitor = Awaited<ReturnType<typeof primaryMonitor>>
   const toOutputMonitor = (m: NonNullable<TauriMonitor>): OutputMonitor => ({
@@ -1227,25 +1514,20 @@ export async function createTauriHost(): Promise<MultiOutputHost> {
         void win.once('tauri://created', () => resolve())
         void win.once('tauri://error', e => reject(new Error(String(e.payload))))
       })
-      return {
-        setPosition: (x, y) => win.setPosition(new PhysicalPosition(x, y)),
-        setSize: (w, h) => win.setSize(new PhysicalSize(w, h)),
-        setFullscreen: on => win.setFullscreen(on),
-        show: () => win.show(),
-        close: () => win.close(),
-        async onDestroyed(handler) {
-          // `once`, not `on`: a window is destroyed exactly once, and
-          // the unlisten is therefore not worth threading back out —
-          // the subscription dies with the thing it is watching.
-          //
-          // This fires for *every* destroy, including the manager's own
-          // `close()` above. Telling those apart is
-          // `classifyDeparture`'s job, not this seam's: a host that
-          // tried to filter here would need to know why the window is
-          // going, which is exactly the state the manager holds.
-          await win.once('tauri://destroyed', () => handler())
-        },
-      }
+      return toHandle(win)
+    },
+
+    async existingOutputs() {
+      // Every window this app owns, not only the ones this manager
+      // spawned — which is the entire point on a control window whose
+      // page reloaded (case 6). The label grammar is the membership
+      // test, and `isOutputLabel` is the same predicate the Tauri
+      // capability glob encodes, so a window this returns is one the
+      // `output-*` capability already scoped.
+      const all = await getAllWebviewWindows()
+      return all
+        .filter(win => isOutputLabel(win.label))
+        .map(win => ({ label: win.label, handle: toHandle(win) }))
     },
 
     emitTo: (label, event, payload) => eventApi.emitTo(label, event, payload),

@@ -13,6 +13,7 @@ import {
   resetGlobeStateEventsForTests,
   subscribeGlobeState,
 } from './globeStateEvents'
+import { until } from '../../test-utils'
 import type { MultiOutputHost } from './manager'
 import type { MirroredDataset } from './protocol'
 
@@ -29,6 +30,7 @@ const DESKTOP = { isDesktop: true } as const
 function fakeHost(): MultiOutputHost & {
   availableMonitors: ReturnType<typeof vi.fn>
   createWindow: ReturnType<typeof vi.fn>
+  existingOutputs: ReturnType<typeof vi.fn>
   emitTo: ReturnType<typeof vi.fn>
   listen: ReturnType<typeof vi.fn>
 } {
@@ -36,6 +38,7 @@ function fakeHost(): MultiOutputHost & {
     availableMonitors: vi.fn(async () => []),
     primaryMonitor: vi.fn(async () => null),
     createWindow: vi.fn(async () => ({}) as never),
+    existingOutputs: vi.fn(async () => []),
     emitTo: vi.fn(async () => {}),
     listen: vi.fn(async () => () => {}),
   }
@@ -82,12 +85,29 @@ function start(options: Parameters<typeof startMultiOutput>[0]): MultiOutputBoot
  * localStorage-backed and happy-dom shares it across files.
  */
 let restoreSpy = vi.fn(async () => [])
+let adoptSpy = vi.fn(async () => [])
+/** Both boot calls in the order they actually ran. The order is the
+ *  correctness — a restore that beat the scan would ask Tauri for a
+ *  second window under a label that already exists — so a test that
+ *  only counted calls would pass on the broken arrangement. */
+let bootCalls: string[] = []
 
 beforeEach(async () => {
   const mod = await import('./manager')
-  restoreSpy = vi.fn(async () => [])
+  bootCalls = []
+  restoreSpy = vi.fn(async () => {
+    bootCalls.push('restore')
+    return []
+  })
+  adoptSpy = vi.fn(async () => {
+    bootCalls.push('adopt')
+    return []
+  })
   vi.spyOn(mod.MultiOutputManager.prototype, 'restoreOutputs').mockImplementation(
     restoreSpy as unknown as typeof mod.MultiOutputManager.prototype.restoreOutputs,
+  )
+  vi.spyOn(mod.MultiOutputManager.prototype, 'adoptOrphanedOutputs').mockImplementation(
+    adoptSpy as unknown as typeof mod.MultiOutputManager.prototype.adoptOrphanedOutputs,
   )
 })
 
@@ -256,19 +276,40 @@ describe('startMultiOutput — enabled', () => {
     expect(host.createWindow).not.toHaveBeenCalled()
   })
 
-  it('asks the manager to restore, and does not block ready on it', async () => {
+  it('scans for orphans and then restores, without blocking ready on either', async () => {
     const { release, createHost } = deferredHost()
     const handle = start({ ...DESKTOP, createHost })
     release()
 
     const manager = await handle.ready
 
-    // Unconditional: the opt-in test lives in the manager, so there is
-    // only one reader of that flag. `ready` resolving without waiting
-    // for the restore is the point — restored outputs are paced apart,
-    // and awaiting them would put that stagger on the boot path.
+    // `ready` resolving without waiting for either is the point —
+    // restored outputs are paced apart and a scan waits five seconds
+    // for a reply, so awaiting them would put both on the boot path.
     expect(manager).not.toBeNull()
-    expect(restoreSpy).toHaveBeenCalledTimes(1)
+    expect(bootCalls).not.toContain('restore')
+
+    await until(() => bootCalls.length === 2, 'the boot chain')
+
+    // Both unconditional: each opt-in test lives in the manager, so
+    // there is only one reader of each. And the scan goes **first**,
+    // because a surviving window holds the same label the restore
+    // would spawn under.
+    expect(bootCalls).toEqual(['adopt', 'restore'])
+  })
+
+  it('still restores when the orphan scan fails', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    adoptSpy.mockRejectedValueOnce(new Error('cannot enumerate windows'))
+    const { release, createHost } = deferredHost()
+
+    const handle = start({ ...DESKTOP, createHost })
+    release()
+    await handle.ready
+
+    // They recover different things. An installation must not lose its
+    // configured outputs because the platform would not list windows.
+    await until(() => restoreSpy.mock.calls.length === 1, 'the restore')
   })
 
   it('survives a restore that rejects', async () => {
