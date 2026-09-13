@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 import { describe, it, expect } from 'vitest'
 import { computeGazeSpawnPosition, GAZE_SPAWN_DISTANCE } from './vrSpawn'
 

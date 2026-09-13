@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 import { verifyAccessJwt } from './api/v1/_lib/access-auth'
 
 type RealtimeProxyEnv = {

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 import { fetchAccountState, type AccountState } from '../services/accountService'
 
 function escapeHtml(value: string): string {

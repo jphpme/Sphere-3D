@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * Headset-independent math for the two-step VR/AR placement height
  * control.

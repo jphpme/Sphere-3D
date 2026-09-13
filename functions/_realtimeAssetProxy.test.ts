@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { verifyAccessJwt } from './api/v1/_lib/access-auth'
 import { proxyRealtimeDashAsset } from './_realtimeAssetProxy'

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * Touch layer for handheld-AR globe placement (the `screen` input
  * class).
