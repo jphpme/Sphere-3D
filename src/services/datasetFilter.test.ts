@@ -37,6 +37,12 @@ describe('formatToBucket', () => {
     expect(formatToBucket('video/webm')).toBe('video')
   })
 
+  it('buckets the realtime/forecast DASH stream to "video"', () => {
+    // Not a `video/*` MIME, so it needs its own arm — otherwise the
+    // realtime rows disappear from the Video facet.
+    expect(formatToBucket('application/dash+xml')).toBe('video')
+  })
+
   it('buckets image MIME types to "image" (including the legacy "images/" variant)', () => {
     expect(formatToBucket('image/jpeg')).toBe('image')
     expect(formatToBucket('image/png')).toBe('image')

@@ -120,7 +120,12 @@ export type FormatBucket = 'video' | 'image' | 'tour' | 'other'
  */
 export function formatToBucket(format: DatasetFormat | string | undefined): FormatBucket {
   if (!format) return 'other'
-  if (format.startsWith('video/')) return 'video'
+  // `application/dash+xml` is the realtime/forecast overlay stream, and it
+  // is video in every sense the chip cares about: it plays, it has a
+  // duration, and it belongs beside `video/mp4`. It is not a `video/*`
+  // MIME, so the prefix test below misses it and the row would land in
+  // `'other'` — invisible under the Video facet it belongs to.
+  if (format.startsWith('video/') || format === 'application/dash+xml') return 'video'
   if (format.startsWith('image') || format.startsWith('images/')) return 'image'
   if (format.startsWith('tour/')) return 'tour'
   return 'other'
