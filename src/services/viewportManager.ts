@@ -140,7 +140,8 @@ interface Viewport {
   noticeDate: string | null
   /** True once this panel's stream has failed terminally. */
   streamFailed: boolean
-  /** True while this panel's WebGL context is known to be broken. */
+  /** True once this panel's WebGL context has been lost. Never unset
+   *  while there is no repair — see `markPanelDisplayLost`. */
   displayLost: boolean
   /** Floating per-panel colorbar for data-encoded datasets. Replaced
    *  wholesale rather than mutated, because a display change alters the
@@ -370,17 +371,26 @@ export class ViewportManager {
   }
 
   /**
-   * Mark a panel whose WebGL context has been lost.
+   * Mark a panel whose WebGL context has been lost. **One-way.**
    *
-   * Cleared when the browser restores the context — but restoring is
-   * not repairing: MapLibre rebuilds its own resources and the custom
-   * layer's are still gone. Until that half exists, the notice
-   * clearing means "the context came back", not "the globe works".
+   * There is no clearing counterpart, and its absence is the point.
+   * Restoring the context is not repairing the panel: MapLibre rebuilds
+   * its own resources, `earthTileLayer`'s textures and programs stay
+   * gone, and the globe comes back with tiles and no data. A setter
+   * that took a boolean let the restore withdraw the only diagnosis the
+   * user had, while the thing it diagnosed was still true — and where a
+   * stream had also failed it handed them a notice naming the wrong
+   * subsystem. The notice reads *"reload to restore"*; clearing it
+   * without a reload contradicts it.
+   *
+   * The clear belongs with the repair half, which does not exist yet.
+   * Whoever writes it adds a way to unset this, deliberately, at the
+   * point where it becomes true.
    */
-  setPanelDisplayNotice(slot: number, lost: boolean): void {
+  markPanelDisplayLost(slot: number): void {
     const vp = this.viewports[slot]
     if (!vp) return
-    vp.displayLost = lost
+    vp.displayLost = true
     this.renderPanelNotice(slot)
   }
 
@@ -611,7 +621,7 @@ export class ViewportManager {
       getLayerId,
       // The notice is DOM, not WebGL, so it still draws over a dead
       // canvas — which is the whole reason it can report this at all.
-      onContextChange: (lost) => this.setPanelDisplayNotice(index, lost),
+      onContextLost: () => this.markPanelDisplayLost(index),
     })
 
     // Primary-indicator pill: shown on every panel, numbered 1-based.

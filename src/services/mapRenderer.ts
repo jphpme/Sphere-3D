@@ -412,8 +412,8 @@ export class MapRenderer implements GlobeRenderer {
       slotIndex?: number
       getLayerId?: () => string | null
       /**
-       * Fired when this panel's WebGL context is lost, and again when
-       * the browser restores it.
+       * Fired when this panel's WebGL context is lost. **Once, and
+       * never un-fired.**
        *
        * A lost context invalidates every GPU resource behind this
        * globe. MapLibre rebuilds its own on restore — which is why the
@@ -422,13 +422,28 @@ export class MapRenderer implements GlobeRenderer {
        * nothing rebuilds those. The panel therefore comes back with
        * tiles and no data, permanently.
        *
-       * This reports the event; it does not repair it. MapLibre's own
-       * docs say custom layers "should appropriately handle
-       * `MapContextEvent` with `webglcontextlost` and
+       * That is why there is no restore counterpart. An earlier draft
+       * reported both edges as `onContextChange(lost: boolean)`, and
+       * the panel notice cleared on the restore — withdrawing the only
+       * user-visible diagnosis at the exact moment the globe was still
+       * broken, and, where a stream had also failed, replacing it with
+       * a notice pointing at the wrong subsystem. The notice itself
+       * says *"reload to restore"*: clearing it without a reload
+       * contradicts its own instruction. Raised in review.
+       *
+       * So the signal is one-way by construction, and the clear
+       * belongs to whoever writes the repair half — rebuilding the
+       * custom layer's programs and textures and re-uploading the
+       * dataset — because that is the only event that makes it true.
+       * A restore still logs, because "lost and came back" and "lost
+       * and stayed lost" are different diagnoses.
+       *
+       * MapLibre's own docs say custom layers "should appropriately
+       * handle `MapContextEvent` with `webglcontextlost` and
        * `webglcontextrestored`" — this is the detection half of doing
        * that.
        */
-      onContextChange?: (lost: boolean) => void
+      onContextLost?: () => void
       /** MapLibre projection. Defaults to `'globe'` for the main
        *  3D globe; the §6.9 catalog Map view passes `'mercator'`
        *  for a flat world map. */
@@ -499,14 +514,15 @@ export class MapRenderer implements GlobeRenderer {
     // cause. There is no console on the device this was found on.
     this.map.on('webglcontextlost', () => {
       logger.error(`[Map] WebGL context lost on panel ${this.slotIndex} — every GPU resource for this globe is now invalid`)
-      options?.onContextChange?.(true)
+      options?.onContextLost?.()
     })
     this.map.on('webglcontextrestored', () => {
-      // A warning rather than info: the context is back, but the custom
-      // layer's textures and programs are not, so this panel is still
-      // broken. Reporting it as recovery would be a lie.
-      logger.warn(`[Map] WebGL context restored on panel ${this.slotIndex} — MapLibre resources only; the dataset layer is not rebuilt`)
-      options?.onContextChange?.(false)
+      // A warning rather than info, and deliberately **not** a signal
+      // that anything recovered: the context is back, the custom
+      // layer's textures and programs are not, and this panel is still
+      // broken. The notice stays up for that reason — see
+      // `onContextLost`.
+      logger.warn(`[Map] WebGL context restored on panel ${this.slotIndex} — MapLibre resources only; the dataset layer is not rebuilt, so the panel notice stands`)
     })
 
     this.map.on('dblclick', resetView)
