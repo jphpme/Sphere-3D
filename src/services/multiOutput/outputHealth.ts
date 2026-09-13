@@ -208,6 +208,24 @@ export function classifyDeparture(signals: DepartureSignals): OutputDeparture {
  */
 export const OUTPUT_CLOSING_GRACE_MS = 250
 
+/**
+ * How long a scanned orphan gets to answer the reattach poke before the
+ * manager gives up and closes it (case 6). The plan's number.
+ *
+ * Manager-side only, which is why it lives here beside the other
+ * departure timings rather than in `protocol.ts`: the output never
+ * reads it, and putting it in the contract would imply an agreement
+ * neither side needs. `LINK_PING_INTERVAL_MS` went the other way for
+ * the opposite reason — both ends genuinely derive from it.
+ *
+ * Generous on purpose. What has to happen inside it is a webview that
+ * may have been idle for hours servicing an event, and the cost of
+ * being wrong is asymmetric in the usual direction: waiting too long
+ * delays a panel row on a rare path, while giving up too early closes a
+ * working window and blanks a projector in front of an audience.
+ */
+export const OUTPUT_REATTACH_TIMEOUT_MS = 5_000
+
 /** Crashes on one monitor within `CRASH_STORM_WINDOW_MS` that trip the
  *  guard. The plan's number. */
 export const CRASH_STORM_LIMIT = 3

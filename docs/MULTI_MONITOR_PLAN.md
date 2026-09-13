@@ -996,7 +996,7 @@ two-way binding.
 
 | File | Responsibility |
 |---|---|
-| `src/services/multiOutput/manager.ts` | `MultiOutputManager` — singleton: enumerates monitors, spawns/destroys output windows, builds and broadcasts globe-state diffs, persists config, monitors output health (crash detection, IPC heartbeats, monitor-unplug 2 s poll, boot scan for orphaned `output-*` windows after a control-window crash — see "Failure recovery") |
+| `src/services/multiOutput/manager.ts` | `MultiOutputManager` — singleton: enumerates monitors, spawns/destroys output windows, builds and broadcasts globe-state diffs, persists config, monitors output health (crash detection, IPC heartbeats, monitor-unplug 2 s poll, boot scan adopting orphaned `output-*` windows after a control-window **reload** — see "Failure recovery", case 6, which corrects the "crash" framing) |
 | `src/services/multiOutput/protocol.ts` | Shared TS types for control↔output IPC events. Imported by both bundles. Single source of truth for the state schema above. |
 | `src/services/multiOutput/stateAggregator.ts` | Subscribes to dataset / playback / layer / time / view events, builds the state snapshot, emits diffs |
 | `src/ui/outputUI.ts` | Tools → Outputs panel — list current outputs, "Add output" button, per-output config menu (monitor, mode, "Track operator camera" toggle, "Split sphere" toggle, "Rotation offset (°)" numeric + slider, "Calibration" submenu with test-pattern selector, debug overlay), per-output health badge (healthy / stale / stalled / monitor-missing — see "Failure recovery") |
@@ -2003,24 +2003,77 @@ Two scoping notes for whoever builds this:
 
 #### 6. Manager / control window crash with outputs alive
 
-**Detection.** Outputs detect this via case 3 (IPC
-silence). When the operator relaunches, the manager runs
-its boot scan path.
+**Landed.** `MultiOutputManager.adoptOrphanedOutputs()`,
+`OUTPUT_REATTACH_EVENT`, and the listener that answers it in
+`outputLink`. Chained ahead of `restoreOutputs()` in
+`bootMultiOutput`. Not exercised on hardware.
 
-**Recovery (manager side at boot).** Before normal init
-finishes, manager calls `WebviewWindow.getAll()` and finds
-any `output-*` labeled windows that survived the control
-window's death. For each:
+**What actually survives, which is not what this section
+first said.** The heading and the smoke step below describe
+killing the control window's *process*. That cannot produce
+the state this case is about: every window belongs to one
+Tauri process, so killing it takes the outputs with it. What
+leaves `output-*` windows alive with a manager that has never
+heard of them is a reload of the control window's **page** —
+a dev reload, a renderer the OS recycled, a webview crash the
+app survived. The recovery is the same either way; only the
+way to reach it differs, and smoke step 35 is wrong as
+written.
 
-- Send `output_reattach_ping`. If response within 5 s:
-  re-establish IPC, send fresh snapshot, output exits
-  stale state.
-- If no response: assume dead, destroy via `webview.close()`,
-  remove any orphaned record.
+**Detection.** Outputs detect their side via case 3 (IPC
+silence). The manager detects its side by looking, because it
+has nothing to detect *with* — an empty `records` map is
+indistinguishable from a first launch.
 
-This makes control-window restart non-destructive for the
-LED-sphere audience: the imagery stays on screen, refreshes
-once the operator's relaunch completes.
+**Recovery (manager side at boot).** `existingOutputs()`
+wraps `getAllWebviewWindows()`, filtered by the `output-*`
+grammar — the same predicate the capability glob encodes. For
+each survivor:
+
+- Match it to a persisted entry by label, and that entry's
+  monitor to a live one. A record is registered **before**
+  the poke, since the reply is an `output_ready` and
+  `handleOutputEvent` drops one whose label has no record.
+- Emit `OUTPUT_REATTACH_EVENT`. Within
+  `OUTPUT_REATTACH_TIMEOUT_MS` the output re-announces, and
+  the *existing* serve path sends its config and then a full
+  snapshot — no second copy of that ordering.
+- No answer: close it, `output_removed` with `crash`,
+  `output_failure` with `ipc-silence`.
+
+**Three things get closed rather than adopted**, and it is
+one judgement three times: the manager will not put a row in
+the panel it cannot describe truthfully. A label with no
+persisted entry (nothing to build a record from, and no
+`mode` to even report a removal with); a monitor no longer
+enumerated (`monitor-gone`, the same rule the restore
+applies); a window that does not answer.
+
+**The poke exists because of `IPC_ORPHAN_MS`.** Inside 60 s a
+disconnected output is still pinging, and a fresh manager
+hears it the moment a record exists — no poke needed. Past
+it the output has stopped talking by design, so nothing would
+ever arrive again unless the manager spoke first.
+
+**Ordering against the restore is load-bearing.** A survivor
+holds its label and the restore spawns from the same
+persisted entries by label, so a restore that ran first would
+ask for a second `output-1` on a monitor that already has
+one. The scan claims those labels into `records`; the restore
+skips them. Unlike the restore it is **not** gated on the
+operator's opt-in — that flag governs whether the manager
+*spawns* windows, and a window already on a projector exists
+regardless.
+
+This makes a control-window reload non-destructive for the
+LED-sphere audience: the imagery stays on screen and
+refreshes once the page is back.
+
+**Telemetry.** A reattached output reports
+`output_failure { kind: 'ipc-silence', retries: 1,
+recovered: true }` and **no** `output_added` — no window was
+created, and counting a reload as new outputs would inflate
+that metric every time a developer saves a file.
 
 #### Summary
 
@@ -2726,7 +2779,7 @@ without rolling the whole feature back.
 | 12a | `multi-output: window chrome — fullscreen, decorations, F11, idle cursor` | **Landed.** `src/services/windowChrome.ts` (shared by both windows), the F11 handler, the idle-cursor rule in `base.css`, and the upgrade of the Tools bar's existing fullscreen button. Two findings worth recording. First, §3.6 mechanism 2 was **already half-built**: a fullscreen button has shipped since §3.3, driving `document.requestFullscreen` directly — which is the whole answer in a browser and half of it in a packaged app, since it fullscreens the *webview* while leaving the native title bar and border in the captured signal. The button was upgraded rather than joined by a second one. Second, that same button read its label off `document.fullscreenElement`, which stays **null** when the native window goes fullscreen — so on desktop it would have offered "Enter fullscreen" over a window already in it, and F11 changes the state without `fullscreenchange` firing at all; the controller is now what it reads. Fullscreen and decorations are one operation because `setFullscreen(true)` alone leaves the title bar on some window managers and removes it on others, and decorations follow rather than lead so a failed fullscreen cannot strand an operator with an unmovable undecorated window. The desktop host is built **synchronously** and imports Tauri on first use, because the Tools menu reads the state while laying out its markup. F11 on an output passes `initial: true` and persists nothing — an output is fullscreen by construction and a title bar borrowed for calibration must not come back next launch. | Yes (additive) |
 | 12b | `multi-output: kiosk launch flag` | **Landed.** `--kiosk` and `TERRAVIZ_KIOSK=1` parsed in `src-tauri/src/lib.rs` (`main.rs` was already the 12-line shim this section predicted), applied in `setup()` behind `#[cfg(desktop)]`. "Before first paint" is **best-effort**, not guaranteed: `setup()` is the earliest point an `AppHandle` exists, and the static alternative in `tauri.conf.json` cannot be conditional on a flag. `TERRAVIZ_KIOSK=0` and an empty value mean *off* — a deployment templating one unit file across several machines sets the variable explicitly to disable kiosk, so the value is matched against an allowlist rather than tested for presence. The flag beats a falsy environment, since an operator adding it to one launch is deciding now while the environment is the installation's default. Decorations drop only after fullscreen succeeds, and every failure is logged and swallowed. One thing this rung had to add on the **TypeScript** side: the kiosk flag makes the native window fullscreen without the JS controller knowing, so `WindowChromeHost` gained an async `queryFullscreen()` seeded once at construction — without it the Tools button offers "Enter fullscreen" over a kiosk window and the first press is a no-op. That needs `core:window:allow-is-fullscreen`, added to `default.json` (`output.json` already had it). | Yes (additive) |
 | 12c | `multi-output: the Earth decoration the equirect path can carry` | The three effects §"What the equirect path does to the Earth decoration" says **cross** — day/night terminator, night lights, clouds — wired into `layerStack`'s fragment shader. **Landed.** Specified here first, then built exactly as specified, which is why the first hardware session's flat diffuse Earth is now day/night-shaded with city lights and cloud cover. Not a research question: the terminator is `dot(hit, uSunDir)` (the ray-march's hit point on the unit sphere *is* the normal), night lights are a second sampler gated by it, clouds are one more layer in a composite that already unrolls slots. The sun direction comes from `getSunPosition` in `src/utils/time.ts`, which the control globe already uses, so the two cannot disagree about where the sun is. **The four that do not cross stay out** — specular, atmosphere *shells*, ground shadow, sun sprite are not deferred, they are incoherent on this surface, and baking one in paints a fixed glare spot or limb ring onto a physical sphere in a place correct from exactly one vantage point. That is a rendering artifact that reads as a data feature, which is worse than its absence. So "as realistic as possible" on a sphere **is** diffuse + night lights + clouds + terminator; this rung is the whole of it. **Amended after this rung shipped:** the atmosphere's *shell* stays out for the reason above, but its **disc tint** was later found to cross — pinned to nadir the scattering integral is a function of sun angle alone, with no silhouette to be wrong about. That is what made the output's ocean black beside a blue one. It is not a fifth effect sneaking back in; it is the sharper test (what does this become at nadir?) applied to a row this table got half right. | Yes (additive) |
-| 13 | `multi-output: failure recovery — crashes, stalls, GPU loss, monitor unplug` | Manager gains crash detection (no-graceful-close window destroy → toast + record removal), 3-strikes-per-monitor crash storm guard, 2 s `availableMonitors()` poll for unplug detection, `getAll()` boot scan to reattach orphaned `output-*` windows after a control-window crash. Output gains `webglcontextlost` / `webglcontextrestored` listeners with full scene rebuild, IPC-silence watchdog (5 s → stale state, 60 s → orphan), one HLS stream rebuild on a `loadStream()` rejection with frozen last-good-frame (no retry ladder — `hlsService` already spends a 3× budget before rejecting). Outputs panel renders per-output health badges (healthy / stale / stalled / monitor-missing). New Tier A `output_failure` event fired from manager via `analytics/emitter.ts` with `{ kind, retries, recovered }` (Open Question 3 decided). See §3 "Failure recovery". **Landed so far: 13a** (crash-vs-hand-close classification, the storm guard, record removal, `onOutputsChanged` for the panel) and **13b** (all three Tier A events, `outputTelemetry.ts`). Still open: health badges, the IPC-silence watchdog, the unplug poll, the single HLS rebuild, GPU context loss, the orphan boot scan, the toast (no toast primitive exists), and the `perf_sample` extension (needs an `OutputEvent` arm carrying drift — see Open Question 3). | Yes (additive) |
+| 13 | `multi-output: failure recovery — crashes, stalls, GPU loss, monitor unplug` | Manager gains crash detection (no-graceful-close window destroy → toast + record removal), 3-strikes-per-monitor crash storm guard, 2 s `availableMonitors()` poll for unplug detection, `getAll()` boot scan to reattach orphaned `output-*` windows after a control-window crash. Output gains `webglcontextlost` / `webglcontextrestored` listeners with full scene rebuild, IPC-silence watchdog (5 s → stale state, 60 s → orphan), one HLS stream rebuild on a `loadStream()` rejection with frozen last-good-frame (no retry ladder — `hlsService` already spends a 3× budget before rejecting). Outputs panel renders per-output health badges (healthy / stale / stalled / monitor-missing). New Tier A `output_failure` event fired from manager via `analytics/emitter.ts` with `{ kind, retries, recovered }` (Open Question 3 decided). See §3 "Failure recovery". **Landed so far: 13a** (crash-vs-hand-close classification, the storm guard, record removal, `onOutputsChanged` for the panel), **13b** (all three Tier A events, `outputTelemetry.ts`), **case 3** (the output's `linkWatchdog`, the manager's `output_health_check` resync, the panel's stale badge and its announcement) and **case 6** (`adoptOrphanedOutputs`, `OUTPUT_REATTACH_EVENT`, chained ahead of the restore at boot). Still open: the unplug poll, the single HLS rebuild, GPU context loss, the toast (no toast primitive exists), and the `perf_sample` extension (needs an `OutputEvent` arm carrying drift — see Open Question 3). | Yes (additive) |
 | 14 | `multi-output: calibration tooling — test pattern + rotation offset` | `src/output/datasetMirror.ts` recognises the `__terraviz_calibration__` sentinel id and renders a procedural test pattern (8-step grayscale ramp at the equator, RGB color bars at lat ±30°, lat/lon graticule with color-coded equator + prime meridian, named anchor crosshairs, N/S pole labels, live resolution counter — ~80 LOC GLSL). `src/output/equirectRtt.ts` adds the `uRotationOffsetRad` longitude rotation applied before the camera-offset ray-march. `outputUI.ts` adds the per-output "Rotation offset (°)" numeric + slider and a "Calibration" submenu. Persisted config gains `rotationOffsetDeg`. See §3 "Calibration tooling". | Yes (additive) |
 | 15 | `multi-output: operator runbook` | `docs/MULTI_MONITOR_OPERATIONS.md` — the deployment half this plan has so far deferred, and which a spike showed is not optional. Covers: **checking which GPU the webview actually got** (the renderer string surfaced by commit 11's debug overlay) and the per-OS override for a hybrid-graphics machine, since the app's own `powerPreference` is inert and a silent landing on the iGPU is undiagnosable from logs; **measuring this machine's decoder budget** rather than trusting a constant, and entering it in the Outputs panel's budget field (commit 11); disabling screen savers and display sleep (Open Question 5's documented half); the kiosk autostart entry from §3.6; and what each Outputs-panel health badge means in front of an audience. No code. | **Yes** (docs) |
 
@@ -4221,13 +4274,18 @@ telemetry event fires (visible in the console batch when
     after 5 s (no audience-visible change; last good content
     keeps rendering). Outputs panel shows the stale badge.
     Resume the debugger: stale badge clears within 5 s.
-35. **Manager crash + reattach.** With an output running,
-    `kill -9` the control window's PID. The output keeps
-    rendering. Relaunch the control window: manager boot
-    scan finds the orphan, reattaches via `output_reattach_
-    ping`, sends fresh state snapshot. Output badge in the
-    re-loaded panel returns to healthy. The audience sees
-    no interruption.
+35. **Control-window reload + reattach.** With an output
+    running, reload the control window's page (Ctrl+R in dev,
+    or `location.reload()` from a console). The output keeps
+    rendering throughout. The reloaded manager's boot scan
+    finds it, pokes it with `OUTPUT_REATTACH_EVENT`, and the
+    output re-announces; the panel lists it again and its
+    badge returns to healthy within a second or two. The
+    audience sees no interruption.
+    **Not `kill -9` on the control window's PID**, which this
+    step used to say: every window is in that one process, so
+    killing it takes the outputs with it and there is nothing
+    left to reattach to. See case 6.
 36. **GPU context loss.** Open Chromium devtools on the
     output (F12 in dev mode), Performance → Settings →
     enable "Disable WebGL". The canvas goes black; output

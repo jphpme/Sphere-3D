@@ -57,6 +57,7 @@ import { IDENTITY_PARAMS } from './equirectRtt'
 import { sameValue } from '../services/multiOutput/stateEquality'
 import {
   OUTPUT_EVENT,
+  OUTPUT_REATTACH_EVENT,
   OUTPUT_RENDER_CONFIG_EVENT,
   OUTPUT_STATE_EVENT,
   defaultRenderConfig,
@@ -462,6 +463,47 @@ export async function connectOutputLink(
     }
   })
 
+  /**
+   * Say who and where this window is.
+   *
+   * One function rather than two call sites, because the manager routes
+   * on `label` and checks `mode` against the geometry it spawned — a
+   * reattachment that announced a different shape from the first
+   * announcement would be a window the manager drives as something it
+   * is not.
+   */
+  async function announce(): Promise<void> {
+    await host.emit(OUTPUT_EVENT, {
+      type: 'output_ready',
+      label: host.label,
+      monitorName: await host.monitorName(),
+      mode,
+    })
+  }
+
+  // The manager's boot scan found this window and is asking whether
+  // anyone is home (case 6). Installed with the other two and before
+  // the announcement below, because a manager that is scanning is a
+  // manager that has *already* registered a record and may poke inside
+  // this window's own boot.
+  //
+  // Recording contact is not a formality: a window past `IPC_ORPHAN_MS`
+  // has stopped pinging, so this event is the only thing that can
+  // return it to `live`, and the HUD's link field would otherwise read
+  // `orphaned` over a window that is being actively driven again.
+  const unlistenReattach = await host.listen(OUTPUT_REATTACH_EVENT, () => {
+    watchdog.sawMessage(host.nowMs?.() ?? Date.now())
+    logger.warn('[output] reattach requested — re-announcing')
+    // Fired rather than awaited, for the reason the ping is: this is an
+    // IPC callback, and a rejection escaping it surfaces as an
+    // unhandled rejection in a window nobody is looking at. The manager
+    // treats an unanswered poke as a dead window and closes it, which
+    // is the correct outcome when the emit genuinely failed.
+    void announce().catch(err =>
+      logger.warn('[output] could not answer the reattach poke:', err),
+    )
+  })
+
   // Announce the close before announcing readiness, so a window torn
   // down during a slow boot still says so. `emit` is fired and not
   // awaited: the window is closing underneath it and there is no later
@@ -474,15 +516,10 @@ export async function connectOutputLink(
       .catch(err => logger.warn('[output] could not announce the close:', err))
   })
 
-  // After both listeners, never before: the manager answers this by
+  // After every listener, never before: the manager answers this by
   // sending the first full snapshot and this window's config straight
   // away.
-  await host.emit(OUTPUT_EVENT, {
-    type: 'output_ready',
-    label: host.label,
-    monitorName: await host.monitorName(),
-    mode,
-  })
+  await announce()
 
   let stopped = false
   return {
@@ -533,6 +570,7 @@ export async function connectOutputLink(
       configListeners.clear()
       unlisten()
       unlistenConfig()
+      unlistenReattach()
     },
   }
 }

@@ -31,6 +31,7 @@ import { IPC_ORPHAN_MS, IPC_STALE_MS } from '../services/multiOutput/protocol'
 import { IDENTITY_PARAMS } from './equirectRtt'
 import {
   OUTPUT_EVENT,
+  OUTPUT_REATTACH_EVENT,
   OUTPUT_RENDER_CONFIG_EVENT,
   OUTPUT_STATE_EVENT,
   defaultRenderConfig,
@@ -271,6 +272,7 @@ function fakeHost(): OutputLinkHost & {
   emit: ReturnType<typeof vi.fn>
   deliver: (payload: unknown) => void
   deliverConfig: (payload: unknown) => void
+  deliverReattach: () => void
   listenedBefore: () => boolean
   /** Move the link's clock. Case 3's thresholds are 5 s and 60 s, so
    *  a real clock would mean a minute-long test that fails on a
@@ -309,12 +311,13 @@ function fakeHost(): OutputLinkHost & {
     emit,
     deliver: payload => handlers.get(OUTPUT_STATE_EVENT)?.(payload),
     deliverConfig: payload => handlers.get(OUTPUT_RENDER_CONFIG_EVENT)?.(payload),
+    deliverReattach: () => handlers.get(OUTPUT_REATTACH_EVENT)?.({}),
     listenedBefore: () => handlers.size > 0 && !listenedLate,
   }
 }
 
 describe('connectOutputLink', () => {
-  it('installs both listeners before announcing the window', async () => {
+  it('installs every listener before announcing the window', async () => {
     const host = fakeHost()
     const listen = vi.spyOn(host, 'listen')
 
@@ -327,8 +330,41 @@ describe('connectOutputLink', () => {
     // lose its resolution until the operator next changed it.
     expect(host.listenedBefore()).toBe(true)
     expect(listen.mock.calls.map(c => c[0]).sort()).toEqual(
-      [OUTPUT_RENDER_CONFIG_EVENT, OUTPUT_STATE_EVENT].sort(),
+      [OUTPUT_REATTACH_EVENT, OUTPUT_RENDER_CONFIG_EVENT, OUTPUT_STATE_EVENT].sort(),
     )
+  })
+
+  it('re-announces when the manager pokes it', async () => {
+    // Case 6: a control window whose page reloaded finds this window
+    // still alive and asks who it is. The reply is an ordinary
+    // `output_ready`, so the manager's one serve path does the rest —
+    // config, then the first snapshot, exactly as at boot.
+    const host = fakeHost()
+    await connectOutputLink(host)
+    host.emit.mockClear()
+
+    host.deliverReattach()
+    await until(() => host.emit.mock.calls.length > 0, 'the re-announcement')
+
+    const [event, payload] = host.emit.mock.calls[0]
+    expect(event).toBe(OUTPUT_EVENT)
+    expect(payload).toMatchObject({ type: 'output_ready', label: 'output-3' })
+  })
+
+  it('takes an orphaned link back to live on the poke alone', async () => {
+    // The reason the poke exists at all. Past `IPC_ORPHAN_MS` the
+    // output has stopped pinging by design, so nothing it does can
+    // recover the link — this event is the only thing that can, and
+    // recording contact is what makes it work rather than the
+    // re-announcement, which the manager may never even answer.
+    const host = fakeHost()
+    const link = await connectOutputLink(host)
+    host.advance(IPC_ORPHAN_MS + 1)
+    expect(link.checkHealth()).toBe('orphaned')
+
+    host.deliverReattach()
+
+    expect(link.checkHealth()).toBe('live')
   })
 
   it('announces itself with its label, monitor and mode', async () => {
