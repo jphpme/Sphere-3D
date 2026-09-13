@@ -244,6 +244,29 @@ export interface OutputLayerInput {
   display?: ColorScaleDisplay | null
 }
 
+/**
+ * What this window has observed about its GPU context — facts, not a
+ * verdict on the picture (`docs/MULTI_MONITOR_PLAN.md` §3, case 5).
+ *
+ * Deliberately three observations rather than a healthy/broken pair,
+ * because the useful distinction on a projector is between "there was
+ * a GPU event and it is still out" and "there was one and it came
+ * back". Neither says the sphere is correct: this module can see the
+ * two DOM events and cannot see the glass.
+ */
+export type GpuContextState =
+  /** No loss seen since this scene was built. */
+  | 'live'
+  /** `webglcontextlost` fired and no restore has followed. Three's
+   *  renderer makes `render()` a no-op in this state, so nothing is
+   *  reaching the drawing buffer at all. */
+  | 'lost'
+  /** A loss was followed by `webglcontextrestored`. Three rebuilds its
+   *  GL state and re-uploads lazily on the next draw; this state does
+   *  not claim it succeeded, only that the browser handed the context
+   *  back. */
+  | 'restored'
+
 export interface OutputScene {
   readonly size: FramebufferSize
   /** Whether something changed since the last call — read once and
@@ -252,6 +275,26 @@ export interface OutputScene {
   consumeDirty(): boolean
   /** Draw one frame. */
   render(): void
+  /**
+   * What this window last observed about its GPU context.
+   *
+   * The render loop reads it to stop counting frames it did not draw:
+   * while the context is lost `render()` returns immediately, so a
+   * loop that went on ticking its fps meter would report a healthy
+   * rate over a blank projector — the exact shape of invisible failure
+   * this feature exists to remove.
+   */
+  gpuState(): GpuContextState
+  /**
+   * Subscribe to transitions. Returns an unsubscribe.
+   *
+   * A subscription rather than a constructor option because the
+   * consumer that most wants it — the IPC link, which tells the
+   * manager — does not exist yet when the scene is built, and a window
+   * that lost its context during boot is precisely the one worth
+   * hearing about.
+   */
+  onGpuStateChange(listener: (state: GpuContextState) => void): () => void
   /**
    * Turn the day/night terminator (and with it the night lights) on or
    * off — the mirrored `view.dayNight`.
@@ -482,6 +525,57 @@ export async function createOutputScene(
   renderer.setSize(size.width, size.height, false)
   renderer.setClearColor(0x000000, 1)
 
+  // --- GPU context loss (plan §3, case 5) ---
+  //
+  // Registered here rather than beside the rest of the mutable state
+  // below, because everything between this line and there is awaited
+  // (`createEarth`, the cloud fetch) and a context lost in that window
+  // would be seen by Three and missed by us — leaving `gpuState()`
+  // reporting `live` over a renderer that had already stopped drawing.
+  //
+  // **No `preventDefault()` here, and that is not an omission.** The
+  // plan prescribes one; Three's `WebGLRenderer` already calls it from
+  // its own listener, registered inside the constructor above (and
+  // before the context exists, which is why it catches a creation-time
+  // loss). It also sets the flag that makes `render()` return
+  // immediately, and rebuilds its GL state on restore. Adding a second
+  // `preventDefault()` would be harmless and would imply this module
+  // works without Three's, which it does not: if that behaviour ever
+  // went away, `render()` would throw on a dead context long before a
+  // missing `preventDefault()` mattered. The dependency is real, so it
+  // is written down rather than papered over.
+  let gpuState: GpuContextState = 'live'
+  const gpuListeners = new Set<(state: GpuContextState) => void>()
+  const setGpuState = (next: GpuContextState): void => {
+    if (gpuState === next) return
+    gpuState = next
+    // Isolated for `globeStateEvents`' reason: these run from a DOM
+    // event handler, and one listener throwing must not stop the rest
+    // hearing about the one event they exist for.
+    for (const listener of gpuListeners) {
+      try {
+        listener(next)
+      } catch (err) {
+        logger.warn('[Output] a GPU-state listener threw:', err)
+      }
+    }
+  }
+  const onContextLost = (): void => {
+    logger.error(
+      '[Output] WebGL context lost — this window is drawing nothing until it returns',
+    )
+    setGpuState('lost')
+  }
+  const onContextRestored = (): void => {
+    // A warning, not an info: it sits above the level production
+    // filters to, for the reason #403 gives — the device this matters
+    // on has no console attached and the log is read after the fact.
+    logger.warn('[Output] WebGL context restored — Three is rebuilding its GL state')
+    setGpuState('restored')
+  }
+  options.canvas.addEventListener('webglcontextlost', onContextLost, false)
+  options.canvas.addEventListener('webglcontextrestored', onContextRestored, false)
+
   const scene = new THREE_.Scene()
   const camera = new THREE_.OrthographicCamera(-1, 1, 1, -1, 0, 1)
 
@@ -705,6 +799,13 @@ export async function createOutputScene(
       textureUpgraded = false
       return was
     },
+    gpuState() {
+      return gpuState
+    },
+    onGpuStateChange(listener) {
+      gpuListeners.add(listener)
+      return () => gpuListeners.delete(listener)
+    },
     render() {
       // On drawn frames only, and unthrottled: `getSunPosition` is pure
       // arithmetic, so recomputing it at the draw rate costs less than
@@ -850,6 +951,17 @@ export async function createOutputScene(
       }
     },
     dispose() {
+      // Unhooked first, and the *order* is the correctness: this method
+      // ends with `renderer.forceContextLoss()`, which fires
+      // `webglcontextlost` on the canvas — the same event a driver
+      // crash fires. Unhook after that and every ordinary teardown
+      // reports a GPU failure, so closing four outputs at the end of a
+      // show would look like four crashes to a manager that treats
+      // absence as the crash signal. Same shape as the manager setting
+      // `departing` before the close it is expecting.
+      options.canvas.removeEventListener('webglcontextlost', onContextLost, false)
+      options.canvas.removeEventListener('webglcontextrestored', onContextRestored, false)
+      gpuListeners.clear()
       unsubscribeDiffuse()
       for (const slot of slots) disposeSlot(slot)
       slots = []

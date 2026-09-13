@@ -1922,18 +1922,52 @@ display names), and clears the toast.
 
 #### 5. GPU context loss
 
-> **This case is net-new infrastructure, not an incremental
-> addition.** An earlier draft of this plan listed it beside
-> the other five as though it were extending something. There
-> is **no `webglcontextlost` or `webglcontextrestored`
-> handling anywhere in `src/` today** — zero matches across
-> the whole tree. Nothing in the app has ever survived a lost
-> context; it has only ever been a thing that happens and
-> ends the session. Scope commit 13 accordingly, and expect
-> the recovery path to need its own tests and its own manual
+> **Detection has landed for the output; the two paragraphs
+> below are kept because they are the record of how this was
+> mis-scoped twice, in opposite directions.**
+>
+> An earlier draft listed this case beside the other five as
+> though it were extending something, and was corrected to:
+> *"there is no `webglcontextlost` or `webglcontextrestored`
+> handling anywhere in `src/` today — zero matches across the
+> whole tree. Nothing in the app has ever survived a lost
+> context. Scope commit 13 accordingly, and expect the
+> recovery path to need its own tests and its own manual
 > verification (a forced context loss via
 > `WEBGL_lose_context`), because there is no existing
-> behaviour to regress against.
+> behaviour to regress against."*
+>
+> **That is now false twice over, and the second one was
+> always false.** #403 added the control window's listeners in
+> `mapRenderer.ts`. And the grep was over `src/`, which was
+> the wrong place to look for the output: Three's
+> `WebGLRenderer` has always registered both listeners itself,
+> **inside its constructor** — before the context exists, so
+> it catches a creation-time loss — calls the
+> `event.preventDefault()` the Recovery section below
+> prescribes, sets the flag that makes `render()` return
+> immediately, and on restore runs `initGLContext()`, which
+> builds a fresh `WebGLProperties` and with it fresh
+> `textures`, `geometries`, `programCache` and
+> `bindingStates`. Every GL handle is therefore re-uploaded
+> lazily on the next draw.
+>
+> **So for the output the rebuild is largely already there,
+> and for a reason worth stating rather than relying on:**
+> `outputScene` holds no raw GL handles at all — no
+> `WebGLRenderTarget`, no `createTexture`, and the "2:1
+> framebuffer" is the renderer's own drawing buffer via
+> `setSize(w, h, false)`. That is exactly what
+> `earthTileLayer` is not, and its closure-held `datasetTex`
+> is the handle #403 found could never come back. The
+> conclusion follows from Three's source, **not** from having
+> watched a sphere recover — which is why what landed is the
+> observation and not a claim about the picture.
+>
+> **Do not write a parallel restore path for the output on
+> the strength of the Recovery section below.** Read
+> `outputScene`'s `gpuState` block first, and check what
+> Three's `initGLContext` leaves undone before adding to it.
 
 That absence matters more with outputs than without, because
 outputs push against a ceiling the app is already close to.
@@ -1967,16 +2001,39 @@ window's budget; it is untested. So keep the recovery path —
 eviction is real — but stop attributing it to output count on
 Windows.
 
-**Detection.** Output's canvas listens for
-`webglcontextlost` and `webglcontextrestored`. Triggers
-include driver crash, OS sleep / wake, GPU hot-reset
-under memory pressure, and eviction as above.
+**Detection. Landed.** `outputScene` listens on the canvas
+for `webglcontextlost` / `webglcontextrestored` and exposes
+`gpuState()` (`live` / `lost` / `restored`) plus
+`onGpuStateChange`. Triggers include driver crash, OS sleep /
+wake, GPU hot-reset under memory pressure, and eviction as
+above. Three states rather than a healthy/broken pair,
+because the two things worth telling apart on a projector are
+"there was a GPU event and it is still out" and "there was
+one and it came back" — and because neither is a claim that
+the sphere is correct, which this layer cannot see.
 
-**Recovery.** On `webglcontextlost`:
-`event.preventDefault()` to allow restoration; mark
-output state as `gpu_context_lost`. The texture and
-framebuffer are gone; output renders nothing until
-restored.
+Two consequences carry the value, and the second is the one
+that was actually broken. The debug HUD names the state
+beside the renderer string, drawn only when it is not `live`.
+And the render loop **declines to draw while the context is
+lost** — not because `render()` is unsafe (Three returns from
+it immediately) but because the bookkeeping around it was
+lying: ticking the fps meter, clearing `dirty` and advancing
+`lastFrame` for a frame that reached no pixels made the HUD
+report a healthy 30 fps over a black projector.
+
+`dispose()` unhooks its listeners **before**
+`renderer.forceContextLoss()`, because that call fires the
+same event a driver crash does; unhook after it and closing
+four outputs at the end of a show reports four crashes.
+
+**Recovery. Mostly already Three's — read the box above
+before building this.** `event.preventDefault()` is called by
+Three's own listener, so writing a second one buys nothing;
+`render()` is already a no-op while lost; and
+`initGLContext()` is the scene rebuild, running on the same
+objects the boot path built rather than beside them, which is
+the scoping note below satisfied by construction.
 
 On `webglcontextrestored`: rebuild the Three.js scene
 from scratch (textures, framebuffer, layer composite) using
@@ -1995,11 +2052,28 @@ Two scoping notes for whoever builds this:
   window already uses, not a parallel "restore" path.
   A second code path that only runs after a rare event is a
   path that silently rots.
-- Work on context-loss detection for the control window is in
-  flight separately. If it lands first, this case becomes a
-  consumer of that infrastructure rather than the place it is
-  invented — check before building, and prefer sharing the
-  detection seam over duplicating it.
+- ~~Work on context-loss detection for the control window is
+  in flight separately. If it lands first, this case becomes
+  a consumer of that infrastructure rather than the place it
+  is invented — check before building, and prefer sharing the
+  detection seam over duplicating it.~~ **Resolved, and the
+  answer was no.** #403 landed, and its seam does not cross:
+  `onContextLost` is an option on `MapRenderer` fired from
+  MapLibre's own event, and an output has no MapLibre — it is
+  a Three renderer on a raw canvas. What crosses is the
+  *policy*, and it is what the detection above follows:
+  report without repairing, never let a restore claim
+  recovery, log above the production filter, and keep the
+  reporting surface out of WebGL.
+
+**Still to build**, and deliberately not in the detection
+commit: the 30 s no-restore timeout and the
+`gpu-loss-timeout` removal it triggers. Both are the
+manager's, both auto-close a window on a projector, and
+neither should be written before a forced
+`WEBGL_lose_context` on real hardware has said whether a
+restore actually arrives — the reporting above is what makes
+that question answerable.
 
 #### 6. Manager / control window crash with outputs alive
 

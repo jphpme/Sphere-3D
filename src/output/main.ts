@@ -120,8 +120,20 @@ async function boot(): Promise<void> {
     // evaluation happens once per frame in the loop below.
     link: readLinkHealth(),
     gpu: gpuName(),
+    gpuState: scene.gpuState(),
     framebuffer: scene.size,
   }))
+
+  // The picture cannot survive a context loss, so the first frame after
+  // one must not wait out the 1 Hz static floor — that is up to a
+  // second of blank projector after the GPU has already come back.
+  // Only the restore edge needs this: while the context is *lost* the
+  // loop below declines to draw at all, which is what keeps `dirty`
+  // set across the outage rather than being cleared by a frame that
+  // never reached the glass.
+  scene.onGpuStateChange(state => {
+    if (state === 'restored') dirty = true
+  })
 
   if (isDesktop()) {
     // F11 as the escape hatch (§3.6 mechanism 4). An output is spawned
@@ -277,7 +289,20 @@ async function boot(): Promise<void> {
     // changes when the operator pauses without any state key changing
     // shape. See `contentKindFor`.
     const kind = contentKindFor(mirror.current())
-    if (shouldRenderFrame({ kind, sinceLastFrameMs: now - lastFrame, dirty })) {
+    // A lost context draws nothing — Three's renderer returns from
+    // `render()` immediately once it has seen `webglcontextlost`. The
+    // call is therefore harmless and the *bookkeeping after it* is not:
+    // ticking the fps meter, clearing `dirty` and advancing `lastFrame`
+    // for a frame that reached no pixels makes the HUD report a healthy
+    // 30 fps over a black projector, which is the precise shape of
+    // invisible failure this whole rung exists to remove. So the frame
+    // is skipped rather than drawn-and-counted: fps falls to 0 on the
+    // next sample, `dirty` survives the outage, and the restore above
+    // paints immediately.
+    if (
+      scene.gpuState() !== 'lost' &&
+      shouldRenderFrame({ kind, sinceLastFrameMs: now - lastFrame, dirty })
+    ) {
       scene.render()
       // Counted on drawn frames, not on rAF callbacks: the question the
       // HUD answers is whether this output is painting, and for static

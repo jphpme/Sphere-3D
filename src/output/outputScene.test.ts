@@ -143,6 +143,11 @@ describe('the sphere texture binding', () => {
     const sized: Array<[number, number, boolean | undefined]> = []
     const THREE_ = {
       WebGLRenderer: class {
+        /** Captured so `forceContextLoss` can fire on it, below. */
+        private readonly canvas: { dispatchEvent?: (type: string) => void }
+        constructor(opts: { canvas: unknown }) {
+          this.canvas = opts.canvas as { dispatchEvent?: (type: string) => void }
+        }
         setSize(w: number, h: number, updateStyle?: boolean): void {
           sized.push([w, h, updateStyle])
         }
@@ -150,7 +155,20 @@ describe('the sphere texture binding', () => {
         render(): void {}
         getContext(): unknown { return gl ?? null }
         dispose(): void { disposed.push('renderer') }
-        forceContextLoss(): void {}
+        /**
+         * Fires `webglcontextlost`, as the real one does.
+         *
+         * A no-op here until case 5, and the no-op is what made the
+         * first version of the dispose test pass with its guard
+         * deleted: the hazard is that tearing a scene down drops the
+         * context on purpose and looks exactly like a driver crash,
+         * and a fake that never drops it cannot reproduce that. Fired
+         * synchronously, which is stricter than the browser's queued
+         * task and so catches an unhook that happens too late.
+         */
+        forceContextLoss(): void {
+          this.canvas.dispatchEvent?.('webglcontextlost')
+        }
       },
       Scene: class { add(): void {} },
       OrthographicCamera: class {},
@@ -257,7 +275,46 @@ describe('the sphere texture binding', () => {
     }
   }
 
-  const canvas = () => ({}) as HTMLCanvasElement
+  /**
+   * A canvas that records its listeners so a test can fire the two
+   * context events.
+   *
+   * This was `{}` until case 5, and the upgrade is the point: the
+   * scene subscribes through `options.canvas` rather than reaching for
+   * a global, so the whole context-loss path is drivable with no GL
+   * context, no driver and no page — which is the only way it is ever
+   * going to be exercised, since forcing a real loss needs hardware.
+   */
+  const fakeCanvas = () => {
+    const listeners = new Map<string, Set<() => void>>()
+    const el = {
+      addEventListener(type: string, fn: () => void) {
+        const set = listeners.get(type) ?? new Set<() => void>()
+        set.add(fn)
+        listeners.set(type, set)
+      },
+      removeEventListener(type: string, fn: () => void) {
+        listeners.get(type)?.delete(fn)
+      },
+    }
+    const fire = (type: string) => {
+      for (const fn of [...(listeners.get(type) ?? [])]) fn()
+    }
+    // The scene passes this object straight to the fake renderer, whose
+    // `forceContextLoss` dispatches through here — so `dispose()`
+    // really does drop the context in a test, the way it does on a
+    // projector.
+    ;(el as unknown as { dispatchEvent: (t: string) => void }).dispatchEvent = fire
+    return {
+      el: el as unknown as HTMLCanvasElement,
+      fire,
+      count(type: string) {
+        return listeners.get(type)?.size ?? 0
+      },
+    }
+  }
+
+  const canvas = () => fakeCanvas().el
 
   it('binds a real texture from the first frame, never null', async () => {
     const three = fakeThree()
@@ -1038,6 +1095,114 @@ describe('the sphere texture binding', () => {
       // is redrawn for it.
       scene.setDayNight(false)
       expect(scene.consumeDirty()).toBe(false)
+    })
+  })
+
+  describe('GPU context loss (rung 13, case 5)', () => {
+    const build = async (cv: HTMLCanvasElement) => {
+      const three = fakeThree()
+      const earth = fakeEarth({ id: 'base-2k' })
+      const scene = await createOutputScene(
+        { canvas: cv },
+        { loadThree: async () => three.THREE_, createEarth: earth.createEarth },
+      )
+      return scene
+    }
+
+    it('starts live and reports a loss', async () => {
+      const cv = fakeCanvas()
+      const scene = await build(cv.el)
+      expect(scene.gpuState()).toBe('live')
+
+      cv.fire('webglcontextlost')
+      expect(scene.gpuState()).toBe('lost')
+    })
+
+    it('reports a restore as its own state, not back to live', async () => {
+      // `restored` is a third observation rather than a return to
+      // `live` because the two are different things to read off a
+      // projector: one window has had a GPU event this session and one
+      // has not, and that is worth knowing when the picture looks
+      // wrong for some other reason.
+      const cv = fakeCanvas()
+      const scene = await build(cv.el)
+
+      cv.fire('webglcontextlost')
+      cv.fire('webglcontextrestored')
+      expect(scene.gpuState()).toBe('restored')
+    })
+
+    it('notifies subscribers on each transition, and stops on unsubscribe', async () => {
+      const cv = fakeCanvas()
+      const scene = await build(cv.el)
+      const seen: string[] = []
+      const off = scene.onGpuStateChange(s => seen.push(s))
+
+      cv.fire('webglcontextlost')
+      cv.fire('webglcontextrestored')
+      expect(seen).toEqual(['lost', 'restored'])
+
+      off()
+      cv.fire('webglcontextlost')
+      expect(seen).toEqual(['lost', 'restored'])
+    })
+
+    it('does not re-notify when the same event fires twice', async () => {
+      const cv = fakeCanvas()
+      const scene = await build(cv.el)
+      const seen: string[] = []
+      scene.onGpuStateChange(s => seen.push(s))
+
+      cv.fire('webglcontextlost')
+      cv.fire('webglcontextlost')
+      expect(seen).toEqual(['lost'])
+    })
+
+    it('keeps notifying the other listeners when one throws', async () => {
+      const cv = fakeCanvas()
+      const scene = await build(cv.el)
+      const seen: string[] = []
+      scene.onGpuStateChange(() => {
+        throw new Error('listener blew up')
+      })
+      scene.onGpuStateChange(s => seen.push(s))
+
+      cv.fire('webglcontextlost')
+      expect(seen).toEqual(['lost'])
+    })
+
+    it('does NOT report the loss that dispose() causes itself', async () => {
+      // `dispose()` ends with `renderer.forceContextLoss()`, which
+      // fires the very event a driver crash fires. Unhook too late and
+      // closing four outputs at the end of a show reports four GPU
+      // crashes — to a manager that treats absence as the crash signal
+      // and cannot tell them apart afterwards.
+      //
+      // This asserts on `dispose()` alone, with no manual `fire`: the
+      // fake renderer dispatches the event for real, so the ordering
+      // inside `dispose()` is what the test is actually pinning. It
+      // passed against a broken implementation while the fake's
+      // `forceContextLoss` was a no-op.
+      const cv = fakeCanvas()
+      const scene = await build(cv.el)
+      const seen: string[] = []
+      scene.onGpuStateChange(s => seen.push(s))
+
+      scene.dispose()
+
+      expect(seen).toEqual([])
+      expect(scene.gpuState()).toBe('live')
+    })
+
+    it('unhooks both canvas listeners on dispose', async () => {
+      const cv = fakeCanvas()
+      const scene = await build(cv.el)
+      expect(cv.count('webglcontextlost')).toBe(1)
+      expect(cv.count('webglcontextrestored')).toBe(1)
+
+      scene.dispose()
+      expect(cv.count('webglcontextlost')).toBe(0)
+      expect(cv.count('webglcontextrestored')).toBe(0)
     })
   })
 })
