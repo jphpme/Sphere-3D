@@ -156,19 +156,43 @@ export async function gotoApp(page: Page, path: string): Promise<void> {
  * and silently does nothing. Not worth the machinery for a delta the
  * diff cannot see; noted so the next person does not re-derive it.
  *
- * Waiting for `hidden` covers both endings — the element reaches
- * `display: none`, and a page that never showed a splash has nothing
- * to wait for. Bounded and swallowed rather than thrown: a splash
- * that never leaves is a real app bug worth seeing in the shot, and
- * the scene's own error/console badges are how it should surface,
- * not a capture that never happens.
+ * **What is waited for is "not mid-transition", not "gone"**, and the
+ * difference is what keeps this cheap. There are two stable states,
+ * not one: the splash fully up (boot never finished — a legitimate,
+ * repeatable shot that says exactly that) and the splash at
+ * `display: none`. Only the fade between them is unstable. Waiting
+ * for `hidden` alone would be a proxy for the real property, and it
+ * charged the difference in wall clock: the smoke suite's embed check
+ * stalls boot behind stubbed fixtures, so a hidden-only wait burned
+ * its full timeout twice on that check alone for a page that was
+ * never going to hide anything.
+ *
+ * A page with no `#loading-screen` at all settles immediately, which
+ * is what the publisher routes do.
+ *
+ * Bounded and swallowed rather than thrown: the remaining timeout
+ * case is a fade that started and stopped, and a capture that never
+ * happens is a worse way to learn that than a shot plus the scene's
+ * own error badges.
  */
 async function settleBootSplash(page: Page): Promise<void> {
   try {
-    await page.locator('#loading-screen').waitFor({ state: 'hidden', timeout: 15_000 })
+    await page.waitForFunction(
+      () => {
+        const el = document.getElementById('loading-screen')
+        if (!el) return true
+        // Gone: `setLoading(false)` reached `transitionend`.
+        if (getComputedStyle(el).display === 'none') return true
+        // Still fully up and not fading: stable, and honest about a
+        // boot that has not finished.
+        return !el.classList.contains('fade-out')
+      },
+      undefined,
+      { timeout: 15_000 },
+    )
   } catch {
     // eslint-disable-next-line no-console
-    console.warn('  boot splash never hid; this shot may vary run to run')
+    console.warn('  boot splash stuck mid-fade; this shot may vary run to run')
   }
 }
 
