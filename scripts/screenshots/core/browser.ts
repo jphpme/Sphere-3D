@@ -118,6 +118,58 @@ export async function gotoApp(page: Page, path: string): Promise<void> {
     if (!(err instanceof Error) || !/timeout/i.test(err.message)) throw err
     await page.goto(path, { waitUntil: 'domcontentloaded', timeout: GOTO_TIMEOUT_MS })
   }
+  await settleBootSplash(page)
+}
+
+/**
+ * Wait for the boot splash to be gone, not merely on its way out.
+ *
+ * `#loading-screen` covers the whole viewport at `z-index: 1000` and
+ * leaves on an **0.8 s opacity transition**, reaching `display: none`
+ * only on `transitionend`. Every scene's own anchor — an overlay
+ * visible, a toolbar painted, a button un-hidden — becomes true while
+ * that fade is still running, because the app is behind the splash
+ * and finished long before the splash admits it.
+ *
+ * What makes that a *bistable* capture rather than a blurry one is
+ * `screenshotWithRetry`'s `animations: 'disabled'`, which freezes a
+ * transition in place. So a shot taken mid-fade is not a smear: it is
+ * a **stable** frame of the whole page dimmed under a half-opaque
+ * splash, pixel-identical every time it happens. Hence the symptom
+ * that led here — `browse-search-active` reporting exactly
+ * `2.03% (26340 px)` on two unrelated PRs, neither of which could
+ * reach the browse overlay at all. Two stable outcomes, one exact
+ * pixel delta, landed on at random.
+ *
+ * Reproduced locally before this landed: two consecutive captures of
+ * the same scene on identical code, one clean and one dimmed, 76 KB
+ * against 42 KB for the same three cards.
+ *
+ * **One sub-threshold residual is left deliberately.** A scene that
+ * focuses a text input (`fill()` does) still alternates by a blinking
+ * caret frozen at a different phase — measured at ~9 bytes of PNG on
+ * `browse-search-active` at mobile width, roughly 30 px against a
+ * 0.1% threshold, so it can never be reported. Suppressing it means
+ * injecting `caret-color: transparent` through an init script, and
+ * the obvious one-liner does not exist: `addStyleTag` is on `Page`,
+ * not `BrowserContext`, so a context-level call compiles under `?.`
+ * and silently does nothing. Not worth the machinery for a delta the
+ * diff cannot see; noted so the next person does not re-derive it.
+ *
+ * Waiting for `hidden` covers both endings — the element reaches
+ * `display: none`, and a page that never showed a splash has nothing
+ * to wait for. Bounded and swallowed rather than thrown: a splash
+ * that never leaves is a real app bug worth seeing in the shot, and
+ * the scene's own error/console badges are how it should surface,
+ * not a capture that never happens.
+ */
+async function settleBootSplash(page: Page): Promise<void> {
+  try {
+    await page.locator('#loading-screen').waitFor({ state: 'hidden', timeout: 15_000 })
+  } catch {
+    // eslint-disable-next-line no-console
+    console.warn('  boot splash never hid; this shot may vary run to run')
+  }
 }
 
 /** True when `url` is on the same origin as `baseURL`. Used to scope
