@@ -616,7 +616,20 @@ export class MultiOutputManager {
     // calls it outside tests today; when something does, it wants its
     // own reason rather than this one.
     if (record) reportOutputRemoved({ mode: record.mode, reason })
-    this.persist()
+    // **Persisted only for a deliberate removal**, which is
+    // `commitDeparture`'s rule and has to be the same rule here or the
+    // two disagree about what a crash costs. An output the operator
+    // shut by hand must not come back next launch; one that stopped
+    // for any other reason must, because they still want it and
+    // something took it away.
+    //
+    // This started as an unconditional persist, which was invisible
+    // while `removeOutput` was the only caller — every removal was
+    // deliberate. The boot scan's reattach timeout classifies as
+    // `crash`, so it quietly un-configured an output that failed to
+    // answer, turning a transient IPC outage into a permanent one.
+    // Caught in review.
+    if (reason === 'operator-close') this.persist()
   }
 
   async closeAll(): Promise<void> {
@@ -764,6 +777,17 @@ export class MultiOutputManager {
     }
     if (existing.length === 0) return []
 
+    // Reserve every label that is **on screen**, before deciding what
+    // to do with any of it — not just the ones that end up adopted.
+    // A window whose `close()` rejects is still out there holding its
+    // label, and minting that label again on the operator's next Add
+    // asks Tauri for a duplicate and fails. Doing this first also
+    // covers the labels closed below.
+    for (const { label } of existing) {
+      const index = outputLabelIndex(label)
+      if (index !== null) this.nextIndex = Math.max(this.nextIndex, index + 1)
+    }
+
     const persisted = new Map(this.store.read().outputs.map(o => [o.label, o]))
     const monitors = await this.host.availableMonitors()
 
@@ -818,12 +842,24 @@ export class MultiOutputManager {
       try {
         await handle.onDestroyed(() => this.handleDeparture(label))
       } catch (err) {
-        // Not fatal the way it is in `spawn()`. There, a handle that
-        // cannot be watched belongs to a window nothing else can reach;
-        // here the window predates this manager and is already
-        // rendering correctly, so the cost is that its eventual
-        // departure goes unnoticed rather than that it is unreachable.
-        logger.warn(`[multiOutput] could not watch ${label} for departure:`, err)
+        // Not fatal the way it is in `spawn()`, and the difference is
+        // reachability: there, a handle that cannot be watched belongs
+        // to a window nothing else can get at, so leaking it strands an
+        // undecorated window the operator cannot close. Here the window
+        // predates this manager, is already rendering correctly, and is
+        // in `records` — so the panel lists it and Remove still closes
+        // it through the same handle.
+        //
+        // The cost is worse than an earlier version of this comment
+        // said ("its departure goes unnoticed"): the record also holds
+        // a **decoder-budget slot** until someone removes it by hand,
+        // and the budget is a hard gate on adding outputs. Raised in
+        // review, which proposed closing the window instead. Not taken:
+        // that trades a projector showing correct imagery for a
+        // bookkeeping win, and this feature's stated policy is to
+        // preserve the last good visible state. Logged at error level
+        // so it is not the quiet kind of leak.
+        logger.error(`[multiOutput] could not watch ${label} for departure:`, err)
       }
       try {
         await this.host.emitTo(label, OUTPUT_REATTACH_EVENT, {})
@@ -863,14 +899,6 @@ export class MultiOutputManager {
       await this.discard(current.label, 'crash')
     }
 
-    // Past every adopted label, so the operator's next Add — and the
-    // restore running straight after this — cannot mint a colliding
-    // one.
-    for (const record of live) {
-      const index = outputLabelIndex(record.label)
-      if (index !== null) this.nextIndex = Math.max(this.nextIndex, index + 1)
-    }
-    this.persist()
     this.notifyChange()
     return live
   }

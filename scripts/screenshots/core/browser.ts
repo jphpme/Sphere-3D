@@ -153,7 +153,15 @@ async function settleBootSplash(page: Page): Promise<void> {
       undefined,
       { timeout: 10_000 },
     )
-  } catch {
+  } catch (err) {
+    // **Only a timeout is swallowed.** A bare `catch` here also
+    // swallowed a `TypeError` from calling a method the page object
+    // does not have — which is exactly what `browser.test.ts`'s fake
+    // Page was, so the helper threw on every unit test and the catch
+    // hid it: the tests passed while never exercising this at all.
+    // Caught in review, and it is the second time in this file that a
+    // swallowed programming error looked like a working feature.
+    if (!(err instanceof Error) || !/timeout/i.test(err.message)) throw err
     // eslint-disable-next-line no-console
     console.warn('  boot never finished; this shot is of the splash screen')
   }

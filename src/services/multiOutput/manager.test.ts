@@ -2112,6 +2112,54 @@ describe('adoptOrphanedOutputs', () => {
     expect(added.label).toBe('output-4')
   })
 
+  it('leaves a configured output that was not on screen alone', async () => {
+    // The scan adopts what it finds; it must not rewrite the config
+    // with only that. `output-2` was configured and is simply not
+    // running — the chained `restoreOutputs()` is what brings it back,
+    // and it can only do that if the entry is still there to read.
+    const fake = createFakeHost({ existing: ['output-1'] })
+    const store = memoryStore({
+      autoRestoreOnLaunch: true,
+      outputs: [persistedOn('output-1', MONITORS[0]), persistedOn('output-2', MONITORS[1])],
+    })
+
+    const manager = makeManager(fake.host, { store })
+    await manager.adoptOrphanedOutputs()
+
+    expect(store.current().outputs.map(o => o.label)).toEqual(['output-1', 'output-2'])
+
+    // And the restore then actually does bring it back.
+    const restored = await manager.restoreOutputs()
+    expect(restored.map(r => r.label)).toEqual(['output-2'])
+  })
+
+  it('keeps an unanswering output configured, the way a crash is kept', async () => {
+    // `commitDeparture` persists a hand-close and deliberately does not
+    // persist a crash: the operator still wants that output, something
+    // took it away. A reattach timeout is the same case, and dropping
+    // it would make a transient IPC outage permanent.
+    const fake = createFakeHost({ existing: ['output-1'], answerReattach: [] })
+    const store = memoryStore({ outputs: [persistedOn('output-1', MONITORS[0])] })
+
+    await makeManager(fake.host, { store }).adoptOrphanedOutputs()
+
+    expect(fake.closed).toEqual(['output-1'])
+    expect(store.current().outputs.map(o => o.label)).toEqual(['output-1'])
+  })
+
+  it('reserves the label of a window it could not close', async () => {
+    // A `close()` that rejects leaves the window — and its label — on
+    // screen. Minting that label again asks Tauri for a duplicate.
+    const fake = createFakeHost({ existing: ['output-2'], failClose: true })
+    const store = memoryStore({ outputs: [] })
+
+    const manager = makeManager(fake.host, { store })
+    await manager.adoptOrphanedOutputs()
+    const added = await manager.addOutput({ monitorIndex: 0 })
+
+    expect(added.label).toBe('output-3')
+  })
+
   it('survives a host that will not enumerate its windows', async () => {
     const fake = createFakeHost()
     vi.spyOn(fake.host, 'existingOutputs').mockRejectedValue(new Error('nope'))
