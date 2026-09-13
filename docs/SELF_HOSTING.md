@@ -62,7 +62,7 @@ written to that file. Capture those yourself, in a password manager.
 
 Four of them are shown **exactly once** and cannot be read back
 afterwards — by three different vendors, at four different points in
-the install:
+the install.
 
 | | What | Shown once by |
 |---|---|---|
@@ -276,7 +276,7 @@ resources:
 | Account → Workers R2 Storage → **Edit** | the bucket in Phase 2, the origin in 8.5 |
 | Account → Vectorize → **Edit** | the search index, Phase 2 |
 
-A publisher node adds Access. A viewer node never calls it:
+A publisher node adds Access. A viewer node never calls it.
 
 | Permission | For |
 |---|---|
@@ -284,7 +284,7 @@ A publisher node adds Access. A viewer node never calls it:
 | Account → Access: Service Tokens → **Edit** | Phase 6 |
 | Account → Access: Organizations → **Read** | discovering the team domain |
 
-These two are needed only for the step named beside each:
+These two are needed only for the step named beside each.
 
 | Permission | For |
 |---|---|
@@ -490,8 +490,8 @@ They are not equally your problem, and the difference is worth
 knowing before you start ticking boxes.
 
 **Five of the eight, a later step detects.** You do not need to
-verify them, remember them, or write anything down — if one is not
-done, the tool says so, by name, at the point it matters:
+verify them, remember them, or write anything down. If one is not
+done, the tool says so, by name, at the point it matters.
 
 | Prerequisite | Needed by | How you find out |
 |---|---|---|
@@ -502,7 +502,7 @@ done, the tool says so, by name, at the point it matters:
 | Connect Pages to your Git remote | Phase 5 | Project creation reports whether a Git source is attached |
 
 **Three are genuinely on you**, because nothing in the API can see
-them:
+them.
 
 | Prerequisite | Needed by | Why it cannot be detected |
 |---|---|---|
@@ -1688,7 +1688,7 @@ read the trigger and take what you want.
 | **14.5 Voice, events, blog, YouTube** | Per-feature. Each degrades quietly when its variables are unset |
 
 **Four things used to be filed here and are not,** because calling
-them optional was wrong:
+them optional was wrong.
 
 | Was | Now | Why |
 |---|---|---|
