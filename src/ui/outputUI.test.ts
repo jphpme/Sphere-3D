@@ -133,7 +133,12 @@ const $ = <T extends Element>(sel: string): T | null => document.querySelector<T
 const $$ = (sel: string): Element[] => [...document.querySelectorAll(sel)]
 
 beforeEach(() => {
-  document.body.innerHTML = ''
+  // The SPA's app-wide live region (`src/index.html`). The panel
+  // announces health transitions through it rather than through a
+  // region of its own, because `refresh` replaces the whole panel body
+  // and a region swapped out with its content never announces.
+  document.body.innerHTML =
+    '<div id="a11y-announcer" aria-live="polite" aria-atomic="true"></div>'
 })
 
 afterEach(() => {
@@ -698,7 +703,78 @@ describe('the health badge', () => {
     expect(badge?.classList.contains('is-stale')).toBe(true)
     // The label is two words; the accessible name has to carry the part
     // that is not obvious — that the sphere still shows a picture.
-    expect(badge?.getAttribute('aria-label') ?? '').toMatch(/last frame/i)
+    expect(badge?.textContent ?? '').toMatch(/last frame/i)
+    // And it has to carry it as *content*. `aria-label` shipped here
+    // first and is discarded: ARIA forbids naming an element whose role
+    // is `generic`, which is what a bare `<span>` is, so the whole
+    // explanation was dropped and only "Link stale" announced.
+    expect(badge?.hasAttribute('aria-label')).toBe(false)
+    // The visible chip stays two words — the explanation is for AT.
+    expect($('.output-item-health-label')?.textContent).toBe('Link stale')
+  })
+
+  it('announces a transition, because the repaint itself is silent', async () => {
+    // `onOutputsChanged` repaints the panel so an operator does not
+    // have to close and reopen the one surface that would tell them an
+    // output went quiet. A screen-reader operator gets nothing from
+    // that: the body is replaced wholesale and a swapped-out subtree
+    // says nothing. Without this the badge solves the problem for
+    // people who can see it and reproduces it for people who cannot.
+    const fake = fakeManager()
+    mount(fake.mgr)
+    await until(painted, 'the panel to settle')
+    await fake.mgr.addOutput({ monitorIndex: 0 })
+    fake.notifyChanged()
+    await until(() => $$('.output-item').length === 1, 'the row')
+
+    fake.records[0].health = 'stale'
+    fake.notifyChanged()
+
+    const live = document.getElementById('a11y-announcer')!
+    await until(() => (live.textContent ?? '') !== '', 'the announcement')
+    expect(live.textContent).toMatch(/DISPLAY1/)
+    expect(live.textContent).toMatch(/stale/i)
+    expect(live.textContent).toMatch(/last frame/i)
+  })
+
+  it('says nothing about the state the panel opened on', async () => {
+    // An operator who just opened the panel is about to read it. Being
+    // told what is already on screen is the noise that teaches people
+    // to stop listening to the channel.
+    const fake = fakeManager()
+    await fake.mgr.addOutput({ monitorIndex: 0 })
+    fake.records[0].health = 'stale'
+
+    mount(fake.mgr)
+    await until(() => $$('.output-item').length === 1, 'the row')
+    // One frame — the exact delay `announcePolite` schedules on — so
+    // an announcement that was going to happen has happened.
+    await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+
+    expect(document.getElementById('a11y-announcer')!.textContent).toBe('')
+  })
+
+  it('folds a whole installation going quiet into one utterance', async () => {
+    // The announcer is atomic and each write replaces the last, so a
+    // control window that stops talking — taking every output stale in
+    // the same tick — has to arrive as one string or every output but
+    // the last is silently dropped.
+    const second = monitor({ name: 'DISPLAY2', position: { x: 1920, y: 0 } })
+    const fake = fakeManager([monitor(), second])
+    mount(fake.mgr)
+    await until(painted, 'the panel to settle')
+    await fake.mgr.addOutput({ monitorIndex: 0 })
+    await fake.mgr.addOutput({ monitorIndex: 1 })
+    fake.notifyChanged()
+    await until(() => $$('.output-item').length === 2, 'both rows')
+
+    for (const r of fake.records) r.health = 'stale'
+    fake.notifyChanged()
+
+    const live = document.getElementById('a11y-announcer')!
+    await until(() => (live.textContent ?? '') !== '', 'the announcement')
+    expect(live.textContent).toMatch(/DISPLAY1/)
+    expect(live.textContent).toMatch(/DISPLAY2/)
   })
 
   it('repaints on a change the panel did not cause', async () => {
