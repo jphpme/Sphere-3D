@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * D1 reader functions for the catalog tables.
  *
@@ -103,6 +106,23 @@ export interface DatasetRow {
    * Zero rows use this in the current SOS snapshot; persisted for
    * future publishers whose imagery uses inverted Y conventions. */
   is_flipped_in_y: number | null
+  /** How the frames encode their pixels. NULL means a picture —
+   * colourised upstream, rendered as-is, which is every dataset
+   * published before this column existed. 'data-luma' means luma
+   * carries the normalised value and `color_scale` colours it at
+   * display time. */
+  render_encoding: string | null
+  /** JSON sidecar for `render_encoding = 'data-luma'`: palette
+   * stops, vmin/vmax, units, transparent range. Meaningless (and
+   * ignored) when render_encoding is NULL. */
+  color_scale: string | null
+  /** Source frames per second for an image-sequence encode: each
+   * frame is held 1/playback_fps seconds. NULL keeps the historical
+   * behaviour of one output frame per source frame at 30 fps, which
+   * plays a short forecast in well under a second. The *output* rate
+   * stays 30 regardless — the tour engine's `frameRate` maths
+   * depends on it. */
+  playback_fps: number | null
   /** Boolean (0/1) flag set by the video-upload /complete handler
    * when a `source.mp4` lands in R2 and a GHA transcode dispatch
    * fires (Phase 3pd). The workflow clears the flag and writes
@@ -180,9 +200,36 @@ export interface NodeIdentityRow {
 }
 
 /**
+ * The operator-facing half of a 503 `identity_missing`.
+ *
+ * Shared because six endpoints raise this and every one of them
+ * carried its own copy of the same sentence — which is how all six
+ * came to name a command that cannot fix it. `npm run gen:node-key`
+ * generates a keypair and *updates* `node_identity.public_key`; it
+ * does not insert the row, and it reaches only the local
+ * `.wrangler/` SQLite file. Told to run it, an operator on a
+ * deployed node changes nothing and the 503 persists, and a
+ * contributor locally gets "No node_identity row found in local D1"
+ * and an exit code of 0.
+ *
+ * The commands that actually create the row are `terraviz init-node`
+ * remotely (it writes through the publisher API, so it needs only
+ * the Phase 6.3 service token) and `npm run db:seed` locally. Both
+ * are named because the same code answers in both places.
+ *
+ * Reaches a publisher through the error card's `<details>`
+ * disclosure, which prints the raw body for exactly this reason.
+ */
+export const IDENTITY_MISSING_MESSAGE =
+  'Node identity has not been provisioned. On a deployed node run ' +
+  '`npm run terraviz -- init-node` (docs/SELF_HOSTING.md Phase 9). ' +
+  'For local development `npm run db:seed` inserts the row.'
+
+/**
  * The single-row catalog identity. Returns null on a fresh
- * deployment that hasn't run `npm run gen:node-key` yet (Commit D);
- * the read endpoints surface that as a 503 with a clear message.
+ * deployment whose `node_identity` row has never been written —
+ * see `IDENTITY_MISSING_MESSAGE` for what writes it. The read
+ * endpoints surface that as a 503 with a clear message.
  */
 export async function getNodeIdentity(db: D1Database): Promise<NodeIdentityRow | null> {
   return db

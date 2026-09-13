@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * Tests for the asset-upload row helpers + the per-kind validation.
  *
@@ -19,12 +22,14 @@ import { freshMigratedDb } from '../../../../scripts/lib/catalog-migrations'
 import { asD1 } from './test-helpers'
 import {
   extForMime,
+  FRAME_VERIFY_SAMPLE_SIZE,
   getAssetUpload,
   insertAssetUpload,
   markAssetUploadCompleted,
   markAssetUploadFailed,
   maxSizeForKind,
   MAX_IMAGE_SEQUENCE_FRAMES,
+  sampleFrameIndices,
   validateAssetInit,
   validateImageSequenceInit,
 } from './asset-uploads'
@@ -81,6 +86,50 @@ describe('validateAssetInit', () => {
       content_digest: HAPPY_DIGEST,
     })
     expect(result.ok).toBe(true)
+  })
+
+  it('defaults transcode to true when the field is absent', () => {
+    // Every caller written before the field existed omits it, and
+    // must keep going through the transcode.
+    const result = validateAssetInit({
+      kind: 'data',
+      mime: 'video/mp4',
+      size: 50 * 1024 * 1024,
+      content_digest: HAPPY_DIGEST,
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.value.transcode).toBe(true)
+  })
+
+  it('carries transcode: false through to the validated value', () => {
+    const result = validateAssetInit({
+      kind: 'data',
+      mime: 'video/mp4',
+      size: 50 * 1024 * 1024,
+      content_digest: HAPPY_DIGEST,
+      transcode: false,
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.value.transcode).toBe(false)
+  })
+
+  it('refuses a non-boolean transcode rather than coercing it', () => {
+    // The dangerous input is the string "false", which is truthy: a
+    // hand-rolled client sending it would silently transcode the file
+    // it meant to preserve, which is the one failure this flag exists
+    // to prevent.
+    const result = validateAssetInit({
+      kind: 'data',
+      mime: 'video/mp4',
+      size: 50 * 1024 * 1024,
+      content_digest: HAPPY_DIGEST,
+      transcode: 'false',
+    })
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.errors.some(e => e.field === 'transcode' && e.code === 'invalid_type')).toBe(true)
   })
 
   it('accepts an image thumbnail', () => {
@@ -208,6 +257,47 @@ describe('maxSizeForKind', () => {
   it('uses small caps for sphere thumb + caption', () => {
     expect(maxSizeForKind('sphere_thumbnail')).toBe(10 * 1024 ** 2)
     expect(maxSizeForKind('caption')).toBe(1 * 1024 ** 2)
+  })
+})
+
+describe('sampleFrameIndices', () => {
+  it('returns all indices when count <= max (small uploads verify in full)', () => {
+    expect(sampleFrameIndices(0, 16)).toEqual([])
+    expect(sampleFrameIndices(1, 16)).toEqual([0])
+    expect(sampleFrameIndices(16, 16)).toEqual(Array.from({ length: 16 }, (_, i) => i))
+  })
+
+  it('samples a sorted, distinct spread when count > max, always incl first + last', () => {
+    const s = sampleFrameIndices(4316, 16)
+    expect(s.length).toBeLessThanOrEqual(16)
+    expect(s).toEqual([...s].sort((a, b) => a - b)) // sorted
+    expect(new Set(s).size).toBe(s.length) // distinct
+    expect(s[0]).toBe(0)
+    expect(s[s.length - 1]).toBe(4315)
+    // Every index is in range.
+    expect(s.every(i => i >= 0 && i < 4316)).toBe(true)
+  })
+
+  it('defaults to FRAME_VERIFY_SAMPLE_SIZE', () => {
+    expect(sampleFrameIndices(10_000).length).toBeLessThanOrEqual(FRAME_VERIFY_SAMPLE_SIZE)
+    expect(sampleFrameIndices(10_000)[0]).toBe(0)
+    expect(sampleFrameIndices(10_000).at(-1)).toBe(9999)
+  })
+
+  it('never yields NaN on a degenerate max — clamps to first+last, not a div-by-zero', () => {
+    // max floors/clamps to 1 (or below) with count > 1 would divide by
+    // (n-1)=0 → NaN without the >=2 clamp.
+    for (const m of [1, 0, -5]) {
+      expect(sampleFrameIndices(5, m)).toEqual([0, 4])
+    }
+    // count === 1 is the single-frame special case.
+    expect(sampleFrameIndices(1, 1)).toEqual([0])
+    // A non-finite max falls back to the default rather than NaN/[].
+    const s = sampleFrameIndices(100, Number.NaN)
+    expect(s.length).toBeGreaterThan(0)
+    expect(s.every(i => Number.isInteger(i))).toBe(true)
+    expect(s[0]).toBe(0)
+    expect(s.at(-1)).toBe(99)
   })
 })
 

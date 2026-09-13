@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * POST /api/v1/publish/datasets/{id}/asset
  *
@@ -46,13 +49,14 @@ import type { PublisherRow } from '../../../_lib/publisher-store'
 import { getDatasetForPublisher } from '../../../_lib/dataset-mutations'
 import { isConfigurationError, safeErrorReason } from '../../../_lib/errors'
 import { isLoopbackHost } from '../../../_lib/loopback'
+import { RENDER_ENCODING_DATA_LUMA } from '../../../../../../src/types/color-scale'
 import {
   FRAME_OPERATION_CONCURRENCY,
   runBoundedPool,
 } from '../../../_lib/bounded-pool'
 import {
   buildAssetKey,
-  buildFrameKey,
+  buildContentAddressedFrameKey,
   buildFrameSequencePrefix,
   buildFrameSourceFilenamesKey,
   buildVideoSourceKey,
@@ -106,12 +110,17 @@ function chooseTarget(_kind: AssetKind, _mime: string): 'r2' | 'stream' {
 }
 
 /**
- * Should this `(kind, mime)` upload land at the video-source key
- * for the GHA transcode workflow to pick up, or at a regular
- * content-addressed asset key? Video data is the one case that
- * goes through the async transcode pipeline.
+ * Is this a video data upload? Distinct from *where it lands*: since
+ * the `transcode: false` option, a video data upload may be either a
+ * source for the workflow or the served asset itself.
+ *
+ * This predicate governs the things true of both — the extended
+ * presigned TTL (a 10 GB ceiling either way) and the concurrency
+ * guard, which matters *more* for a publish-as-is upload: an in-flight
+ * transcode's `/transcode-complete` would overwrite the `data_ref` a
+ * direct upload just wrote.
  */
-function isVideoSourceUpload(kind: AssetKind, mime: string): boolean {
+function isVideoDataUpload(kind: AssetKind, mime: string): boolean {
   return kind === 'data' && mime === 'video/mp4'
 }
 
@@ -167,7 +176,7 @@ export const onRequestPost: PagesFunction<CatalogEnv, 'id'> = async context => {
       headers: { 'Content-Type': CONTENT_TYPE },
     })
   }
-  const { kind, mime, size, content_digest } = validated.value
+  const { kind, mime, size, content_digest, transcode } = validated.value
 
   // For `data` uploads, the mime must match the dataset's declared
   // `format` — otherwise we'd commit a `data_ref` to bytes whose
@@ -203,7 +212,40 @@ export const onRequestPost: PagesFunction<CatalogEnv, 'id'> = async context => {
   // Scope is video-only — image and aux uploads don't go through
   // the transcoding lifecycle, so a parallel image upload during
   // a video transcode is harmless.
-  if (isVideoSourceUpload(kind, mime) && existing.transcoding) {
+  // `transcode: false` is only offered where the transcode is
+  // destructive rather than merely redundant. For a data-encoded
+  // video, luma *is* the measurement: `DATA_ENCODED_RENDITIONS` pins
+  // one rung at 4096x2048, so a larger frame is decimated, and the
+  // re-encode moves values rather than softening a picture. For an
+  // ordinary video the transcode earns its keep — it normalises to 30
+  // fps, which `tourEngine`'s `requestedFps / 30` assumes, and builds
+  // the ladder the player expects. Refusing here rather than in the UI
+  // because the UI is not the authoritative check.
+  if (!transcode) {
+    if (!isVideoDataUpload(kind, mime)) {
+      return jsonError(
+        422,
+        'transcode_not_applicable',
+        'transcode: false applies only to a kind="data" upload with mime="video/mp4". ' +
+          'Every other asset kind is already stored as uploaded.',
+      )
+    }
+    if (existing.render_encoding !== RENDER_ENCODING_DATA_LUMA) {
+      return jsonError(
+        422,
+        'transcode_required',
+        'transcode: false publishes the uploaded file as the served asset without ' +
+          're-encoding, which is supported only for data-encoded datasets ' +
+          `(render_encoding = "${RENDER_ENCODING_DATA_LUMA}"). Dataset ${id} has ` +
+          `render_encoding = ${existing.render_encoding ?? 'null'}. For an ordinary ` +
+          'video the transcode normalises frame rate to 30 fps and builds the HLS ' +
+          'ladder the player expects; skipping it would publish whatever was uploaded. ' +
+          "Set the dataset's render encoding first, or omit transcode.",
+      )
+    }
+  }
+
+  if (isVideoDataUpload(kind, mime) && existing.transcoding) {
     return jsonError(
       409,
       'transcoding_in_progress',
@@ -290,8 +332,14 @@ export const onRequestPost: PagesFunction<CatalogEnv, 'id'> = async context => {
       // existing cache.
       const ext = extForMime(mime)
       const hex = content_digest.slice('sha256:'.length)
-      const isVideo = isVideoSourceUpload(kind, mime)
-      const key = isVideo
+      const isVideo = isVideoDataUpload(kind, mime)
+      // `transcode: false` sends a video to the content-addressed key
+      // instead of `uploads/…/source.mp4`. That single choice is the
+      // whole mechanism: `/complete` branches on `isVideoSourceKey`,
+      // so a key that does not match it takes the direct path —
+      // `data_ref` written from the upload's own ref, no dispatch, no
+      // `transcoding=1`. Nothing downstream needed a new branch.
+      const key = isVideo && transcode
         ? buildVideoSourceKey(id, uploadId)
         : buildAssetKey(id, kind, hex, ext)
       // Video sources get the extended TTL — `R2_PUT_TTL_SECONDS`
@@ -374,14 +422,16 @@ interface AssetInitResponse {
 
 interface ImageSequenceInitFrameResponse {
   filename: string
-  /** Zero-padded position in the encode order (matches the
-   *  five-digit format `buildFrameKey` writes into the R2 key). */
+  /** Zero-based position in the encode order. The runner maps this
+   *  back to the `source_filenames.json` manifest entry (index →
+   *  digest) so recall can resolve the content-addressed key. */
   index: number
   method: 'PUT'
   url: string
   headers: Record<string, string>
-  /** R2 key the presigned URL writes to —
-   *  `uploads/{dataset_id}/{upload_id}/frames/{NNNNN}.{ext}`. */
+  /** Content-addressed R2 key the presigned URL writes to —
+   *  `videos/{dataset_id}/frames/sha256/{hex}.{ext}`. Shared across
+   *  uploads, so the runner HEAD-skips keys already present. */
   key: string
 }
 
@@ -414,13 +464,15 @@ interface ImageSequenceInitResponse {
  * JSON blob. Persists a single `asset_uploads` row with
  * `frame_count = N` so /complete can branch its HEAD-all loop.
  *
- * The per-frame R2 keys come from `buildFrameKey` —
- * `uploads/{dataset_id}/{upload_id}/frames/{NNNNN}.{ext}` —
- * with `extension` derived from the validated mime via
- * `extForMime`. The asset_uploads row's `target_ref` stores the
- * prefix (with trailing slash) since there's no single canonical
- * key for the upload; /complete reconstructs the per-frame keys
- * from `frame_count` + `mime`.
+ * The per-frame R2 keys are content-addressed —
+ * `videos/{dataset_id}/frames/sha256/{hex}.{ext}` via
+ * `buildContentAddressedFrameKey`, with `extension` derived from the
+ * validated mime via `extForMime`. The asset_uploads row's
+ * `target_ref` stores the per-upload `frames/` prefix purely as the
+ * frames-upload recognition marker for /complete (the
+ * `source_filenames.json` manifest lives alongside it); the frame
+ * bytes themselves live in the shared content-addressed store, keyed
+ * by each frame's digest from the manifest.
  *
  * Format constraint: image-sequence uploads only target video
  * datasets (`format = 'video/mp4'`). The runner's output is
@@ -524,7 +576,13 @@ async function handleImageSequenceInit(
     // string construction so the budget concern doesn't apply
     // there, but the same code path works.
     const framePresignJobs = frames.map((f, index) => async () => {
-      const key = buildFrameKey(id, uploadId, index, extension)
+      // Content-addressed: each frame's key is derived from its own
+      // SHA-256, shared across every upload of this dataset
+      // (`docs/INCREMENTAL_FRAME_UPLOAD_PLAN.md`). A scheduled
+      // re-publish therefore reuses unchanged frames — the runner
+      // HEAD-skips keys already in R2 and PUTs only the delta — instead
+      // of re-uploading the whole window to a fresh per-upload prefix.
+      const key = buildContentAddressedFrameKey(id, f.digest, extension)
       const presigned = await presignPut(context.env, key, {
         contentType: mime,
         // Video-tier TTL covers multi-GB sequence uploads on a
@@ -545,11 +603,17 @@ async function handleImageSequenceInit(
       headers: presigned.headers,
       key: presigned.key,
     }))
-    // Source-filenames blob — short-TTL because the publisher
-    // builds + PUTs it in seconds, not minutes.
+    // Source-filenames blob — same video-tier TTL as the frames.
+    // The GHA runner PUTs this manifest *after* uploading every frame,
+    // so on a multi-GB cold upload (a first content-addressed run can
+    // push the whole window, ~18 min) the default short TTL would have
+    // already expired, 403-ing the manifest PUT with `ExpiredRequest`.
+    // The manifest is part of the same long upload, so its URL must
+    // live as long as the frame URLs.
     const fnKey = buildFrameSourceFilenamesKey(id, uploadId)
     const fnPresigned = await presignPut(context.env, fnKey, {
       contentType: 'application/json',
+      ttlSeconds: R2_PUT_TTL_VIDEO_SECONDS,
     })
     sourceFilenamesMint = {
       method: fnPresigned.method,

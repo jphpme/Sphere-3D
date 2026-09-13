@@ -1,6 +1,19 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * Type definitions for Terraviz project
  */
+
+import type { ColorScale, RenderEncoding } from './color-scale'
+import type { DisplayColorScale } from './unit-scale'
+// Imported rather than restated so the telemetry `mode` field cannot
+// name a geometry the wire format does not have (or miss one it
+// gains). Type-only, so nothing about the shared type barrel reaches
+// the multi-output feature at runtime.
+import type { OutputMode } from '../services/multiOutput/protocol'
+
+export type { ColorScale, DisplayColorScale, RenderEncoding }
 
 /**
  * Supported dataset formats.
@@ -44,7 +57,7 @@ export interface Dataset {
    */
   legacyId?: string
   /**
-   * URL-safe slug (`sea-ice-extent`, `ssta`) â€” drives display naming
+   * URL-safe slug (`sea-ice-extent`, `ssta`) — drives display naming
    * for the Phase 3pg image-sequence frame buttons. The catalog
    * always sets a slug; older SOS-source rows may omit it.
    */
@@ -66,7 +79,7 @@ export interface Dataset {
   abstractTxt?: string
   thumbnailLink?: string
   legendLink?: string
-  /** Color-ramp image used by interactive probing â€” distinct from
+  /** Color-ramp image used by interactive probing — distinct from
    * legendLink in ~2 of 14 rows where both are present (legendLink
    * is the UI-visible swatch, colorTableLink is the canonical
    * gradient). Phase 3b restored this from the SOS snapshot. */
@@ -85,7 +98,7 @@ export interface Dataset {
   websiteLink?: string
   runTourOnLoad?: string
 
-  /** Pixel-coords â†’ data-value mapping for the color table, used
+  /** Pixel-coords → data-value mapping for the color table, used
    * by SOS desktop's hover-to-probe feature. Stored as a JSON
    * object in D1 (`probing_info` column) and serialized verbatim;
    * SPA consumption is deferred to a later phase. */
@@ -98,10 +111,10 @@ export interface Dataset {
    * **Defaults to worldwide at the SPA layer** when the wire
    * shape carries no bbox (see `wireToDataset` /
    * `synthesizeSosOnlyDatasets` in `dataService.ts`). Wire-side
-   * the field is still optional â€” D1's `bbox_*` columns are
-   * NULL for the majority of rows today â€” but every Dataset
+   * the field is still optional — D1's `bbox_*` columns are
+   * NULL for the majority of rows today — but every Dataset
    * record handed to UI code carries a populated bbox so the
-   * Phase 4 Â§6.9 Map view can show every dataset's spatial
+   * Phase 4 §6.9 Map view can show every dataset's spatial
    * extent without a "missing" branch. Publishers should set
    * a regional bbox when applicable; the default acknowledges
    * that the SOS catalog is overwhelmingly global today.
@@ -113,23 +126,23 @@ export interface Dataset {
   boundingBox?: { n: number; s: number; w: number; e: number }
 
   /** Celestial body the dataset visualises. Omitted == Earth.
-   * Non-Earth values (Mars / Moon / Sun / Jupiter / â€¦) cue the
+   * Non-Earth values (Mars / Moon / Sun / Jupiter / …) cue the
    * SPA's Phase 3e base-texture swap. */
   celestialBody?: string
 
   /** Radius of the celestial body in miles, when non-Earth. */
-
-   /** Realtime/forecast DASH streams from the Cloudflare R2 catalog;
-    * set by fetchRealtimeDashDatasets so the UI can tag/prefix them. */
-   realtimeKind?: 'real-time' | 'forecast'
-
-   /** When true, country/region borders render on by default for this
-    * dataset (sparse transparent DASH overlays). */
-   defaultBordersVisible?: boolean
   radiusMi?: number
 
+  /** Realtime/forecast DASH streams from the Cloudflare R2 catalog;
+   * set by `fetchRealtimeDashDatasets` so the UI can tag/prefix them. */
+  realtimeKind?: 'real-time' | 'forecast'
+
+  /** When true, country/region borders render on by default for this
+   * dataset (sparse transparent DASH overlays). */
+  defaultBordersVisible?: boolean
+
   /** Globe longitude rotation reference in degrees. Omitted == 0
-   * (prime-meridian-centered). Non-zero values (Â±180 in the SOS
+   * (prime-meridian-centered). Non-zero values (±180 in the SOS
    * snapshot) are dateline-centered, useful for Pacific-focused
    * datasets. */
   lonOrigin?: number
@@ -138,11 +151,42 @@ export interface Dataset {
    * inverted Y conventions. Omitted == false. */
   isFlippedInY?: boolean
 
+  /**
+   * How many source frames this dataset advances per second.
+   *
+   * A property of the dataset, not of the file: the rate is already
+   * baked in by the time anything plays it, either by holding each
+   * frame across a 30 fps container (what the transcode does) or by
+   * encoding at this container rate directly (what a hand-encoded
+   * data video does). Both arrive playing correctly at `playbackRate
+   * = 1`, which is why nothing applies this on load.
+   *
+   * What it *is* needed for is the tour `frameRate` task, which asks
+   * for a rate in dataset frames per second and can only convert that
+   * to a `playbackRate` if it knows what the dataset already advances
+   * at. Omitted means 30 — one source frame per output frame, which
+   * is every dataset that never set it.
+   */
+  playbackFps?: number
+
+  /** How the frames encode their pixels. Omitted == a picture
+   * (colourised upstream, rendered as-is) — the state of every
+   * dataset published before this field existed, and the whole of
+   * the backwards-compatibility contract. `'data-luma'` means luma
+   * carries the normalised value; `colorScale` says what it means.
+   * See `docs/DATA_ENCODED_VIDEO_PLAN.md`. */
+  renderEncoding?: RenderEncoding
+
+  /** Palette + scale for a `data-luma` dataset. Present only
+   * alongside `renderEncoding`; both are dropped together if
+   * either is missing or the sidecar fails to parse. */
+  colorScale?: DisplayColorScale
+
   // Enriched metadata (from sos_dataset_metadata.json cross-reference)
   enriched?: EnrichedMetadata
 
   /**
-   * Image-sequence frame envelope â€” set only for rows that were
+   * Image-sequence frame envelope — set only for rows that were
    * transcoded from a frames upload (Phase 3pg/A). Carries the
    * frame count, a per-frame URL template (`{index}` is the token
    * consumers substitute with the zero-padded 5-digit frame
@@ -156,15 +200,15 @@ export interface Dataset {
   /**
    * Which SOS catalog surface(s) this dataset is published on.
    * Sourced from the enriched metadata's `available_for` array.
-   * Phase 4 Â§6.4 from `docs/WEB_CATALOG_FEATURES_PLAN.md`.
+   * Phase 4 §6.4 from `docs/WEB_CATALOG_FEATURES_PLAN.md`.
    *
-   * - `'Explorer'` â€” only in the SOSx subset (the live-catalog
+   * - `'Explorer'` — only in the SOSx subset (the live-catalog
    *   datasets TerraViz has always rendered).
-   * - `'SOS'` â€” only in the broader SOS catalog. Synthesised by
+   * - `'SOS'` — only in the broader SOS catalog. Synthesised by
    *   `dataService` from the enriched metadata file when there's
    *   no live-catalog entry to pair with; plays back at
    *   `movie_preview` quality rather than the SOSx Vimeo HLS.
-   * - `'Both'` â€” listed on both surfaces. Live-catalog entry is
+   * - `'Both'` — listed on both surfaces. Live-catalog entry is
    *   the source of truth for the `dataLink`; enriched entry
    *   carries the rest.
    *
@@ -182,9 +226,9 @@ export interface Dataset {
  * Image-sequence frame envelope on `Dataset` (Phase 3pg/A). Mirrors
  * `WireDatasetFrames` from `functions/api/v1/_lib/dataset-serializer.ts`.
  * Consumers compute frame N's timestamp as
- * `startTime + period Ã— index` for time-series rows, and render
+ * `startTime + period × index` for time-series rows, and render
  * display names as `{slug}_{YYYYMMDDTHHMMSSZ}.{ext}` (time-series)
- * or `{slug}_frame_{NNNNN}.{ext}` (pure-sequence) â€” same
+ * or `{slug}_frame_{NNNNN}.{ext}` (pure-sequence) — same
  * convention the `/api/v1/datasets/{id}/frames` endpoint
  * server-renders for `displayName`.
  */
@@ -202,7 +246,7 @@ export interface DatasetFrames {
  * Stored on `datasets.probing_info` as a JSON-stringified blob.
  * Write-side validation (`validateJsonStringField` in
  * `functions/api/v1/_lib/validators.ts`) only confirms the value
- * is a JSON-parseable string under the 4096-char cap â€” it does
+ * is a JSON-parseable string under the 4096-char cap — it does
  * NOT enforce this specific object shape. The shape declared
  * here is documentation of the SOS snapshot's payload, not a
  * runtime contract on what consumers will see. A downstream
@@ -315,18 +359,18 @@ export interface VideoTextureHandle {
  * correctly rather than stretching equirectangularly across the
  * whole sphere.
  *
- *   boundingBox    â€” when all four corners are present, the shader
+ *   boundingBox    — when all four corners are present, the shader
  *                    clips the texture to this region and lets
- *                    base tiles show outside it. Omitted â†’ full
+ *                    base tiles show outside it. Omitted → full
  *                    equirectangular projection (legacy behavior).
- *   lonOrigin      â€” degrees offset for the U axis (default 0 â†’
- *                    prime-meridian centered; Â±180 = dateline
+ *   lonOrigin      — degrees offset for the U axis (default 0 →
+ *                    prime-meridian centered; ±180 = dateline
  *                    centered). Applies to the full-globe path
- *                    only â€” see note below.
- *   isFlippedInY   â€” if true, the shader samples the texture with
+ *                    only — see note below.
+ *   isFlippedInY   — if true, the shader samples the texture with
  *                    a flipped V axis (datasets authored with
  *                    inverted-Y conventions).
- *   celestialBody  â€” non-Earth bodies cue the MapRenderer to swap
+ *   celestialBody  — non-Earth bodies cue the MapRenderer to swap
  *                    the base raster source and skip the Earth
  *                    4-pass effects (day/night terminator etc.,
  *                    which assume Earth's sun model).
@@ -334,7 +378,7 @@ export interface VideoTextureHandle {
  * Every field is optional. Combinations honored: `bbox` alone,
  * `lonOrigin` alone, `isFlippedInY` with either, `celestialBody`
  * with any of the above. Combinations NOT honored: `bbox` +
- * non-zero `lonOrigin` â€” the shader's bbox path ignores
+ * non-zero `lonOrigin` — the shader's bbox path ignores
  * `uLonOrigin` because the texture is already remapped to the
  * bbox extent. No catalog row combines the two today; if a
  * future publisher needs both, the shader has to be extended
@@ -345,6 +389,35 @@ export interface DatasetOverlayOptions {
   lonOrigin?: number
   isFlippedInY?: boolean
   celestialBody?: string
+  /** Present only for a data-encoded dataset, where the texture's
+   *  luma is the normalised value rather than a colour. The renderer
+   *  builds a 256×1 LUT from this and colours in the shader; absent
+   *  means the texture is already a picture and is drawn as-is.
+   *  This is the field that carries data-encoded mode to all four
+   *  render surfaces. */
+  colorScale?: DisplayColorScale
+  /** True when the source media carries its own alpha channel —
+   *  the realtime / forecast overlay streams (`application/dash+xml`,
+   *  `realtimeKind` set). Those are sparse transparent overlays
+   *  (precipitation, smoke, tracks) sampled straight-alpha, so the
+   *  renderer must composite them rather than draw them opaque.
+   *
+   *  Absent for every picture dataset, which is what keeps the
+   *  ordinary picture path on the exact GL state it has always had —
+   *  blending is enabled *only* for a data-encoded LUT or for one of
+   *  these streams. */
+  hasAlphaStream?: boolean
+  /** Which dataset these options were built from.
+   *
+   *  Carried so a *frame* can say what it is, rather than a reader
+   *  having to ask app state and hope the two agree. `appState
+   *  .currentDataset` and the primary renderer's texture are separate
+   *  facts: a 2/4-globe layout, a tour switching panels, or a load
+   *  landing between them can leave one describing a dataset the other
+   *  is not showing. Anything that reports numbers has to attribute
+   *  them to the dataset they were actually measured from. */
+  datasetId?: string
+  datasetTitle?: string
 }
 
 /**
@@ -369,7 +442,7 @@ export interface GlobeRenderer {
   removeCloudOverlay(): void
   dispose(): void
 
-  // Tour-specific methods (optional â€” checked at runtime)
+  // Tour-specific methods (optional — checked at runtime)
   toggleLabels?(visible?: boolean): boolean
   toggleBoundaries?(visible?: boolean): boolean
   addMarker?(lat: number, lng: number, label?: string): unknown
@@ -388,14 +461,28 @@ export type ChatRole = 'user' | 'docent'
  */
 export type ChatAction =
   | { type: 'load-dataset'; datasetId: string; datasetTitle: string }
-  | { type: 'fly-to'; lat: number; lon: number; altitude?: number }
+  /**
+   * `fromMeasurement` marks a camera move that belongs to the dataset
+   * **already on the globe** — a §A6 reading — rather than to a dataset
+   * this message is offering to load.
+   *
+   * The distinction is load-bearing at the chat's flush point. Globe
+   * actions are normally held until any pending `load-dataset` in the
+   * same message is tapped, which is right for an event card: Load,
+   * then fly to where it happened. It is wrong for a measurement.
+   * Reported live: Orbit measured the current frame correctly, showed
+   * the card, and the globe never moved, because the same reply also
+   * recommended a different dataset and the camera move was waiting on
+   * a Load nobody clicked.
+   */
+  | { type: 'fly-to'; lat: number; lon: number; altitude?: number; fromMeasurement?: true }
   | {
       /** Seek the loaded time-enabled dataset to {@link isoDate}. */
       type: 'set-time'
       isoDate: string
       /**
        * Translated error message populated by an eager dry-check at
-       * stream time â€” surfaces "no time-enabled dataset loaded",
+       * stream time — surfaces "no time-enabled dataset loaded",
        * "date out of range", etc. inline as soon as the action
        * arrives, instead of waiting for the deferred execution
        * after a load click. Renderer flips to the error styling
@@ -405,13 +492,75 @@ export type ChatAction =
       error?: string
     }
   | { type: 'fit-bounds'; bounds: [number, number, number, number]; label?: string }
-  | { type: 'add-marker'; lat: number; lng: number; label?: string }
+  | { type: 'add-marker'; lat: number; lng: number; label?: string; fromMeasurement?: true }
   | { type: 'toggle-labels'; visible: boolean }
   | { type: 'highlight-region'; geojson: GeoJSON.GeoJSON; label?: string }
   /**
+   * Open the Analyze panel on the region Orbit just measured
+   * (`docs/DATA_ANALYSIS_PLAN.md` §A6).
+   *
+   * Chat cannot draw a chart — `renderMarkdownLite` supports bold,
+   * links and bullets, and the sanitizer's allowlist excludes tables
+   * and images deliberately. So Orbit answers in prose and this chip
+   * hands the same region to the surface that *can* draw it, rather
+   * than leaving the user to rebuild by hand the selection Orbit just
+   * described.
+   *
+   * Display-only, like `event-citation`: it is never deferred for
+   * execution, because opening a panel is the user's click to make.
+   *
+   * `scope` is limited to what the panel's picker can actually
+   * represent. A bbox-scoped answer gets no chip rather than a chip
+   * that opens a picker showing a region it cannot select.
+   */
+  | {
+      type: 'show-analysis'
+      scope: 'dataset' | 'view' | 'named'
+      /** Present when `scope === 'named'` — the display name, already
+       *  resolved against the region table, so the chip and the panel
+       *  agree on what it is called. */
+      regionName?: string
+    }
+  /**
+   * The reading a value tool actually returned, rendered by the app
+   * rather than recounted by the model.
+   *
+   * Everything else in this union is something the user can do. This
+   * one is something the app *states*, and it exists because the
+   * sentence beside it cannot be trusted to state it correctly. Across
+   * ten live failures the model mis-reported a measured value in every
+   * way available: the wrong units, a unit belonging to a dataset it
+   * recommended in the same breath, a number from a neighbouring row's
+   * metadata, a region it had narrowed to silently, coordinates with
+   * the sign dropped, and — most recently — no location at all. Each
+   * was addressed at the prompt or at the payload, and the next one
+   * arrived in a new shape.
+   *
+   * So the number stops depending on the prose. `valueText` and the
+   * place come straight from the executor's own result, and if the
+   * sentence disagrees with the card, the user can see that it does.
+   * Display-only; nothing here is clickable and nothing is deferred.
+   */
+  | {
+      type: 'measurement'
+      /** The value already written out, units attached — the same
+       *  string the model was asked to quote. */
+      valueText: string
+      /** Absent for a whole-region summary, which measures an area
+       *  rather than a point. */
+      lat?: number
+      lon?: number
+      /** The frame this was read from. These datasets are animations;
+       *  a value with no time is a claim about an unnamed instant. */
+      frameTime?: string
+      /** The dataset the frame came from, not whatever app state
+       *  believes is loaded (see `2ca7417`). */
+      dataset?: string
+    }
+  /**
    * Load a single frame from a Phase 3pg image-sequence dataset.
    * `frameQuery` is the verbatim payload from the LLM's
-   * `<<LOAD_FRAME:DATASET_ID:query>>` marker â€” one of:
+   * `<<LOAD_FRAME:DATASET_ID:query>>` marker — one of:
    *   - an ISO 8601 timestamp like `2026-05-16T12:00:00Z`,
    *   - `index=N` (zero-based, where N is in [0, frame_count)),
    *   - `latest` / `first` (resolved by the client against the
@@ -428,6 +577,22 @@ export type ChatAction =
       frameQuery: string
       displayName: string
     }
+  /**
+   * A cited current-event card the docent surfaces from an `<<EVENT:ID>>`
+   * marker (`docs/CURRENT_EVENTS_PLAN.md` §6.2). Display-only — the
+   * accompanying dataset load + globe fly/seek ride on the ordinary
+   * `load-dataset` / `fly-to` / `fit-bounds` / `set-time` actions the
+   * marker expands into (all derived client-side from the approved event,
+   * so the coordinates and time are never LLM-authored). `sourceUrl` is
+   * guaranteed http(s) by the events client's sanitizer.
+   */
+  | {
+      type: 'event-citation'
+      eventId: string
+      title: string
+      sourceName: string
+      sourceUrl: string
+    }
 
 /**
  * Snapshot of the LLM context used to generate an AI response.
@@ -442,7 +607,7 @@ export interface LLMContextSnapshot {
   historyCompressed: boolean
   /**
    * Number of LLM round-trips this turn took. 1 for a direct
-   * reply (no tool call); â‰¥2 when the LLM called search_datasets
+   * reply (no tool call); ≥2 when the LLM called search_datasets
    * / search_catalog / list_featured_datasets and the docent fed
    * the result back for a second round. Phase 1d/Y plumbed this
    * through so dashboards can see how often the cutover's
@@ -511,13 +676,13 @@ export interface FeedbackPayload {
 }
 
 /**
- * Kind of general feedback â€” bug report, feature request, or other.
+ * Kind of general feedback — bug report, feature request, or other.
  */
 export type GeneralFeedbackKind = 'bug' | 'feature' | 'other'
 
 /**
  * Payload submitted to /api/general-feedback for app-level feedback
- * (bug reports, feature requests) â€” distinct from per-message AI
+ * (bug reports, feature requests) — distinct from per-message AI
  * response ratings which use FeedbackPayload.
  */
 export interface GeneralFeedbackPayload {
@@ -545,15 +710,15 @@ export type ReadingLevel = 'young-learner' | 'general' | 'in-depth' | 'expert'
 
 /**
  * Where Orbit's voice (STT/TTS) is sourced from. `auto` resolves
- * **on-device â†’ browser** at runtime; `cloud` is **opt-in only**
+ * **on-device → browser** at runtime; `cloud` is **opt-in only**
  * (deliberately excluded from `auto` because edge inference is
  * metered) and the explicit values pin a path for power users /
- * kiosk operators. See `docs/ORBIT_VOICE_PLAN.md` Â§4.4.
+ * kiosk operators. See `docs/ORBIT_VOICE_PLAN.md` §4.4.
  */
 export type VoiceProviderPreference = 'auto' | 'cloud' | 'local' | 'browser'
 
 /**
- * A *concrete* voice engine backend â€” `VoiceProviderPreference`
+ * A *concrete* voice engine backend — `VoiceProviderPreference`
  * minus the `'auto'` meta-preference. Engines declare one of these,
  * and resolved per-locale support reports one of these (or `null`).
  */
@@ -562,11 +727,13 @@ export type VoiceProvider = Exclude<VoiceProviderPreference, 'auto'>
 /**
  * Realtime hands-free interaction model (Phase 3). `off` keeps the
  * Phase 1 single-tap mic; `push-to-talk` opens the mic while a control
- * is held; `open-mic` listens continuously with local VAD gating.
- * Â§9.1 has us ship both `push-to-talk` and `open-mic` so a real
- * install can pick. Default `off`.
+ * is held; `open-mic` listens continuously with local VAD gating;
+ * `wake-word` stays silent until an on-device wake phrase arms a single
+ * turn (the privacy-preserving exhibit path — no audio streams until a
+ * wake fires; §9.1). §9.1 has us ship these so a real install can pick.
+ * Default `off`.
  */
-export type VoiceHandsFreeMode = 'off' | 'push-to-talk' | 'open-mic'
+export type VoiceHandsFreeMode = 'off' | 'push-to-talk' | 'open-mic' | 'wake-word'
 
 export interface DocentConfig {
   apiUrl: string         // default: '/api'
@@ -574,17 +741,17 @@ export interface DocentConfig {
   model: string          // default: 'llama-4-scout'
   enabled: boolean       // default: true
   readingLevel: ReadingLevel  // default: 'general'
-  visionEnabled: boolean // default: false â€” captures globe screenshot as context
-  debugPrompt?: boolean  // default: false â€” log full system prompt to console
+  visionEnabled: boolean // default: false — captures globe screenshot as context
+  debugPrompt?: boolean  // default: false — log full system prompt to console
   // --- Voice (Orbit Voice Plan, Phase 1). All optional; auto-speak
   // defaults off so typed chat is byte-for-byte unchanged when unused.
   // Mic visibility is capability-gated (STT support for the active
   // locale), not a stored toggle. ---
-  voiceAutoSpeak?: boolean          // auto-read replies via TTS; default false (Â§8 decision 1)
+  voiceAutoSpeak?: boolean          // auto-read replies via TTS; default false (§8 decision 1)
   voiceProvider?: VoiceProviderPreference // default 'auto'
   voiceLang?: string                // BCP-47 override; default = active UI locale
   voiceName?: string                // specific TTS voice id (provider-scoped)
-  voiceRate?: number                // TTS speaking rate (0.5â€“2); default 1
+  voiceRate?: number                // TTS speaking rate (0.5–2); default 1
   voiceHandsFree?: VoiceHandsFreeMode // realtime hands-free mode; default 'off' (Phase 3)
 }
 
@@ -612,7 +779,7 @@ export type QAIndex = Record<string, QAEntry[]>
  *
  * The Phase 1a workaround surfaced legacy SOS tours as datasets
  * with `format: 'tour/json'`. New-style tours (from the
- * publisher dock) flow through this type instead â€” the SPA
+ * publisher dock) flow through this type instead — the SPA
  * normalises both into the same browse card list at render
  * time.
  */
@@ -624,7 +791,7 @@ export interface Tour {
   /** Resolved HTTPS URL the tour engine fetches. May be null
    * when the server can't render an R2 URL (R2_PUBLIC_BASE
    * unset on the deployment). The SPA's `dataService` filters
-   * unresolvable tours out of the browse list â€” a launchable
+   * unresolvable tours out of the browse list — a launchable
    * card with no fetchable JSON is worse UX than no card. The
    * field stays nullable here because it reflects the wire
    * shape; consumers that synthesise a `Tour` from a known-
@@ -646,7 +813,7 @@ export interface TourFile {
 
 /**
  * A single task definition from a tour JSON file.
- * Discriminated by which key is present â€” each object has exactly one task key.
+ * Discriminated by which key is present — each object has exactly one task key.
  */
 export type TourTaskDef =
   | { flyTo: FlyToTaskParams }
@@ -694,6 +861,19 @@ export type TourTaskDef =
    * Distinct from `unloadAllDatasets`, which wipes every panel.
    */
   | { unloadDataset: string }
+  /**
+   * Seek the loaded (video) dataset to a moment in time — the tour
+   * analogue of the docent's `set_time` action, added for the
+   * auto-generated current-events tours (`docs/CURRENT_EVENTS_PLAN.md`
+   * §7: event occurred time → setTime). A no-op when no seekable
+   * dataset is loaded or the time is outside its range.
+   */
+  | { setTime: SetTimeTaskParams }
+
+export interface SetTimeTaskParams {
+  /** ISO-8601 instant (or date) to seek the loaded dataset to. */
+  time: string
+}
 
 export interface FlyToTaskParams {
   lat: number
@@ -705,10 +885,10 @@ export interface FlyToTaskParams {
 /**
  * VR-specific placement override for a tour overlay task.
  *
- * Tour overlays default to "world-anchored" in VR â€” they float
+ * Tour overlays default to "world-anchored" in VR — they float
  * near the globe and billboard toward the user. When the global
  * preference `gazeFollowOverlays` is set, the default flips to
- * "gaze-follow" â€” overlays ride in front of the user's head with
+ * "gaze-follow" — overlays ride in front of the user's head with
  * smoothed lerp, subtitle-style.
  *
  * This optional field on each overlay task lets a tour author
@@ -752,9 +932,9 @@ export interface LoadDatasetTaskParams {
   id: string
   /**
    * Local handle the tour uses to refer back to this loaded dataset
-   * in later tasks â€” typically `unloadDataset`. Scoped to the tour
+   * in later tasks — typically `unloadDataset`. Scoped to the tour
    * run, not the catalog. Example: `"dataset3"`. Optional; the tour
-   * engine maintains a `handle â†’ slot` map keyed on this.
+   * engine maintains a `handle → slot` map keyed on this.
    */
   datasetID?: string
   /**
@@ -843,7 +1023,7 @@ export interface ShowPopupHtmlTaskParams {
   heightPct?: number
   /**
    * When a `url` is supplied, opt in to running JavaScript inside the
-   * sandboxed iframe. Defaults to false â€” only enable for trusted origins.
+   * sandboxed iframe. Defaults to false — only enable for trusted origins.
    */
   allowScripts?: boolean
   /** VR-only placement override. See {@link TourOverlayAnchor}. */
@@ -865,12 +1045,12 @@ export type TourState = 'stopped' | 'playing' | 'paused'
 
 /**
  * Internal layout identifier used by the tour callbacks. Mirrors
- * `src/services/viewportManager.ts`'s `ViewLayout` â€” the duplication
+ * `src/services/viewportManager.ts`'s `ViewLayout` — the duplication
  * keeps the types module free of a direct service-layer import.
  */
 export type TourViewLayout = '1' | '2h' | '2v' | '4'
 
-/** Callbacks the tour engine uses to drive the app â€” avoids circular imports */
+/** Callbacks the tour engine uses to drive the app — avoids circular imports */
 export interface TourCallbacks {
   /**
    * Load a dataset, optionally into a specific panel slot. The `slot`
@@ -883,7 +1063,7 @@ export interface TourCallbacks {
   /**
    * Unload the dataset in a specific slot without touching any
    * others. Used by the tour engine's `unloadDataset` task after
-   * resolving a local `datasetID` handle â†’ slot.
+   * resolving a local `datasetID` handle → slot.
    */
   unloadDatasetAt(slot: number): Promise<void>
   /**
@@ -902,7 +1082,7 @@ export interface TourCallbacks {
    * Return the 0-indexed slot that currently owns playback + the
    * singular UI. Used by `execLoadDataset` so tours that omit
    * `worldIndex` honor the user's current promoted panel instead
-   * of always clobbering slot 0 â€” the bug that caused a
+   * of always clobbering slot 0 — the bug that caused a
    * `runTourOnLoad` chained load to overwrite panel 1's dataset
    * after the user had promoted panel 2.
    */
@@ -910,6 +1090,30 @@ export interface TourCallbacks {
   togglePlayPause(): void
   isPlaying(): boolean
   setPlaybackRate(rate: number): void
+  /**
+   * The loaded dataset's own advance rate, in source frames per
+   * second, or undefined when the host does not know it.
+   *
+   * The `frameRate` task asks for a rate in *dataset* frames per
+   * second, and turning that into a `playbackRate` means dividing by
+   * what the dataset already advances at. That was hard-coded to 30
+   * — correct only for a dataset with one source frame per output
+   * frame. A dataset carrying `playbackFps` advances at that rate
+   * instead, whether the file achieves it by holding each frame
+   * across a 30 fps container or by being encoded at that container
+   * rate, and dividing by 30 makes such a tour wrong by the ratio
+   * between them.
+   *
+   * Optional, and absent means 30: a host that never wires it keeps
+   * exactly the behaviour it had.
+   */
+  getPlaybackFps?(): number | undefined
+  /**
+   * Seek the loaded dataset to an ISO time (the `setTime` task).
+   * Optional — hosts without seekable playback (or older wiring)
+   * simply skip the task.
+   */
+  setTime?(isoTime: string): void
   onTourEnd(): void
   /** Called when the user clicks the stop button in tour controls */
   onStop(): void
@@ -929,25 +1133,25 @@ export interface LegendCache {
   legendDescriptionForDatasetId: string | null
 }
 
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─────────────────────────────────────────────────────────────────────
 // Telemetry
 //
 // Shape of the analytics event stream. Shared between the client
 // emitter (src/analytics/) and the Pages Function at
-// functions/api/ingest.ts â€” both sides validate against the same
+// functions/api/ingest.ts — both sides validate against the same
 // discriminated union.
 //
 // Design, two-tier model, wiring, and privacy posture are documented
 // in docs/ANALYTICS_IMPLEMENTATION_PLAN.md and docs/PRIVACY.md.
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─────────────────────────────────────────────────────────────────────
 
 /** Telemetry consent level. `off` emits nothing; `essential` emits
  * Tier A events only; `research` emits A + B. User-controllable via
- * the Tools â†’ Privacy panel. */
+ * the Tools → Privacy panel. */
 export type TelemetryTier = 'off' | 'essential' | 'research'
 
 /** Persisted telemetry preferences. Stored in localStorage under
- * `sos-telemetry-config`. `sessionId` is *not* part of this shape â€”
+ * `sos-telemetry-config`. `sessionId` is *not* part of this shape —
  * it lives in memory only and rotates on every launch. */
 export interface TelemetryConfig {
   tier: TelemetryTier
@@ -981,11 +1185,11 @@ export type Platform = 'web' | 'desktop' | 'mobile'
 export type OsFamily = 'mac' | 'windows' | 'linux' | 'ios' | 'android' | 'unknown'
 export type ViewportClass = 'xs' | 'sm' | 'md' | 'lg' | 'xl'
 /** Aspect-ratio bucket derived from `window.innerWidth / window.innerHeight`.
- * Low cardinality on purpose â€” exact dimensions would be a
+ * Low cardinality on purpose — exact dimensions would be a
  * fingerprinting signal. See docs/ANALYTICS_IMPLEMENTATION_PLAN.md
  * "Privacy posture". */
 export type AspectClass = 'portrait-tall' | 'portrait' | 'square' | 'landscape' | 'wide' | 'ultrawide'
-/** Physical-display bucket derived from `screen.width` â€” independent
+/** Physical-display bucket derived from `screen.width` — independent
  * from the browser viewport (which is captured by `viewport_class`). */
 export type ScreenClass = 'mobile' | 'tablet' | '1080p' | '2k' | '4k+'
 /** Build lineage. Server-stamped `environment` (`production` /
@@ -1008,7 +1212,7 @@ export type TourOutcome = 'completed' | 'abandoned' | 'error'
 export type VrMode = 'ar' | 'vr'
 export type VrExitReason = 'user' | 'error' | 'session_lost'
 export type VrGesture = 'drag' | 'pinch' | 'thumbstick_zoom' | 'flick_spin' | 'hud_tap'
-/** Specular-strength presets surfaced in Tools â†’ Display (Â§7.2). */
+/** Specular-strength presets surfaced in Tools → Display (§7.2). */
 export type SpecularPreset = 'none' | 'default' | 'comfortable'
 export type ErrorCategory =
   | 'tile' | 'hls' | 'llm' | 'download' | 'vr' | 'tour' | 'caption'
@@ -1016,6 +1220,24 @@ export type ErrorCategory =
 export type ErrorSource =
   | 'caught' | 'window_error' | 'unhandledrejection'
   | 'console_error' | 'console_warn' | 'tauri_panic'
+
+// --- Multi-monitor output (docs/MULTI_MONITOR_PLAN.md rung 13) ---
+
+/** A framebuffer rung by name. The exact pixel width is a machine
+ *  fingerprint; which rung an installation chose is the question. */
+export type FramebufferBucket = '1k' | '2k' | '4k' | '8k'
+/** Why an output stopped running — or, for the storm guard, never
+ *  started. `gpu-loss-timeout` and `monitor-gone` are declared now and
+ *  fire when failure-recovery cases 4 and 5 land, so the enum does not
+ *  have to change under a dashboard that already queries it. */
+export type OutputRemovedReason =
+  | 'operator-close' | 'crash' | 'monitor-gone'
+  | 'gpu-loss-timeout' | 'rejected-by-storm-guard'
+/** The six failure modes §3 enumerates, minus the two that are the
+ *  control window's own (a manager crash cannot report itself). Only
+ *  `crash` has a detector today; the rest land with cases 2-5. */
+export type OutputFailureKind =
+  | 'crash' | 'hls-stalled' | 'ipc-silence' | 'gpu-loss' | 'monitor-unplug'
 
 // --- Base event shape ---
 
@@ -1031,23 +1253,23 @@ export interface TelemetryEventBase {
 export interface SessionStartEvent extends TelemetryEventBase {
   event_type: 'session_start'
   app_version: string
-  /** Shell type â€” `'web'` in a browser tab, `'desktop'` in the
+  /** Shell type — `'web'` in a browser tab, `'desktop'` in the
    * Tauri desktop app, `'mobile'` in the Tauri iOS/Android app. */
   platform: Platform
-  /** OS family â€” never version. Bucketed to six values to avoid
+  /** OS family — never version. Bucketed to six values to avoid
    * fingerprinting. */
   os: OsFamily
   locale: string
   /** Browser viewport bucket (innerWidth-derived). */
   viewport_class: ViewportClass
   /** Browser viewport aspect ratio bucket. Captures orientation
-   * alongside shape â€” portrait phone vs ultrawide monitor etc. */
+   * alongside shape — portrait phone vs ultrawide monitor etc. */
   aspect_class: AspectClass
   /** Physical-display bucket (screen.width-derived). Independent
    * from viewport because a user on a 4K monitor may resize the
    * browser to a 1080p window. */
   screen_class: ScreenClass
-  /** Build audience â€” `'public'` unless the bundle was produced
+  /** Build audience — `'public'` unless the bundle was produced
    * with `VITE_BUILD_CHANNEL=internal` (staff dogfood) or
    * `VITE_BUILD_CHANNEL=canary` (staged rollout). */
   build_channel: BuildChannel
@@ -1063,7 +1285,7 @@ export interface SessionEndEvent extends TelemetryEventBase {
   exit_reason: 'pagehide' | 'visibilitychange' | 'clean'
   duration_ms: number
   event_count: number
-  /** Page-visible wall-clock ms â€” the idle-tab-aware view time.
+  /** Page-visible wall-clock ms — the idle-tab-aware view time.
    * Accumulated across `visibilitychange` transitions, so a tab
    * opened in the background reports ~0 while `duration_ms` keeps
    * counting. Field name chosen to sort after `event_count`
@@ -1095,7 +1317,7 @@ export interface FeedbackEvent extends TelemetryEventBase {
   context: FeedbackContext
   kind: FeedbackKind
   status: FeedbackStatus
-  /** âˆ’1 / 0 / +1 */
+  /** −1 / 0 / +1 */
   rating: -1 | 0 | 1
 }
 
@@ -1117,7 +1339,7 @@ export interface CameraSettledEvent extends TelemetryEventBase {
   /** Dataset currently loaded in the slot at the moment the camera
    * settled. Empty string when the panel is showing the default
    * Earth. Required and non-null so blob positions stay stable in
-   * Analytics Engine â€” see comment on `toDataPoint`. */
+   * Analytics Engine — see comment on `toDataPoint`. */
   layer_id: string
 }
 
@@ -1172,10 +1394,10 @@ export interface BrowseFilterEvent extends TelemetryEventBase {
 }
 
 /**
- * Catalog view-mode toggle (Phase 4 Â§6.7+). Fires when the user
+ * Catalog view-mode toggle (Phase 4 §6.7+). Fires when the user
  * switches the browse overlay between the card grid, the network
- * graph, the upcoming Timeline view (Â§6.8), and the upcoming Map
- * view (Â§6.9). Tier A â€” the choice is a pure UI preference and
+ * graph, the upcoming Timeline view (§6.8), and the upcoming Map
+ * view (§6.9). Tier A — the choice is a pure UI preference and
  * carries no free-text payload. `from` records what the user just
  * came from so the dashboard can read both stickiness and
  * direction of pivots.
@@ -1184,7 +1406,7 @@ export interface CatalogViewModeChangedEvent extends TelemetryEventBase {
   event_type: 'catalog_view_mode_changed'
   view_mode: 'cards' | 'graph' | 'timeline' | 'map'
   from: 'cards' | 'graph' | 'timeline' | 'map'
-  /** Bucketed dataset count visible at the moment of toggle â€” useful
+  /** Bucketed dataset count visible at the moment of toggle — useful
    *  for "did the user pivot to Graph because Cards was overwhelming?". */
   result_count_bucket: '0' | '1-10' | '11-50' | '50+'
 }
@@ -1238,7 +1460,7 @@ export interface TourEndedEvent extends TelemetryEventBase {
 }
 
 /**
- * Tier B â€” emitted when the user answers a tour quiz question.
+ * Tier B — emitted when the user answers a tour quiz question.
  * Skipped questions (user navigates next/prev/stop without picking
  * an answer) do not emit; the absence of this event for a
  * `tour_task_fired(task_type='question')` in the same session is
@@ -1256,11 +1478,11 @@ export interface TourQuestionAnsweredEvent extends TelemetryEventBase {
   question_id: string
   /** Same task_index space as `tour_task_fired`. */
   task_index: number
-  /** `numberOfAnswers` from the task definition (typically 2â€“4). */
+  /** `numberOfAnswers` from the task definition (typically 2–4). */
   choice_count: number
-  /** 0..choice_count-1 â€” which answer button the user clicked. */
+  /** 0..choice_count-1 — which answer button the user clicked. */
   chosen_index: number
-  /** 0..choice_count-1 â€” the author-defined correct answer. */
+  /** 0..choice_count-1 — the author-defined correct answer. */
   correct_index: number
   /** Derived. Convenience field so dashboards don't need to compare
    * `chosen_index === correct_index`. */
@@ -1276,7 +1498,7 @@ export interface VrSessionStartedEvent extends TelemetryEventBase {
   entry_load_ms: number
   /** Dataset loaded in the primary panel at the moment the user
    * entered VR. Empty string when entering with the default Earth
-   * view. Snapshot â€” a load that happens later in the session is
+   * view. Snapshot — a load that happens later in the session is
    * captured separately by the next `layer_loaded` event. */
   layer_id: string
 }
@@ -1289,7 +1511,7 @@ export interface VrSessionEndedEvent extends TelemetryEventBase {
   /** End-of-session arithmetic mean of FPS over the whole session
    * (`total frames / wall-clock duration`). For per-window medians
    * during the session, see `perf_sample.fps_median_10s`. `0` when
-   * the session was too short for a meaningful sample (< 1 s) â€”
+   * the session was too short for a meaningful sample (< 1 s) —
    * dashboards filter `mean_fps > 0` to exclude these. */
   mean_fps: number
   /** Dataset loaded in the primary panel at the moment the session
@@ -1346,18 +1568,18 @@ export type MigrationR2HlsOutcome =
 /**
  * Operator-facing migration progress event. Emitted once per
  * dataset row by `terraviz migrate-r2-hls` (Phase 3 commit C).
- * One-shot â€” migration runs are operator-driven, not user
+ * One-shot — migration runs are operator-driven, not user
  * sessions, so throttling is not needed.
  *
  * Consumed by the Grafana product-health migration row (commit
  * 3/G). Three panels: per-day runs by outcome, cumulative count
  * of `outcome='ok'` rows, and a failure breakdown table. The
  * operator already knows the original vimeo: row count (~136 at
- * Phase 3 cut-over) so the cumulative-ok stat is the headline â€”
+ * Phase 3 cut-over) so the cumulative-ok stat is the headline —
  * it should land at the original total once the migration is
  * complete.
  *
- * No free-text fields â€” every field is a stable identifier or
+ * No free-text fields — every field is a stable identifier or
  * scalar. `dataset_id` / `legacy_id` / `vimeo_id` / `r2_key`
  * are public catalog identifiers (the same values the catalog
  * manifest endpoint exposes), so no hashing is required.
@@ -1413,7 +1635,7 @@ export type MigrationR2AssetsType = 'thumbnail' | 'legend' | 'caption' | 'color_
 /**
  * Operator-facing asset-migration progress event. Emitted once
  * per attempted asset migration by `terraviz migrate-r2-assets`
- * (Phase 3b commit G). One event per (row, asset_type) pair â€”
+ * (Phase 3b commit G). One event per (row, asset_type) pair —
  * a row migrating thumbnail + legend produces two events.
  *
  * Distinguished from `migration_r2_hls` (Phase 3): that pump
@@ -1423,7 +1645,7 @@ export type MigrationR2AssetsType = 'thumbnail' | 'legend' | 'caption' | 'color_
  *
  * Consumed by a Grafana asset-migration row (Phase 3b commit J).
  *
- * No free-text fields â€” `dataset_id` / `legacy_id` / `r2_key` /
+ * No free-text fields — `dataset_id` / `legacy_id` / `r2_key` /
  * `source_url` are public catalog references; `asset_type` /
  * `outcome` are enums. No hashing required.
  */
@@ -1439,7 +1661,7 @@ export interface MigrationR2AssetsEvent extends TelemetryEventBase {
   asset_type: MigrationR2AssetsType
   /** Upstream URL the asset was fetched from (the value of the
    * row's `<asset>_ref` column at run time). Public catalog
-   * data â€” same URLs the SPA renders today. */
+   * data — same URLs the SPA renders today. */
   source_url: string
   /** Resulting R2 key (e.g. `datasets/<id>/thumbnail.png`).
    * Empty string when the migration didn't reach the PUT step.
@@ -1450,8 +1672,8 @@ export interface MigrationR2AssetsEvent extends TelemetryEventBase {
    * didn't complete. */
   source_bytes: number
   /** Per-asset wall-clock duration in ms (fetch + optional
-   * SRTâ†’VTT conversion + upload). Does NOT include the row-level
-   * PATCH â€” that's tallied once per row even though it
+   * SRT→VTT conversion + upload). Does NOT include the row-level
+   * PATCH — that's tallied once per row even though it
    * influences every asset's final outcome. */
   duration_ms: number
   /** Per-asset outcome. See `MigrationR2AssetsOutcome`. */
@@ -1463,29 +1685,29 @@ export interface MigrationR2AssetsEvent extends TelemetryEventBase {
  * `TourOutcome` string-union exported from
  * `cli/migrate-r2-tours.ts`; keep these in sync.
  *
- *   ok                   â€” tour.json + every sibling uploaded,
+ *   ok                   — tour.json + every sibling uploaded,
  *                          row PATCHed.
- *   dead_source          â€” upstream tour.json returned 404. The
+ *   dead_source          — upstream tour.json returned 404. The
  *                          row was already broken pre-migration;
  *                          NOT counted as a failure. (One known
  *                          case at the Phase 3c cut-over:
  *                          INTERNAL_SOS_726_ONLINE.)
- *   fetch_failed         â€” upstream tour.json fetch failed for
+ *   fetch_failed         — upstream tour.json fetch failed for
  *                          any reason other than 404.
- *   parse_failed         â€” tour.json bytes didn't decode as JSON.
- *   sibling_fetch_failed â€” at least one relative sibling asset
+ *   parse_failed         — tour.json bytes didn't decode as JSON.
+ *   sibling_fetch_failed — at least one relative sibling asset
  *                          (audio/overlay/360-pano) failed to
  *                          fetch. The row's tour.json is NOT
- *                          uploaded in this case â€” atomic per
+ *                          uploaded in this case — atomic per
  *                          row.
- *   upload_failed        â€” an R2 PUT failed mid-row (tour.json
+ *   upload_failed        — an R2 PUT failed mid-row (tour.json
  *                          or sibling). Partial uploads are R2
  *                          orphans; the row still points at NOAA.
- *   patch_failed         â€” every R2 PUT succeeded but the D1
+ *   patch_failed         — every R2 PUT succeeded but the D1
  *                          PATCH on `run_tour_on_load` failed.
  *                          Worst case: all R2 objects are
  *                          orphans AND the row still points at
- *                          NOAA. Recovery: re-run (idempotent â€”
+ *                          NOAA. Recovery: re-run (idempotent —
  *                          same bytes, same keys). */
 export type MigrationR2ToursOutcome =
   | 'ok'
@@ -1498,7 +1720,7 @@ export type MigrationR2ToursOutcome =
 
 /**
  * Operator-facing tour-migration progress event. Emitted once
- * per row by `terraviz migrate-r2-tours` (Phase 3c commit B) â€”
+ * per row by `terraviz migrate-r2-tours` (Phase 3c commit B) —
  * one event per dataset whose `run_tour_on_load` was migrated
  * (or attempted). Distinct from `migration_r2_assets` (3b):
  * that one fires per (row, asset_type) pair because auxiliary
@@ -1509,7 +1731,7 @@ export type MigrationR2ToursOutcome =
  *
  * Consumed by a Grafana tour-migration row (Phase 3c commit F).
  *
- * No free-text fields â€” `dataset_id` / `legacy_id` / `r2_key` /
+ * No free-text fields — `dataset_id` / `legacy_id` / `r2_key` /
  * `source_url` are public catalog references; `outcome` is an
  * enum. Sibling counts are integers. No hashing required.
  */
@@ -1523,18 +1745,18 @@ export interface MigrationR2ToursEvent extends TelemetryEventBase {
   legacy_id: string
   /** Upstream tour.json URL the migration fetched from (the
    * value of the row's `run_tour_on_load` column at run time).
-   * Public catalog data â€” same URLs the SPA loads today. */
+   * Public catalog data — same URLs the SPA loads today. */
   source_url: string
   /** Resulting R2 key for tour.json (e.g.
    * `tours/<id>/tour.json`). Empty string when the migration
    * didn't reach the PUT step. */
   r2_key: string
-  /** Bytes received from the upstream fetches â€” tour.json plus
+  /** Bytes received from the upstream fetches — tour.json plus
    * every sibling actually fetched (including any fetched
    * before a partial-row failure). */
   source_bytes: number
   /** Count of `relative` siblings the parser discovered in this
-   * tour.json. The migration target â€” these get fetched +
+   * tour.json. The migration target — these get fetched +
    * uploaded. */
   siblings_relative: number
   /** Count of `absolute_external` siblings (YouTube embeds,
@@ -1560,7 +1782,7 @@ export interface MigrationR2ToursEvent extends TelemetryEventBase {
 
 /**
  * Publisher portal mounted at a route. One emit per portal-chunk
- * load â€” the publisher visits `/publish/*`, the lazy chunk
+ * load — the publisher visits `/publish/*`, the lazy chunk
  * resolves, the router dispatches its first route, this fires.
  * Subsequent in-portal navigation is *not* counted as another
  * portal load (that's what `publisher_action` and the `dwell`
@@ -1577,10 +1799,15 @@ export interface PublisherPortalLoadedEvent extends TelemetryEventBase {
    * stale bookmarks); the router's notFound handler still emits
    * this event because the visit counts toward portal usage. */
   route:
+    | 'overview'
     | 'me'
     | 'datasets'
     | 'tours'
     | 'featured_hero'
+    | 'node_profile'
+    | 'blog'
+    | 'events'
+    | 'feeds'
     | 'import'
     | 'workflows'
     | 'analytics'
@@ -1601,7 +1828,7 @@ export interface PublisherPortalLoadedEvent extends TelemetryEventBase {
  *
  * Most action kinds (`draft_saved`, `published`, `retracted`,
  * `preview_minted`, `asset_uploaded`, `bulk_imported`) land in
- * later sub-phases â€” 3pc through 3pf. The type is defined now so
+ * later sub-phases — 3pc through 3pf. The type is defined now so
  * the emit-call signature is locked before downstream code
  * starts calling it.
  */
@@ -1618,6 +1845,72 @@ export interface PublisherActionEvent extends TelemetryEventBase {
    * or `''` for actions where no specific dataset applies
    * (`bulk_imported` operates on many rows at once). */
   dataset_id: string
+}
+
+/**
+ * Multi-monitor output telemetry (`docs/MULTI_MONITOR_PLAN.md` §3
+ * "Failure recovery", Open Question 3 — decided; rung 13).
+ *
+ * Three events, all Tier A, all emitted by the **control window**.
+ * The output windows themselves emit nothing, and that is a policy
+ * rather than an omission: §3.6's capture-clean rule exists because
+ * the common installation pattern is an HDMI capture card taking a
+ * monitor as input, so anything an output does is on the sphere in
+ * front of an audience — and an output phoning home would be the
+ * same class of leak one layer down. The control window can see
+ * everything worth reporting anyway.
+ *
+ * Tier A because the motivation is installation health, not user
+ * research: an operator running a museum sphere wants a crash to be
+ * visible, and an event that only ships for the fraction of users
+ * who opted into Research would answer "how often do outputs
+ * crash?" with a number nobody can act on. Nothing here is free
+ * text, a coordinate, or a device string, so none of the hashing,
+ * sanitising or rounding invariants apply — every field is a small
+ * categorical enum or a count. The one field that *could* have
+ * identified hardware, the monitor, is reported as an index into the
+ * enumeration and never as the OS-reported display name.
+ */
+export interface OutputAddedEvent extends TelemetryEventBase {
+  event_type: 'output_added'
+  /** Projection geometry the window was spawned as. One value today;
+   *  the field exists for the same reason the wire format's does. */
+  mode: OutputMode
+  /** Framebuffer width as a rung name rather than a pixel count.
+   *  Bucketed because the exact number is a machine fingerprint the
+   *  question ("do installations run big frames?") does not need. */
+  framebuffer_bucket: FramebufferBucket
+  /** Index into the monitor enumeration — 0 is the first enumerated
+   *  display, not necessarily the OS's primary. Never the monitor's
+   *  name, which is a user-set string on macOS and a model number on
+   *  plenty of Windows machines. */
+  monitor_index: number
+}
+
+export interface OutputRemovedEvent extends TelemetryEventBase {
+  event_type: 'output_removed'
+  mode: OutputMode
+  /** Why it stopped running. `operator-close` covers both halves of
+   *  a deliberate close — the panel's Remove button and the window's
+   *  own close — because the distinction matters to the manager's
+   *  bookkeeping and not to anyone reading a dashboard.
+   *  `rejected-by-storm-guard` is a configured output that never
+   *  came back, which is a removal from the operator's side even
+   *  though no window existed to close. */
+  reason: OutputRemovedReason
+}
+
+export interface OutputFailureEvent extends TelemetryEventBase {
+  event_type: 'output_failure'
+  kind: OutputFailureKind
+  /** Recovery attempts made before this fired. Bounded auto-recovery
+   *  collapses into one event carrying its count rather than one
+   *  event per attempt, so a flapping installation reports a rising
+   *  number instead of a rising rate. */
+  retries: number
+  /** True if the output carried on afterwards; false if the failure
+   *  was escalated to the operator. */
+  recovered: boolean
 }
 
 // --- Tier B events ---
@@ -1660,7 +1953,7 @@ export interface OrbitTurnEvent extends TelemetryEventBase {
   content_length: number
   /**
    * Number of LLM round-trips this turn took. 1 for a direct
-   * reply (no tool call); â‰¥2 when discovery tools fired and the
+   * reply (no tool call); ≥2 when discovery tools fired and the
    * docent fed results back for another round. Useful for
    * monitoring per-turn cost shifts (Phase 1d/F replaced the
    * single-round pre-search injection with a tool-calling path
@@ -1705,16 +1998,16 @@ export interface BrowseSearchEvent extends TelemetryEventBase {
 }
 
 /**
- * Catalog Graph view node interaction (Phase 4 Â§6.7). Fires when
- * the user clicks a node in the Graph view. Tier B â€” node values
+ * Catalog Graph view node interaction (Phase 4 §6.7). Fires when
+ * the user clicks a node in the Graph view. Tier B — node values
  * (Category names, keyword values, dataset IDs) are free-text by
  * the privacy posture's definition, so `value_hash` carries a
  * SHA-256 prefix rather than the value itself. Throttled to
- * â‰¤30/min via the same rolling-window pattern as `camera_settled`
+ * ≤30/min via the same rolling-window pattern as `camera_settled`
  * so an aggressive panning session can't flood the queue.
  *
- * `node_kind` and `facet` are low-cardinality enums (3 Ã— ~10
- * facets) so they're safe to emit verbatim â€” they tell the
+ * `node_kind` and `facet` are low-cardinality enums (3 × ~10
+ * facets) so they're safe to emit verbatim — they tell the
  * dashboard "user clicked a Category facet-value node" without
  * revealing which one.
  */
@@ -1731,19 +2024,19 @@ export interface CatalogGraphNodeClickedEvent extends TelemetryEventBase {
 }
 
 /**
- * Catalog Timeline view brush gesture (Phase 4 Â§6.8). Fires when
+ * Catalog Timeline view brush gesture (Phase 4 §6.8). Fires when
  * the user commits a brush selection on the time axis, which
  * writes a `dataCoverageYear` range predicate via the same
  * `setFacet` mutation path the chip rail's range inputs use.
- * Tier B because â€” like Graph node clicks â€” it captures a
+ * Tier B because — like Graph node clicks — it captures a
  * filter-shaping signal that's deeper than the chip rail's
  * coarse "user filtered" event, and the dashboard's question
  * here is investigative ("which date ranges do users actually
  * brush?") rather than operator-critical.
  *
- * Throttled to â‰¤30 / minute per session by the rolling-window
+ * Throttled to ≤30 / minute per session by the rolling-window
  * pattern in `src/analytics/camera.ts`, same shared budget as
- * `catalog_graph_node_clicked`. Payload is integers only â€” the
+ * `catalog_graph_node_clicked`. Payload is integers only — the
  * brush carries no free text, so no `*_hash` field is needed.
  */
 export interface CatalogTimelineBrushAppliedEvent extends TelemetryEventBase {
@@ -1755,21 +2048,21 @@ export interface CatalogTimelineBrushAppliedEvent extends TelemetryEventBase {
 }
 
 /**
- * Catalog Map view draw-rectangle gesture (Phase 4 Â§6.9). Fires
+ * Catalog Map view draw-rectangle gesture (Phase 4 §6.9). Fires
  * when the user commits a region selection on the mercator map,
  * which writes a `geographicRegion` bbox predicate via the same
  * `setFacet` mutation path the chip rail's range inputs and the
- * Timeline brush both use. Tier B because â€” like the Graph node
- * click and the Timeline brush â€” it captures a filter-shaping
+ * Timeline brush both use. Tier B because — like the Graph node
+ * click and the Timeline brush — it captures a filter-shaping
  * signal deeper than the chip rail's coarse "user filtered" event,
  * and the dashboard's question here is investigative ("which
  * regions do users actually draw?") rather than operator-critical.
  *
- * Throttled to â‰¤30 / minute per session by the rolling-window
+ * Throttled to ≤30 / minute per session by the rolling-window
  * pattern in `src/analytics/camera.ts`, same shared budget as
  * `catalog_graph_node_clicked` and `catalog_timeline_brush_applied`.
- * Bounds round to 3 decimals (~111 m at the equator) â€” same
- * precision `camera.ts` uses for lat/lon â€” so the analytics
+ * Bounds round to 3 decimals (~111 m at the equator) — same
+ * precision `camera.ts` uses for lat/lon — so the analytics
  * surface never leaks high-resolution drag positions.
  */
 export interface CatalogMapRegionDrawnEvent extends TelemetryEventBase {
@@ -1797,7 +2090,7 @@ export interface ErrorDetailEvent extends TelemetryEventBase {
   message_class: string
   /** SHA-256 of normalized stack, first 12 hex. */
   stack_signature: string
-  /** Sanitized stack frames â€” function names only, no URLs or line
+  /** Sanitized stack frames — function names only, no URLs or line
    * numbers. Max 10 frames. */
   frames_json: string
   count_in_batch: number
@@ -1806,7 +2099,7 @@ export interface ErrorDetailEvent extends TelemetryEventBase {
 /**
  * A publisher hit a server-side validation error on a write
  * attempt. Tier B because the dashboard's question is "which
- * validators trip publishers most often?" â€” that's an investigative
+ * validators trip publishers most often?" — that's an investigative
  * signal, not an operator-critical one, and the free-text values
  * we'd want to inspect (slug, title, abstract) cannot ship to AE
  * under our privacy invariants.
@@ -1830,9 +2123,9 @@ export interface PublisherValidationFailedEvent extends TelemetryEventBase {
  * One voice (STT or TTS) interaction. Tier B: a research signal for
  * how Orbit's voice is used (provider / language / success / latency),
  * not an operator-critical metric. Privacy: **no transcript text and
- * no audio ever** â€” only the bucketed fields below; the spoken/heard
+ * no audio ever** — only the bucketed fields below; the spoken/heard
  * content never leaves the device through telemetry.
- * (docs/ORBIT_VOICE_PLAN.md Â§6)
+ * (docs/ORBIT_VOICE_PLAN.md §6)
  */
 export interface VoiceInteractionEvent extends TelemetryEventBase {
   event_type: 'voice_interaction'
@@ -1840,14 +2133,21 @@ export interface VoiceInteractionEvent extends TelemetryEventBase {
   mode: 'stt' | 'tts'
   /** Which engine served it. */
   provider: VoiceProvider
-  /** How it was initiated: mic capture, auto-speak, or the per-message replay button. */
-  trigger: 'mic' | 'autospeak' | 'replay'
+  /** How it was initiated: push-to-talk mic, auto-speak, the per-message
+   *  replay button, or a hands-free realtime turn (open-mic / push-to-talk
+   *  / wake-word — the §10.4 numbers that decide the exhibit interaction
+   *  model, incl. the wake-word false-fire rate: a `wake-word` STT row
+   *  with `success:false` is a wake that produced no turn). */
+  trigger: 'mic' | 'autospeak' | 'replay' | 'open-mic' | 'push-to-talk' | 'wake-word'
   /** Recognition / synthesis wall-clock duration in ms; `0` when not measured (e.g. TTS start). */
   duration_ms: number
   /** BCP-47 base language (e.g. `en`, `es`). Low-cardinality, not free text. */
   lang: string
   /** Whether it completed successfully (STT produced a final transcript / TTS started). */
   success: boolean
+  /** TTS only — the spoken reply was cut short by a hands-free barge-in
+   *  (the user interrupted Orbit). Drives the barge-in-frequency metric (§10.4). */
+  interrupted?: boolean
 }
 
 /** The full discriminated event union. Add new events here, add them
@@ -1885,6 +2185,9 @@ export type TelemetryEvent =
   | MigrationR2ToursEvent
   | PublisherPortalLoadedEvent
   | PublisherActionEvent
+  | OutputAddedEvent
+  | OutputRemovedEvent
+  | OutputFailureEvent
   // Tier B
   | DwellEvent
   | PublisherValidationFailedEvent

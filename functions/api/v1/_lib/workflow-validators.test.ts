@@ -1,5 +1,10 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 import { describe, it, expect } from 'vitest'
 import {
+  MAX_PIPELINE_ARG_LIST_ITEMS,
+  MAX_PIPELINE_JSON_BYTES,
   WORKFLOW_FRAMES_OUTPUT_DIR,
   WORKFLOW_OUTPUT_PATH,
 } from '../../../../src/types/zyra-workflow-constants'
@@ -77,6 +82,127 @@ describe('validatePipeline', () => {
     expect(runPipeline(noOutput).some(e => e.code === 'missing_output')).toBe(true)
   })
 
+  it('accepts a process reproject stage (regional-model pattern)', () => {
+    // Warps projected model output (e.g. HRRR Lambert Conformal) onto
+    // the equirectangular grid the globe expects, and wraps 0-360
+    // global grids to ±180. All args are scalars.
+    const reprojectPipeline = JSON.stringify({
+      stages: [
+        {
+          stage: 'process',
+          command: 'reproject',
+          args: {
+            i: '/work/images/in.tif',
+            o: '/work/images/frames/out.tif',
+            'dst-bounds': 'auto',
+            width: 2048,
+            'dst-nodata': 'nan',
+          },
+        },
+        {
+          stage: 'visualize',
+          command: 'compose-video',
+          args: { frames: WORKFLOW_FRAMES_OUTPUT_DIR, output: WORKFLOW_OUTPUT_PATH },
+        },
+      ],
+    })
+    expect(runPipeline(reprojectPipeline)).toEqual([])
+  })
+
+  it('accepts array args of scalars (multi-valued flags like dst-bounds)', () => {
+    const pipeline = JSON.stringify({
+      stages: [
+        {
+          stage: 'process',
+          command: 'reproject',
+          args: { i: '/work/tmp/in.tif', o: '/work/tmp/out.tif', dst_bounds: [-180, -90, 180, 90], width: 2048 },
+        },
+        {
+          stage: 'visualize',
+          command: 'compose-video',
+          args: { frames: WORKFLOW_FRAMES_OUTPUT_DIR, output: WORKFLOW_OUTPUT_PATH },
+        },
+      ],
+    })
+    expect(runPipeline(pipeline)).toEqual([])
+  })
+
+  it('rejects array args with non-scalar elements or bad lengths', () => {
+    const nested = JSON.stringify({
+      stages: [
+        {
+          stage: 'process',
+          command: 'reproject',
+          args: { dst_bounds: [[-180, -90]], o: WORKFLOW_OUTPUT_PATH },
+        },
+      ],
+    })
+    expect(runPipeline(nested).some(e => e.code === 'invalid_value')).toBe(true)
+    const empty = JSON.stringify({
+      stages: [
+        { stage: 'process', command: 'reproject', args: { dst_bounds: [], o: WORKFLOW_OUTPUT_PATH } },
+      ],
+    })
+    expect(runPipeline(empty).some(e => e.code === 'invalid_value')).toBe(true)
+    const oversized = JSON.stringify({
+      stages: [
+        {
+          stage: 'process',
+          command: 'reproject',
+          // Derived from the bound rather than hardcoded, so raising
+          // the bound cannot leave this asserting that a now-legal
+          // length is rejected.
+          args: {
+            dst_bounds: Array.from({ length: MAX_PIPELINE_ARG_LIST_ITEMS + 1 }, (_, n) => n),
+            o: WORKFLOW_OUTPUT_PATH,
+          },
+        },
+      ],
+    })
+    expect(runPipeline(oversized).some(e => e.code === 'invalid_value')).toBe(true)
+  })
+
+  it('validates arg placeholders at save time', () => {
+    const good = JSON.stringify({
+      stages: [
+        {
+          stage: 'process',
+          command: 'decode-grib2',
+          args: {
+            file_or_url: 'https://x/gefs.{{cycle_date:PT6H:PT5H}}/{{cycle_hour:PT6H:PT5H}}/f000.grib2',
+            raw: true,
+          },
+        },
+        {
+          stage: 'visualize',
+          command: 'compose-video',
+          args: { frames: WORKFLOW_FRAMES_OUTPUT_DIR, output: WORKFLOW_OUTPUT_PATH },
+        },
+      ],
+    })
+    expect(runPipeline(good)).toEqual([])
+    const bad = JSON.stringify({
+      stages: [
+        {
+          stage: 'acquire',
+          command: 'http',
+          args: { url: 'https://x/{{cycle_date}}', output: WORKFLOW_OUTPUT_PATH },
+        },
+      ],
+    })
+    expect(runPipeline(bad).some(e => e.code === 'invalid_placeholder')).toBe(true)
+    const strayCloser = JSON.stringify({
+      stages: [
+        {
+          stage: 'acquire',
+          command: 'http',
+          args: { url: 'https://x/stray}}closer', output: WORKFLOW_OUTPUT_PATH },
+        },
+      ],
+    })
+    expect(runPipeline(strayCloser).some(e => e.code === 'invalid_placeholder')).toBe(true)
+  })
+
   it('rejects stages and commands off the allowlist', () => {
     const shell = JSON.stringify({ stages: [{ stage: 'shell', command: 'bash' }] })
     expect(runPipeline(shell).some(e => e.code === 'not_allowlisted')).toBe(true)
@@ -101,6 +227,93 @@ describe('validatePipeline', () => {
     expect(runPipeline('{not json').some(e => e.code === 'invalid_json')).toBe(true)
     expect(runPipeline(JSON.stringify({ stages: [] })).some(e => e.code === 'invalid_shape')).toBe(true)
   })
+
+  // --- bounds ------------------------------------------------------
+  //
+  // These were raised for per-frame forecast pipelines, where one list
+  // entry per frame is unavoidable. The cases below are shaped like the
+  // real thing (a long templated URL repeated per frame) so a future
+  // reduction fails here rather than in production.
+
+  const framePipeline = (n: number) => {
+    const url = (i: number) =>
+      'https://noaa-rrfs-pds.s3.amazonaws.com/rrfs_public/rrfs.{{cycle_date:PT6H:PT9H}}/' +
+      '{{cycle_hour:PT6H:PT9H}}/rrfs.t{{cycle_hour:PT6H:PT9H}}z.2dfld.3km.f' +
+      String(i).padStart(3, '0') + '.conus.grib2'
+    return JSON.stringify({
+      stages: [
+        {
+          stage: 'process',
+          command: 'convert-format',
+          args: {
+            format: 'geotiff',
+            output_dir: '/work/tif',
+            inputs: Array.from({ length: n }, (_, i) => url(i)),
+            output_names: Array.from({ length: n }, (_, i) => `f${i}.tif`),
+          },
+        },
+        {
+          stage: 'process',
+          command: 'scan-frames',
+          args: { frames_dir: WORKFLOW_FRAMES_OUTPUT_DIR, output: '/work/frames-meta.json' },
+        },
+      ],
+    })
+  }
+
+  it('accepts an hourly forecast out to RRFS f084 (85 frames)', () => {
+    // The case that motivated the raise. At the old bound of 16 this
+    // failed four times over -- once per array arg.
+    expect(runPipeline(framePipeline(85))).toEqual([])
+  })
+
+  it('still refuses a runaway list', () => {
+    const errs = runPipeline(framePipeline(MAX_PIPELINE_ARG_LIST_ITEMS + 1))
+    expect(errs.length).toBeGreaterThan(0)
+    expect(errs.some(e => /Array args must have/.test(e.message ?? ''))).toBe(true)
+  })
+
+  it('measures the bound in UTF-8 bytes, not UTF-16 code units', () => {
+    // A CJK codepoint is one code unit and three UTF-8 bytes, so a
+    // `.length` check undercounts by up to 3x and lets a pipeline
+    // exceed the documented bound. Sized to pass a code-unit check
+    // and fail a byte check, so it can only go green under the
+    // correct one.
+    const pad = '\u6f22'.repeat(Math.floor(MAX_PIPELINE_JSON_BYTES * 0.6))
+    const heavy = JSON.stringify({
+      stages: [
+        {
+          stage: 'process',
+          command: 'scan-frames',
+          args: { frames_dir: WORKFLOW_FRAMES_OUTPUT_DIR, output: '/work/m.json', note: pad },
+        },
+      ],
+    })
+    expect(heavy.length).toBeLessThan(MAX_PIPELINE_JSON_BYTES)
+    expect(new TextEncoder().encode(heavy).length).toBeGreaterThan(MAX_PIPELINE_JSON_BYTES)
+    expect(runPipeline(heavy).some(e => e.code === 'too_large')).toBe(true)
+  })
+
+  it('keeps the byte bound clear of a full-length forecast pipeline', () => {
+    // Raising the item count alone would have left an 85-frame pipeline
+    // at 83% of the old 32 KiB -- one longer URL from failing. This
+    // asserts real headroom, not merely that it fits.
+    const bytes = framePipeline(85).length
+    expect(bytes).toBeLessThan(MAX_PIPELINE_JSON_BYTES / 2)
+  })
+
+  it('rejects an empty array arg regardless of the bound', () => {
+    const empty = JSON.stringify({
+      stages: [
+        {
+          stage: 'process',
+          command: 'scan-frames',
+          args: { frames_dir: WORKFLOW_FRAMES_OUTPUT_DIR, output: '/work/m.json', inputs: [] },
+        },
+      ],
+    })
+    expect(runPipeline(empty).length).toBeGreaterThan(0)
+  })
 })
 
 describe('validateMetadataTemplate', () => {
@@ -117,6 +330,31 @@ describe('validateMetadataTemplate', () => {
         e => e.code === 'unknown_placeholder',
       ),
     ).toBe(true)
+  })
+
+  it('accepts parameterized valid-time placeholders', () => {
+    expect(
+      runTemplate(
+        JSON.stringify({
+          start_time: '{{valid_iso:PT6H:PT7H}}',
+          end_time: '{{valid_iso:PT6H:PT7H:PT42H}}',
+          abstract: 'Cycle {{valid_compact:PT6H:PT7H}}, run {{run_id}}',
+        }),
+      ),
+    ).toEqual([])
+  })
+
+  it('rejects a malformed valid_iso at save time', () => {
+    // Parameters are part of the placeholder now, so a missing lag or
+    // a bad duration has to fail here rather than at publish time.
+    expect(runTemplate(JSON.stringify({ start_time: '{{valid_iso:PT6H}}' }))).not.toEqual([])
+    expect(runTemplate(JSON.stringify({ start_time: '{{valid_iso:PT6H:7h}}' }))).not.toEqual([])
+    // Pipeline-only names stay out of scope for a metadata template.
+    expect(runTemplate(JSON.stringify({ title: '{{cycle_date:PT6H:PT7H}}' }))).not.toEqual([])
+  })
+
+  it('rejects unterminated braces that match no placeholder', () => {
+    expect(runTemplate(JSON.stringify({ abstract: 'through {{data_end' }))).not.toEqual([])
   })
 })
 

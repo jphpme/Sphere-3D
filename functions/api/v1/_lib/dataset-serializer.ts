@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * Maps `DatasetRow` + `DecorationRows` to the wire `Dataset` shape
  * that frontend consumers expect.
@@ -17,6 +20,12 @@
  * follow the manifest link.
  */
 
+import {
+  parseColorScale,
+  RENDER_ENCODING_DATA_LUMA,
+  type ColorScale,
+  type RenderEncoding,
+} from '../../../../src/types/color-scale'
 import type { DatasetRow, DecorationRows, NodeIdentityRow } from './catalog-store'
 
 /**
@@ -113,6 +122,22 @@ export interface WireDataset {
   lonOrigin?: number
   /** Image Y-axis flip flag. Omitted when false. */
   isFlippedInY?: boolean
+  /** How many source frames this dataset advances per second. The
+   * rate is already baked into the file, so nothing applies it on
+   * load; it is served because the tour `frameRate` task must divide
+   * a requested rate by what the dataset already does. Omitted means
+   * 30. */
+  playbackFps?: number
+  /** How the frames encode their pixels. Omitted means a picture,
+   * which is every dataset published before this field existed.
+   * `'data-luma'` means luma carries the normalised value and
+   * `colorScale` colours it at display time. Emitted only as a
+   * validated pair with `colorScale`. */
+  renderEncoding?: RenderEncoding
+  /** Palette + scale for a `data-luma` dataset: ordered `stops`
+   * (`{ t, rgba }`), `vmin` / `vmax`, optional `units` and
+   * `transparentRange`. Omitted unless `renderEncoding` is set. */
+  colorScale?: ColorScale
   /**
    * For `tour/json` rows: the resolved URL the SPA's tour engine
    * fetches the tour document from, bypassing the manifest endpoint
@@ -194,20 +219,29 @@ export type DataRefResolver = (dataRef: string) => string | null
 export type AssetRefResolver = (ref: string | null | undefined) => string | null
 
 /**
- * Pluggable callback that returns the public per-frame URL template
- * for an image-sequence upload (Phase 3pg/A). Takes the row's
- * `frame_source_filenames_ref` (the canonical ULID-pair container)
- * and the row's `frame_extension`, returns a URL with a literal
- * `{index}` token consumers substitute with the zero-padded 5-digit
- * frame number. Lives outside the serializer for the same reason
- * `DataRefResolver` does — keeps the serializer free of env
- * bindings; call sites close over what they have on hand. Returns
- * null when R2 public-base resolution falls through, mirroring
+ * Pluggable callback that returns the dataset-level per-frame URL
+ * template for an image-sequence upload. Takes the row's `datasetId`
+ * and the node `baseUrl`, and returns a URL with a literal `{index}`
+ * token consumers substitute with the zero-padded 5-digit frame
+ * number.
+ *
+ * Since frames are content-addressed, no single direct-R2 `{index}`
+ * template can exist (each index maps to an arbitrary hash), so the
+ * template points at the `/frames/{index}` **redirect** endpoint —
+ * `${baseUrl}/api/v1/datasets/{datasetId}/frames/{index}` — which 302s
+ * to the content-addressed object (see `buildFramesRedirectTemplate`).
+ * The `/frames` *list* endpoint emits direct content-addressed URLs
+ * separately, so bulk download skips the hop.
+ *
+ * Lives outside the serializer for the same reason `DataRefResolver`
+ * does — keeps the serializer free of env bindings; call sites close
+ * over what they have on hand. Returns null when R2 public-base
+ * resolution falls through (frames not advertised), mirroring
  * `AssetRefResolver`'s shape.
  */
 export type FramesUrlTemplateResolver = (
-  frameSourceFilenamesRef: string,
-  frameExtension: string,
+  datasetId: string,
+  baseUrl: string,
 ) => string | null
 
 function nonNull<T>(v: T | null | undefined): T | undefined {
@@ -249,6 +283,27 @@ function parseJsonField(v: string | null | undefined): unknown {
   } catch {
     return undefined
   }
+}
+
+/**
+ * Serialize the data-encoded video pair, or nothing.
+ *
+ * All-or-nothing on purpose. `renderEncoding` tells the renderer to
+ * read luma as a measurement instead of a colour, and `colorScale`
+ * is the only thing that says what that measurement means. Emitting
+ * the first without the second would render every dataset pixel
+ * through a palette the client had to invent; emitting the second
+ * without the first is inert. So a row that carries only one — or a
+ * sidecar that no longer parses — is served as the picture it was
+ * before the columns existed.
+ */
+function serializeRenderEncoding(
+  row: DatasetRow,
+): { renderEncoding?: RenderEncoding; colorScale?: ColorScale } {
+  if (row.render_encoding !== RENDER_ENCODING_DATA_LUMA) return {}
+  const scale = parseColorScale(row.color_scale)
+  if (!scale) return {}
+  return { renderEncoding: RENDER_ENCODING_DATA_LUMA, colorScale: scale }
 }
 
 /**
@@ -376,6 +431,21 @@ export function serializeDataset(
     radiusMi: row.radius_mi != null ? row.radius_mi : undefined,
     lonOrigin: row.lon_origin != null ? row.lon_origin : undefined,
     isFlippedInY: row.is_flipped_in_y === 1 ? true : undefined,
+    // The rate the dataset advances, in source frames per second.
+    // Served because the tour `frameRate` task cannot convert a
+    // requested rate into a `playbackRate` without it: the file is
+    // already playing at this rate, so the divisor is this rather
+    // than the container's 30. NULL stays undefined and the consumer
+    // falls back to 30, which is what every row that never set it
+    // means.
+    playbackFps: row.playback_fps != null ? row.playback_fps : undefined,
+    // Data-encoded video. Both surface only as a validated pair —
+    // a row carrying one without the other is served as a plain
+    // picture, so a half-written row degrades to raw grayscale
+    // rather than to confidently-wrong colours. The write-side
+    // validator refuses that pairing, but a row could still predate
+    // it or arrive by direct SQL.
+    ...serializeRenderEncoding(row),
   }
 
   // Tour rows carry a fetchable JSON URL alongside the manifest
@@ -415,10 +485,7 @@ export function serializeDataset(
     row.frame_source_filenames_ref != null &&
     resolveFramesUrlTemplate
   ) {
-    const urlTemplate = resolveFramesUrlTemplate(
-      row.frame_source_filenames_ref,
-      row.frame_extension,
-    )
+    const urlTemplate = resolveFramesUrlTemplate(row.id, identity.base_url)
     if (urlTemplate) {
       const frames: WireDatasetFrames = {
         count: row.frame_count,

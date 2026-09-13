@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 // Tauri app entry point — shared between desktop and mobile (iOS / Android).
 // Desktop launches via `main.rs` which calls `run()`; mobile launches via the
 // `mobile_entry_point` macro below, which the OS-native host (Android JNI or
@@ -8,11 +11,11 @@ mod download_manager;
 mod keychain;
 mod tile_cache;
 
-use std::sync::Arc;
 use base64::Engine;
-use serde::Serialize;
-use tauri::{Emitter, Manager};
 use download_manager::DownloadManager;
+use serde::Serialize;
+use std::sync::Arc;
+use tauri::{Emitter, Manager};
 use tile_cache::TileCache;
 
 /// Payload emitted on the `native_panic` event when the Rust panic hook
@@ -56,6 +59,100 @@ fn __dev_force_panic() {
     #[cfg(debug_assertions)]
     {
         panic!("dev-only forced panic for testing native_panic event");
+    }
+}
+
+/// Exit the application.
+///
+/// Exists for the keyboard quit a kiosk window has no other way to
+/// reach (`docs/MULTI_MONITOR_PLAN.md` §3.6, rung 9 step 29). Launched
+/// with `--kiosk` the main window is fullscreen and decorationless, so
+/// there is no close button and no title bar to right-click; Alt+F4 is
+/// a Windows answer and the checklist asks for Ctrl+Q everywhere.
+///
+/// A command rather than `tauri-plugin-process` because this is the
+/// only thing the app would use that plugin for, and rather than a
+/// menu accelerator because a window with no menu bar — which is what
+/// kiosk mode is — does not reliably fire one.
+///
+/// **Who may call it is already decided by the capability split.**
+/// `invoke` needs `core:default`, which `capabilities/default.json`
+/// grants the main window and `capabilities/output.json` deliberately
+/// withholds. So an output cannot quit the installation even if its
+/// webview is compromised, and that is structural rather than a
+/// convention the caller has to keep. The `windowChrome` hotkey is
+/// wired only in the control window on top of that.
+#[tauri::command]
+fn quit_app(app: tauri::AppHandle) {
+    app.exit(0);
+}
+
+/// CLI flag and environment variable that launch straight into kiosk
+/// mode (`docs/MULTI_MONITOR_PLAN.md` §3.6 mechanism 3).
+///
+/// Two paths for one thing because they serve different launchers: a
+/// `.desktop` autostart entry or a systemd unit sets an environment
+/// variable naturally, while a wrapper script or a manual launch passes
+/// a flag. Neither can drive a runtime keystroke, which is the whole
+/// reason this is read at startup rather than left to the F11 handler.
+#[cfg(desktop)]
+const KIOSK_FLAG: &str = "--kiosk";
+#[cfg(desktop)]
+const KIOSK_ENV: &str = "TERRAVIZ_KIOSK";
+
+/// Whether this launch asked for kiosk mode.
+///
+/// Takes its inputs rather than reading the process, so the parsing
+/// rules below are testable without spawning a binary.
+///
+/// **A set variable is not a true one.** `TERRAVIZ_KIOSK=0` and
+/// `TERRAVIZ_KIOSK=` both mean *off*: an installation that sets the
+/// variable explicitly to disable kiosk — which is exactly what a
+/// deployment script templating one unit file for several machines
+/// does — must not get a decorationless fullscreen window instead. So
+/// the value is matched against an allowlist rather than tested for
+/// presence.
+#[cfg(desktop)]
+fn kiosk_requested<I: IntoIterator<Item = String>>(args: I, env: Option<String>) -> bool {
+    if args.into_iter().any(|arg| arg == KIOSK_FLAG) {
+        return true;
+    }
+    matches!(
+        env.as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
+/// Put the main window into kiosk shape: fullscreen, no decorations.
+///
+/// Applied in `setup()`, which is the earliest point an `AppHandle`
+/// exists — so "before the first paint" is best-effort rather than
+/// guaranteed. The alternative, declaring it in `tauri.conf.json`, is
+/// static and cannot be conditional on a flag.
+///
+/// A failure is logged and swallowed. An operator who asked for kiosk
+/// and got a windowed app has a cosmetic problem; one whose unattended
+/// installation refused to boot has an outage.
+#[cfg(desktop)]
+fn apply_kiosk(app: &tauri::AppHandle) {
+    let Some(window) = app.get_webview_window("main") else {
+        eprintln!("[kiosk] no main window to put into kiosk mode");
+        return;
+    };
+    if let Err(err) = window.set_fullscreen(true) {
+        eprintln!("[kiosk] could not go fullscreen: {err}");
+        // Deliberately not dropping the decorations after a failed
+        // fullscreen: that leaves an undecorated *windowed* app the
+        // operator cannot move, resize or close, which is worse than
+        // the title bar this was trying to remove. Same ordering rule
+        // as `windowChrome.ts` on the TypeScript side.
+        return;
+    }
+    if let Err(err) = window.set_decorations(false) {
+        eprintln!("[kiosk] could not drop the window decorations: {err}");
     }
 }
 
@@ -103,17 +200,12 @@ pub fn run() {
                     .payload()
                     .downcast_ref::<&str>()
                     .map(|s| (*s).to_string())
-                    .or_else(|| {
-                        panic_info
-                            .payload()
-                            .downcast_ref::<String>()
-                            .cloned()
-                    })
+                    .or_else(|| panic_info.payload().downcast_ref::<String>().cloned())
                     .unwrap_or_else(|| "<unknown panic>".to_string());
 
-                let location = panic_info.location().map(|loc| {
-                    format!("{}:{}", loc.file(), loc.line())
-                });
+                let location = panic_info
+                    .location()
+                    .map(|loc| format!("{}:{}", loc.file(), loc.line()));
 
                 let payload = NativePanicPayload { message, location };
                 // Best-effort emit — if the JS side isn't listening
@@ -123,11 +215,12 @@ pub fn run() {
                 let _ = panic_emit_handle.emit("native_panic", &payload);
             }));
 
-            let app_data = app.path().app_data_dir()
+            let app_data = app
+                .path()
+                .app_data_dir()
                 .expect("failed to resolve app data directory");
             let cache_dir = app_data.join("tiles");
-            std::fs::create_dir_all(&cache_dir)
-                .expect("failed to create tile cache directory");
+            std::fs::create_dir_all(&cache_dir).expect("failed to create tile cache directory");
 
             let tile_cache = Arc::new(TileCache::new(cache_dir));
             app.manage(tile_cache);
@@ -137,6 +230,16 @@ pub fn run() {
                 .expect("failed to create dataset download directory");
             let download_manager = Arc::new(DownloadManager::new(dataset_dir));
             app.manage(download_manager);
+
+            // Kiosk launch (§3.6 mechanism 3). Desktop-gated because
+            // this file also compiles into the iOS/Android cdylib,
+            // where argv flags and a decorationless fullscreen toggle
+            // mean nothing — an ungated version would be dead weight at
+            // best and a build break at worst.
+            #[cfg(desktop)]
+            if kiosk_requested(std::env::args(), std::env::var(KIOSK_ENV).ok()) {
+                apply_kiosk(app.handle());
+            }
 
             Ok(())
         })
@@ -152,8 +255,68 @@ pub fn run() {
             download_commands::get_download_path,
             download_commands::get_downloads_size,
             download_commands::is_downloading,
+            quit_app,
             __dev_force_panic,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(all(test, desktop))]
+mod tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn flag_turns_kiosk_on() {
+        assert!(kiosk_requested(args(&["terraviz", "--kiosk"]), None));
+    }
+
+    #[test]
+    fn no_flag_and_no_env_is_off() {
+        assert!(!kiosk_requested(args(&["terraviz"]), None));
+    }
+
+    #[test]
+    fn a_similar_flag_is_not_the_flag() {
+        assert!(!kiosk_requested(args(&["terraviz", "--kiosk-mode"]), None));
+        assert!(!kiosk_requested(args(&["terraviz", "kiosk"]), None));
+    }
+
+    #[test]
+    fn truthy_env_values_turn_kiosk_on() {
+        for value in ["1", "true", "TRUE", "Yes", "on", " 1 "] {
+            assert!(
+                kiosk_requested(args(&["terraviz"]), Some(value.to_string())),
+                "expected {value:?} to enable kiosk"
+            );
+        }
+    }
+
+    #[test]
+    fn a_set_variable_is_not_a_true_one() {
+        // The trap this allowlist exists for: a deployment templating
+        // one unit file across several machines sets TERRAVIZ_KIOSK=0
+        // to *disable* kiosk on the ones with a keyboard. Testing for
+        // presence would hand those a decorationless fullscreen window.
+        for value in ["0", "", "false", "no", "off", "maybe"] {
+            assert!(
+                !kiosk_requested(args(&["terraviz"]), Some(value.to_string())),
+                "expected {value:?} to leave kiosk off"
+            );
+        }
+    }
+
+    #[test]
+    fn the_flag_wins_over_a_falsy_env() {
+        // An operator adding --kiosk to one launch is making a decision
+        // now; the environment is the installation's default.
+        assert!(kiosk_requested(
+            args(&["terraviz", "--kiosk"]),
+            Some("0".to_string())
+        ));
+    }
 }

@@ -1,11 +1,15 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * /publish/analytics — the operator analytics dashboard (Phase B of
  * `docs/ANALYTICS_STORAGE_AND_ADMIN_PLAN.md`).
  *
- * Privileged-only (staff / admin / service), same client-side gate
- * as featured-hero (the API enforces 403 regardless). Data comes
- * from `GET /api/v1/publish/analytics` — typed sections over the
- * Phase A rollup tables; everything shown is a sample-weighted
+ * Read-only for any active publisher — the dashboard has no mutation
+ * controls (CSV export is built client-side), so view access is open;
+ * the operator backfill in `analytics-export.ts` stays privileged.
+ * Data comes from `GET /api/v1/publish/analytics` — typed sections
+ * over the Phase A rollup tables; everything shown is a sample-weighted
  * estimate over complete UTC days through yesterday, external
  * traffic only.
  *
@@ -30,6 +34,7 @@
  * spatial-only filters reload just the heatmap data.
  */
 
+import { fetchFeatures, renderFeatureDisabledCard } from '../features'
 import { t } from '../../../i18n'
 import { formatDate, formatNumber, formatRegion } from '../../../i18n/format'
 import { publisherGet, handleSessionError, type PublisherApiResult } from '../api'
@@ -45,7 +50,6 @@ import {
 } from '../analytics-charts'
 
 
-const ME_ENDPOINT = '/api/v1/publish/me'
 const ANALYTICS_ENDPOINT = '/api/v1/publish/analytics'
 /** Vendored Natural Earth 1:110m land polygons + admin-0 country
  * boundary lines (public domain), minified + coordinate-rounded —
@@ -67,11 +71,6 @@ const ENVIRONMENTS = ['production', 'preview'] as const
  * Bins carry the cell's south-west corner; the heatmap and the CSV
  * export both derive the cell center by adding half this. */
 const SPATIAL_BIN_DEG = 0.5
-
-interface MeResponse {
-  role: string
-  is_admin: boolean
-}
 
 interface Envelope<T> {
   since_day: string
@@ -173,10 +172,6 @@ interface PageState {
   spatialProjection: string | undefined
 }
 
-function clientIsPrivileged(me: MeResponse): boolean {
-  return me.is_admin === true || me.role === 'admin' || me.role === 'service'
-}
-
 function el<K extends keyof HTMLElementTagNameMap>(
   tag: K,
   props: Partial<HTMLElementTagNameMap[K]> & { className?: string } = {},
@@ -217,34 +212,18 @@ export async function renderAnalyticsPage(
   mount: HTMLElement,
   options: AnalyticsPageOptions = {},
 ): Promise<void> {
+  if (!(await fetchFeatures()).analytics) {
+    renderFeatureDisabledCard(mount, 'analytics')
+    return
+  }
   const fetchFn = options.fetchFn
   mount.replaceChildren(
     shell(el('p', { className: 'publisher-loading', textContent: t('publisher.analytics.loading') })),
   )
 
-  const meRes = await publisherGet<MeResponse>(ME_ENDPOINT, { fetchFn })
-  if (!meRes.ok) {
-    if (meRes.kind === 'session') {
-      if (handleSessionError({ navigate: options.navigate }) === 'navigating') return
-      mount.replaceChildren(shell(buildErrorCard('session')))
-      return
-    }
-    const details = meRes.kind === 'server' ? { status: meRes.status, body: meRes.body } : {}
-    mount.replaceChildren(shell(buildErrorCard(meRes.kind, details)))
-    return
-  }
-  if (!clientIsPrivileged(meRes.data)) {
-    mount.replaceChildren(
-      shell(
-        el('h1', { textContent: t('publisher.analytics.title') }),
-        el('p', {
-          className: 'publisher-hero-restricted',
-          textContent: t('publisher.analytics.restricted'),
-        }),
-      ),
-    )
-    return
-  }
+  // Analytics is a read-only dashboard, open to any active publisher.
+  // The per-section data reads below surface any session/server error;
+  // there's no separate role gate here.
 
   const state: PageState = {
     days: 30,
@@ -287,6 +266,18 @@ export async function renderAnalyticsPage(
   }
   window.addEventListener(ROUTE_CHANGE_START_EVENT, onRouteChange)
 
+  // The spatial section owns a MapLibre canvas, which mis-sizes if
+  // it initialises inside a hidden (display:none) tab. So spatial is
+  // loaded lazily the first time its tab is shown — the container is
+  // visible by then. The other six sections are SVG/DOM and render
+  // correctly while hidden, so they load eagerly.
+  let spatialLoaded = false
+  const loadSpatialOnce = (): void => {
+    if (spatialLoaded) return
+    spatialLoaded = true
+    void loadSpatial()
+  }
+
   const header = buildHeader(state, () => {
     if (heatmap) {
       heatmap.destroy()
@@ -294,22 +285,70 @@ export async function renderAnalyticsPage(
     }
     void loadOverview()
     void loadDatasets()
-    void loadSpatial()
     void loadFunnel()
     void loadPerf()
     void loadOrbit()
     void loadResearch()
+    // Reload spatial only if it was already opened this session.
+    if (spatialLoaded) void loadSpatial()
+  })
+
+  // Section tabs (deck layout). Each tab toggles the matching host's
+  // visibility; the section content is already (or lazily) loaded.
+  const tabHosts: Array<{
+    labelKey:
+      | 'publisher.analytics.tab.overview'
+      | 'publisher.analytics.tab.datasets'
+      | 'publisher.analytics.tab.spatial'
+      | 'publisher.analytics.tab.engagement'
+      | 'publisher.analytics.tab.performance'
+      | 'publisher.analytics.tab.orbit'
+      | 'publisher.analytics.tab.research'
+    host: HTMLElement
+    onShow?: () => void
+  }> = [
+    { labelKey: 'publisher.analytics.tab.overview', host: overviewHost },
+    { labelKey: 'publisher.analytics.tab.datasets', host: datasetsHost },
+    { labelKey: 'publisher.analytics.tab.spatial', host: spatialHost, onShow: loadSpatialOnce },
+    { labelKey: 'publisher.analytics.tab.engagement', host: funnelHost },
+    { labelKey: 'publisher.analytics.tab.performance', host: perfHost },
+    { labelKey: 'publisher.analytics.tab.orbit', host: orbitHost },
+    { labelKey: 'publisher.analytics.tab.research', host: researchHost },
+  ]
+  const tabbar = el('div', { className: 'publisher-tabs publisher-analytics-tabs', role: 'tablist' })
+  tabbar.setAttribute('aria-label', t('publisher.analytics.tabs.aria'))
+  tabHosts.forEach((entry, i) => {
+    entry.host.hidden = i !== 0
+    const tab = el('button', {
+      type: 'button',
+      className: i === 0 ? 'publisher-tab publisher-tab-active' : 'publisher-tab',
+      textContent: t(entry.labelKey),
+    }) as HTMLButtonElement
+    tab.setAttribute('role', 'tab')
+    tab.setAttribute('aria-selected', i === 0 ? 'true' : 'false')
+    tab.addEventListener('click', () => {
+      tabHosts.forEach(e => {
+        e.host.hidden = e !== entry
+      })
+      for (const btn of Array.from(tabbar.children)) {
+        const isThis = btn === tab
+        btn.classList.toggle('publisher-tab-active', isThis)
+        btn.setAttribute('aria-selected', isThis ? 'true' : 'false')
+      }
+      entry.onShow?.()
+    })
+    tabbar.append(tab)
   })
 
   mount.replaceChildren(
-    shell(header, overviewHost, datasetsHost, spatialHost, funnelHost, perfHost, orbitHost, researchHost),
+    shell(header, tabbar, overviewHost, datasetsHost, spatialHost, funnelHost, perfHost, orbitHost, researchHost),
   )
 
-  // Populate on first visit — the header's onChange only covers
-  // subsequent control changes.
+  // Populate the eager (non-map) sections on first visit — the
+  // header's onChange only covers subsequent control changes, and
+  // spatial waits for its tab.
   void loadOverview()
   void loadDatasets()
-  void loadSpatial()
   void loadFunnel()
   void loadPerf()
   void loadOrbit()

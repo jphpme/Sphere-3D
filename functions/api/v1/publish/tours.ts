@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * /api/v1/publish/tours — tour collection endpoint.
  *
@@ -17,8 +20,9 @@
 
 import type { CatalogEnv } from '../_lib/env'
 import type { PublisherData } from './_middleware'
-import { getNodeIdentity } from '../_lib/catalog-store'
+import { getNodeIdentity, IDENTITY_MISSING_MESSAGE } from '../_lib/catalog-store'
 import { createTour, listToursForPublisher } from '../_lib/tour-mutations'
+import { can } from '../_lib/capabilities'
 
 const CONTENT_TYPE = 'application/json; charset=utf-8'
 const DEFAULT_LIMIT = 50
@@ -59,16 +63,19 @@ export const onRequestGet: PagesFunction<CatalogEnv> = async context => {
 
 export const onRequestPost: PagesFunction<CatalogEnv> = async context => {
   const publisher = (context.data as unknown as PublisherData).publisher
+  if (!can(publisher, 'content.create')) {
+    return jsonError(403, 'forbidden_role', 'Creating tours requires an authoring role.')
+  }
   // See publish/datasets.ts — the createTour SQL embeds the
-  // node_identity row id as `origin_node`, so a fresh deploy that
-  // hasn't run `gen:node-key` would crash with a NOT NULL error.
+  // node_identity row id as `origin_node`, so running this before
+  // that row is written would crash with a NOT NULL error.
   // Surface as 503 identity_missing instead.
   const identity = await getNodeIdentity(context.env.CATALOG_DB!)
   if (!identity) {
     return jsonError(
       503,
       'identity_missing',
-      'Node identity has not been provisioned. Run `npm run gen:node-key`.',
+      IDENTITY_MISSING_MESSAGE,
     )
   }
   let body: unknown

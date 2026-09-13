@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * Constants shared by the publisher API (`functions/`), the GHA
  * runner CLI (`cli/`), and the portal (`src/`) for the Zyra
@@ -20,10 +23,13 @@
  * into `process` — `transform metadata` still works as a
  * deprecated alias (also named `scan-frames`), so both spellings
  * are allowlisted until curated templates settle on `process`.
+ *
+ * `reproject` (NOAA-GSL/zyra#295/#306) was added together with the
+ * runner bump to zyra v0.1.49, the first release carrying it.
  */
 export const ZYRA_STAGE_ALLOWLIST: Readonly<Record<string, readonly string[]>> = {
   acquire: ['http', 'ftp', 's3'],
-  process: ['decode-grib2', 'extract-variable', 'convert-format', 'metadata', 'scan-frames', 'pad-missing'],
+  process: ['decode-grib2', 'extract-variable', 'convert-format', 'reproject', 'metadata', 'scan-frames', 'pad-missing'],
   transform: ['metadata', 'scan-frames'],
   visualize: ['heatmap', 'contour', 'animate', 'compose-video'],
   export: ['local'],
@@ -31,8 +37,30 @@ export const ZYRA_STAGE_ALLOWLIST: Readonly<Record<string, readonly string[]>> =
 
 /** Bounds on a stored pipeline. */
 export const MAX_PIPELINE_STAGES = 12
-export const MAX_PIPELINE_JSON_BYTES = 32 * 1024
+/** Size of the whole stored pipeline.
+ *
+ * Raised from 32 KiB alongside the list bound below. A per-frame
+ * pipeline repeats a long templated URL once per list, so the byte
+ * count grows with frame count and hits this before anything else
+ * does: an 85-frame RRFS forecast serialises to ~27 KiB, i.e. 83% of
+ * the old bound. Raising only the item count would have shipped a
+ * pipeline one edit — a longer palette URL — away from failing. */
+export const MAX_PIPELINE_JSON_BYTES = 64 * 1024
 export const MAX_PIPELINE_ARG_LENGTH = 2000
+/** Items in a single array-valued pipeline arg (`inputs`,
+ *  `output_names`, …).
+ *
+ * Was 16, which is exactly the frame count of the first workflow
+ * written against it — the bound and its only consumer were the same
+ * size, so nothing had pushed on it. It is a real limit though: a
+ * forecast that wants an hourly frame per lead hour needs one list
+ * entry per frame, and RRFS publishes to f084.
+ *
+ * 128 is chosen to clear that (85) with room, while still refusing a
+ * runaway generated pipeline. These lists become CLI argv for the zyra
+ * container, so the bound is about keeping a stored pipeline sane
+ * rather than about any single downstream limit. */
+export const MAX_PIPELINE_ARG_LIST_ITEMS = 128
 
 /** Bounds on the metadata sidecar template. */
 export const MAX_METADATA_TEMPLATE_BYTES = 8 * 1024
@@ -59,17 +87,35 @@ export const METADATA_TEMPLATE_ALLOWED_FIELDS: readonly string[] = [
   'website_link',
 ]
 
-/** Placeholder names the runner can interpolate into template
- *  string values as `{{name}}`. The `data_*` trio derives from the
- *  pipeline's `frames-meta.json` when present (`start_datetime` /
- *  `end_datetime` / `period_seconds` per upstream's
- *  `_compute_frames_metadata()`). */
+/**
+ * Placeholder names the runner can interpolate into template string
+ * values. Two families, resolved differently:
+ *
+ *   - `{{name}}` — `run_date`, `run_id`, and the `data_*` trio. The
+ *     latter derives from the pipeline's `frames-meta.json` when
+ *     present (`start_datetime` / `end_datetime` / `period_seconds`
+ *     per upstream's `_compute_frames_metadata()`), and so reports
+ *     what the frames on disk actually are.
+ *   - `{{valid_iso:INTERVAL:LAG[:OFFSET]}}` — the valid time of a
+ *     forecast hour of the current cycle, from the same clock
+ *     arithmetic the pipeline args use. It always resolves and needs
+ *     no `scan-frames` stage, so it is how a dataset gets dates when
+ *     its frames carry cycle-relative names. It is a prediction
+ *     rather than an observation, though: `data_*` stays the
+ *     truthful choice when the frames are named by valid time and
+ *     `frames-meta.json` exists.
+ *
+ * Syntax and parsing live in `zyra-pipeline-args.ts`; this list only
+ * decides which names are in scope for a metadata template.
+ */
 export const METADATA_TEMPLATE_VARIABLES: readonly string[] = [
   'run_date',
   'run_id',
   'data_start',
   'data_end',
   'data_period',
+  'valid_iso',
+  'valid_compact',
 ]
 
 /**

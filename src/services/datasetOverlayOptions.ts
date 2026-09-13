@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * Pure helpers for the Phase 3e dataset-overlay rendering path.
  *
@@ -14,6 +17,8 @@
  */
 
 import type { Dataset, DatasetOverlayOptions } from '../types'
+import { RENDER_ENCODING_DATA_LUMA } from '../types/color-scale'
+import type { DisplayColorScale } from '../types/unit-scale'
 
 /**
  * Is a `celestialBody` string the SOS convention for "Earth"?
@@ -53,6 +58,12 @@ export function isEarthBody(name: string | null | undefined): boolean {
  * emission, `celestialBody` is propagated verbatim regardless
  * of value so the renderer sees what the catalog actually
  * said.
+ *
+ * `colorScale` joins the same bundle. It is the single field that
+ * carries data-encoded mode to all four render surfaces, and it is
+ * only ever set alongside `renderEncoding: 'data-luma'` — a dataset
+ * without that pairing is a picture and takes exactly the path it
+ * takes today, which is the backwards-compatibility guarantee.
  */
 export function overlayOptionsFromDataset(
   dataset: Dataset,
@@ -62,7 +73,9 @@ export function overlayOptionsFromDataset(
     typeof dataset.lonOrigin === 'number' && Number.isFinite(dataset.lonOrigin)
   const hasFlip = dataset.isFlippedInY === true
   const hasNonEarthBody = !isEarthBody(dataset.celestialBody)
-  if (!hasBbox && !hasLonOrigin && !hasFlip && !hasNonEarthBody) {
+  const colorScale = dataEncodedScale(dataset)
+  const hasAlphaStream = carriesAlphaStream(dataset)
+  if (!hasBbox && !hasLonOrigin && !hasFlip && !hasNonEarthBody && !colorScale && !hasAlphaStream) {
     return undefined
   }
   return {
@@ -70,5 +83,40 @@ export function overlayOptionsFromDataset(
     lonOrigin: dataset.lonOrigin,
     isFlippedInY: dataset.isFlippedInY,
     celestialBody: dataset.celestialBody,
+    colorScale,
+    // Spread rather than always-present, so a picture dataset's bundle
+    // keeps exactly the shape it had before this field existed (the
+    // bundle is compared field-for-field in the tests, and is what the
+    // multi-output mirror stores as the frame's description).
+    ...(hasAlphaStream ? { hasAlphaStream: true } : {}),
+    // Identity travels with the geometry and the scale, so whatever
+    // ends up holding these options can say which dataset they
+    // describe without consulting app state.
+    datasetId: dataset.id,
+    datasetTitle: dataset.title,
   }
+}
+
+/** Does this dataset's media carry its own alpha channel?
+ *
+ *  The realtime and forecast overlay streams do: they are sparse
+ *  transparent VP9/DASH overlays, and drawing them opaque leaks RGB
+ *  out of fully transparent texels (a white fringe around every
+ *  sparse feature). Everything else in the catalog is a picture, and
+ *  a picture takes the opaque path — the same guarantee `colorScale`
+ *  makes for data-encoded datasets.
+ *
+ *  Two signals, because both travel on exactly these rows: the DASH
+ *  format `fetchRealtimeDashDatasets` mints, and the `realtimeKind`
+ *  tag that says the row came from the realtime registry. */
+function carriesAlphaStream(dataset: Dataset): boolean {
+  return dataset.format === 'application/dash+xml' || dataset.realtimeKind !== undefined
+}
+
+/** The palette, but only for a dataset that actually declares itself
+ *  data-encoded. A `colorScale` without `renderEncoding` is inert by
+ *  contract, so it must not reach a shader. */
+function dataEncodedScale(dataset: Dataset): DisplayColorScale | undefined {
+  if (dataset.renderEncoding !== RENDER_ENCODING_DATA_LUMA) return undefined
+  return dataset.colorScale
 }

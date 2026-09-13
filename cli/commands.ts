@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * Command implementations for the `terraviz` CLI.
  *
@@ -737,6 +740,17 @@ Commands:
                                       its embed job. Use after wiring up
                                       Vectorize on a catalog that was already
                                       populated, or for a model-version bump.
+
+  import-events [--source-url=<url>] [--file=<path>] [--pace-ms=N]
+                [--dry-run]
+                                      Ingest current events from NASA EONET into
+                                      the catalog as proposed events, running the
+                                      matcher to propose dataset links. Idempotent
+                                      on (feed_id, external_id) — re-runs refresh
+                                      open events instead of duplicating. --file
+                                      reads a local EONET JSON instead of fetching;
+                                      --dry-run prints the plan. Typically run on a
+                                      schedule with a service token.
 
   verify-deploy [--skip-publish-checks]
                                       Run the post-deploy smoke-test checklist

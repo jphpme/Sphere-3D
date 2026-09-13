@@ -1,7 +1,11 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 import { describe, it, expect } from 'vitest'
 import { onRequestPost as transcribe } from './transcribe'
 import { onRequestPost as synthesize } from './synthesize'
 import { isVoiceKilled, arrayBufferToBase64, isAllowedOrigin, type VoiceEnv } from './_voice-lib'
+import { streamConfigured, buildGatewayUrl } from './stream'
 
 const ORIGIN = 'https://preview.terraviz.pages.dev'
 const URL_T = `${ORIGIN}/api/voice/transcribe`
@@ -126,5 +130,44 @@ describe('synthesize', () => {
   it('returns 503 when KILL_VOICE is set', async () => {
     const res = await req({ ...aiOk({ audio: 'AAA' }), KILL_VOICE: 'true' }, { text: 'Hi' })
     expect(res.status).toBe(503)
+  })
+})
+
+describe('voice stream proxy helpers', () => {
+  it('streamConfigured requires all three gateway settings', () => {
+    expect(streamConfigured({})).toBe(false)
+    expect(streamConfigured({ CF_ACCOUNT_ID: 'a', CF_AI_GATEWAY: 'g' })).toBe(false)
+    expect(streamConfigured({ CF_ACCOUNT_ID: 'a', CF_AI_GATEWAY: 'g', CF_AIG_TOKEN: 't' })).toBe(true)
+    // Whitespace-only counts as unset — otherwise the deploy looks
+    // configured and every socket dies at the gateway instead.
+    expect(streamConfigured({ CF_ACCOUNT_ID: 'a', CF_AI_GATEWAY: 'g', CF_AIG_TOKEN: '  ' })).toBe(
+      false,
+    )
+  })
+
+  it('buildGatewayUrl targets Nova-3 linear16 16k with interim results + language', () => {
+    const url = buildGatewayUrl({ CF_ACCOUNT_ID: 'acct', CF_AI_GATEWAY: 'gw', CF_AIG_TOKEN: 't' }, 'es-MX')
+    expect(url).toContain('wss://gateway.ai.cloudflare.com/v1/acct/gw/workers-ai?')
+    expect(url).toContain('model=%40cf%2Fdeepgram%2Fnova-3')
+    expect(url).toContain('encoding=linear16')
+    expect(url).toContain('sample_rate=16000')
+    expect(url).toContain('interim_results=true')
+    expect(url).toContain('language=es') // base language only
+  })
+
+  it('buildGatewayUrl honours a model override', () => {
+    const url = buildGatewayUrl({ CF_ACCOUNT_ID: 'a', CF_AI_GATEWAY: 'g', CF_AIG_TOKEN: 't', VOICE_STREAM_MODEL: '@cf/deepgram/flux' }, 'en')
+    expect(url).toContain('model=%40cf%2Fdeepgram%2Fflux')
+  })
+
+  it('buildGatewayUrl trims the account id, gateway name, and model', () => {
+    // These land in the URL path, where a trailing newline routes
+    // the socket somewhere that does not exist.
+    const url = buildGatewayUrl(
+      { CF_ACCOUNT_ID: ' acct\n', CF_AI_GATEWAY: 'gw ', CF_AIG_TOKEN: 't', VOICE_STREAM_MODEL: ' @cf/deepgram/flux\n' },
+      'en',
+    )
+    expect(url).toContain('wss://gateway.ai.cloudflare.com/v1/acct/gw/workers-ai?')
+    expect(url).toContain('model=%40cf%2Fdeepgram%2Fflux')
   })
 })

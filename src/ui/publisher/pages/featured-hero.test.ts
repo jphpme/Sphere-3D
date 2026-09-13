@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { renderFeaturedHeroPage } from './featured-hero'
 
@@ -41,12 +44,41 @@ beforeEach(() => {
 })
 
 describe('renderFeaturedHeroPage', () => {
-  it('shows a restricted card for a non-privileged publisher', async () => {
-    const routes = baseRoutes()
+  it('shows a read-only view (no editing controls) for a non-privileged publisher with no pin', async () => {
+    const routes = baseRoutes() // hero: null
     routes['/api/v1/publish/me'] = { body: { role: 'publisher', is_admin: false } }
     await renderFeaturedHeroPage(mount, { fetchFn: mockFetch(routes) })
-    expect(mount.querySelector('.publisher-hero-restricted')).not.toBeNull()
+    // No editing controls at all.
     expect(mount.querySelector('.publisher-hero-select')).toBeNull()
+    expect(mount.querySelector('.publisher-button')).toBeNull()
+    // The view-only notice + empty state render.
+    expect(mount.querySelector('.publisher-hero-intro')?.textContent).toContain('view-only')
+    expect(mount.querySelector('.publisher-hero-readonly-meta')?.textContent).toContain(
+      'No dataset is currently featured',
+    )
+  })
+
+  it('shows the currently-featured dataset read-only for a non-privileged publisher', async () => {
+    const routes = baseRoutes()
+    routes['/api/v1/publish/me'] = { body: { role: 'publisher', is_admin: false } }
+    routes['/api/v1/featured-hero'] = {
+      body: {
+        hero: {
+          datasetId: DS,
+          window: { start: '2026-07-01T00:00:00Z', end: '2026-07-08T00:00:00Z' },
+          headline: 'Storm of the week',
+        },
+      },
+    }
+    await renderFeaturedHeroPage(mount, { fetchFn: mockFetch(routes) })
+    // Read-only preview card with the pinned dataset's title/headline.
+    expect(mount.querySelector('.publisher-hero-select')).toBeNull()
+    expect(mount.querySelector('.publisher-button')).toBeNull()
+    expect(mount.querySelector('.hero-panel-title')?.textContent).toBe('Storm of the week')
+    // Window + headline meta lines render.
+    const meta = Array.from(mount.querySelectorAll('.publisher-hero-readonly-meta')).map(n => n.textContent)
+    expect(meta.some(m => m?.includes('Active'))).toBe(true)
+    expect(meta.some(m => m?.includes('Storm of the week'))).toBe(true)
   })
 
   it('renders the form with dataset options for a privileged publisher', async () => {
@@ -81,7 +113,7 @@ describe('renderFeaturedHeroPage', () => {
     const fetchFn = mockFetch(baseRoutes())
     await renderFeaturedHeroPage(mount, { fetchFn })
     const callsBefore = fetchFn.mock.calls.length
-    ;(mount.querySelector('.publisher-btn-primary') as HTMLButtonElement).click()
+    ;(mount.querySelector('.publisher-button-primary') as HTMLButtonElement).click()
     await flush()
     expect(mount.querySelector('.publisher-hero-status-error')?.textContent).toBeTruthy()
     // No write request fired.
@@ -94,7 +126,7 @@ describe('renderFeaturedHeroPage', () => {
     const fetchFn = mockFetch(routes)
     await renderFeaturedHeroPage(mount, { fetchFn })
     ;(mount.querySelector('.publisher-hero-select') as HTMLSelectElement).value = DS
-    ;(mount.querySelector('.publisher-btn-primary') as HTMLButtonElement).click()
+    ;(mount.querySelector('.publisher-button-primary') as HTMLButtonElement).click()
     await flush()
     const putCall = fetchFn.mock.calls.find(c => (c[1] as RequestInit)?.method === 'PUT')
     expect(putCall).toBeTruthy()
@@ -111,7 +143,7 @@ describe('renderFeaturedHeroPage', () => {
     ;(mount.querySelector('#hero-start-time') as HTMLInputElement).value = '09:00'
     ;(mount.querySelector('#hero-end-date') as HTMLInputElement).value = '2026-06-01'
     ;(mount.querySelector('#hero-end-time') as HTMLInputElement).value = '17:30'
-    ;(mount.querySelector('.publisher-btn-primary') as HTMLButtonElement).click()
+    ;(mount.querySelector('.publisher-button-primary') as HTMLButtonElement).click()
     await flush()
     const putCall = fetchFn.mock.calls.find(c => (c[1] as RequestInit)?.method === 'PUT')!
     const body = JSON.parse((putCall[1] as RequestInit).body as string) as { window: { start: string; end: string } }
@@ -131,7 +163,7 @@ describe('renderFeaturedHeroPage', () => {
     const fetchFn = mockFetch(routes)
     await renderFeaturedHeroPage(mount, { fetchFn })
     ;(mount.querySelector('.publisher-hero-select') as HTMLSelectElement).value = DS
-    ;(mount.querySelector('.publisher-btn-primary') as HTMLButtonElement).click()
+    ;(mount.querySelector('.publisher-button-primary') as HTMLButtonElement).click()
     await flush()
     expect(mount.querySelector('.publisher-hero-status-error')?.textContent).toBe('Bad window.')
   })
@@ -144,7 +176,7 @@ describe('renderFeaturedHeroPage', () => {
     routes['DELETE /api/v1/publish/featured-hero'] = { status: 204 }
     const fetchFn = mockFetch(routes)
     await renderFeaturedHeroPage(mount, { fetchFn })
-    ;(mount.querySelector('.publisher-btn:not(.publisher-btn-primary)') as HTMLButtonElement).click()
+    ;(mount.querySelector('.publisher-button:not(.publisher-button-primary)') as HTMLButtonElement).click()
     await flush()
     const delCall = fetchFn.mock.calls.find(c => (c[1] as RequestInit)?.method === 'DELETE')
     expect(delCall).toBeTruthy()
@@ -168,7 +200,7 @@ describe('renderFeaturedHeroPage', () => {
       return orig(input, init)
     })
     await renderFeaturedHeroPage(mount, { fetchFn })
-    const clearBtn = mount.querySelector('.publisher-btn:not(.publisher-btn-primary)') as HTMLButtonElement
+    const clearBtn = mount.querySelector('.publisher-button:not(.publisher-button-primary)') as HTMLButtonElement
     clearBtn.click(); await flush()
     const status = mount.querySelector('.publisher-hero-status') as HTMLElement
     expect(status.classList.contains('publisher-hero-status-error')).toBe(true) // first attempt errored
@@ -180,7 +212,7 @@ describe('renderFeaturedHeroPage', () => {
   it('mounts inside a publisher-shell main landmark', async () => {
     await renderFeaturedHeroPage(mount, { fetchFn: mockFetch(baseRoutes()) })
     expect(mount.querySelector('main.publisher-shell')).not.toBeNull()
-    // The restricted path also gets the landmark.
+    // The read-only (non-privileged) path also gets the landmark.
     const r = baseRoutes()
     r['/api/v1/publish/me'] = { body: { role: 'publisher', is_admin: false } }
     mount.replaceChildren()
@@ -200,10 +232,10 @@ describe('renderFeaturedHeroPage', () => {
     const routes = baseRoutes() // hero: null → no pin
     routes['PUT /api/v1/publish/featured-hero'] = { status: 500 }
     await renderFeaturedHeroPage(mount, { fetchFn: mockFetch(routes) })
-    const clearBtn = mount.querySelector('.publisher-btn:not(.publisher-btn-primary)') as HTMLButtonElement
+    const clearBtn = mount.querySelector('.publisher-button:not(.publisher-button-primary)') as HTMLButtonElement
     expect(clearBtn.disabled).toBe(true)
     ;(mount.querySelector('.publisher-hero-select') as HTMLSelectElement).value = DS
-    ;(mount.querySelector('.publisher-btn-primary') as HTMLButtonElement).click()
+    ;(mount.querySelector('.publisher-button-primary') as HTMLButtonElement).click()
     await flush()
     expect(clearBtn.disabled).toBe(true) // failed Set must not enable Clear
   })
@@ -212,10 +244,10 @@ describe('renderFeaturedHeroPage', () => {
     const routes = baseRoutes()
     routes['PUT /api/v1/publish/featured-hero'] = { body: { hero: { datasetId: DS, window: { start: '', end: '' } } } }
     await renderFeaturedHeroPage(mount, { fetchFn: mockFetch(routes) })
-    const clearBtn = mount.querySelector('.publisher-btn:not(.publisher-btn-primary)') as HTMLButtonElement
+    const clearBtn = mount.querySelector('.publisher-button:not(.publisher-button-primary)') as HTMLButtonElement
     expect(clearBtn.disabled).toBe(true)
     ;(mount.querySelector('.publisher-hero-select') as HTMLSelectElement).value = DS
-    ;(mount.querySelector('.publisher-btn-primary') as HTMLButtonElement).click()
+    ;(mount.querySelector('.publisher-button-primary') as HTMLButtonElement).click()
     await flush()
     expect(clearBtn.disabled).toBe(false)
   })

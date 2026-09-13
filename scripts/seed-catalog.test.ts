@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * Tests for the catalog migration scaffolding.
  *
@@ -8,7 +11,7 @@
  *      ("Per-PR" CI gates), reduced to a unit test that runs in
  *      milliseconds.
  *   2. The resulting schema matches the checked-in
- *      `migrations/catalog-schema.sql` snapshot. This is the
+ *      `schema/catalog-schema.sql` snapshot. This is the
  *      "schema diff" CI gate from the same section: schema changes
  *      require a regenerated snapshot in the same PR.
  *
@@ -40,6 +43,8 @@ const EXPECTED_TABLES = [
   'analytics_spatial_daily',
   'asset_uploads',
   'audit_events',
+  'blog_posts',
+  'current_events',
   'dataset_categories',
   'dataset_developers',
   'dataset_keywords',
@@ -47,14 +52,24 @@ const EXPECTED_TABLES = [
   'dataset_renditions',
   'dataset_tags',
   'datasets',
+  'event_categories',
+  'event_dataset_links',
+  'event_keywords',
   'featured_datasets',
+  'feed_connectors',
   'hero_override',
   'node_identity',
+  'node_profile',
+  'node_settings',
   'publishers',
   'tour_dataset_refs',
   'tours',
+  'video_index',
+  'video_sources',
   'workflow_runs',
   'workflows',
+  'youtube_channels',
+  'youtube_channels_disabled',
 ]
 
 const EXPECTED_INDEXES = [
@@ -69,14 +84,23 @@ const EXPECTED_INDEXES = [
   'idx_analytics_spatial_daily_layer',
   'idx_asset_uploads_dataset',
   'idx_audit_subject',
+  'idx_blog_posts_status',
+  'idx_current_events_feed_external',
+  'idx_current_events_origin_node',
+  'idx_current_events_owner',
+  'idx_current_events_status',
   'idx_datasets_legacy_id',
   'idx_datasets_publisher',
   'idx_datasets_updated_at',
   'idx_datasets_visibility',
+  'idx_event_dataset_links_dataset',
   'idx_featured_datasets_position',
+  'idx_feed_connectors_enabled',
   'idx_node_identity_singleton',
   'idx_renditions_dataset',
   'idx_tours_visibility',
+  'idx_video_index_host',
+  'idx_video_index_source',
   'idx_workflow_runs_active',
   'idx_workflow_runs_workflow',
   'idx_workflows_due',

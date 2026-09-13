@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { renderDatasetEditPage } from './dataset-edit'
 import type { PublisherDatasetDetail } from '../types'
@@ -96,6 +99,42 @@ describe('renderDatasetEditPage', () => {
     expect(mount.querySelector<HTMLInputElement>('#dataset-title')?.value).toBe(
       'Existing dataset',
     )
+  })
+
+  // The slug of a published dataset is its public URL, and the
+  // server refuses to rename it (`slug_locked`). Showing that up
+  // front beats letting the publisher type a new one and bounce off
+  // a 409 on save.
+  it('locks the slug field once the dataset is published', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(
+      detailResponse(dataset({ published_at: '2026-04-03T00:00:00Z' })),
+    )
+    await renderDatasetEditPage(mount, '01EDIT0000000000000000000', {
+      fetchFn: fetchFn as unknown as typeof fetch,
+    })
+    const slug = mount.querySelector<HTMLInputElement>('#dataset-slug')
+    expect(slug?.readOnly).toBe(true)
+    expect(slug?.value).toBe('edit-me')
+  })
+
+  it('leaves the slug field editable while the dataset is a draft', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(detailResponse(dataset()))
+    await renderDatasetEditPage(mount, '01EDIT0000000000000000000', {
+      fetchFn: fetchFn as unknown as typeof fetch,
+    })
+    expect(mount.querySelector<HTMLInputElement>('#dataset-slug')?.readOnly).toBe(false)
+  })
+
+  it('redirects a non-owner (can_edit=false) to the read-only detail page instead of the form', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(detailResponse(dataset({ can_edit: false })))
+    const navigate = vi.fn<(url: string) => void>()
+    await renderDatasetEditPage(mount, '01EDIT0000000000000000000', {
+      fetchFn: fetchFn as unknown as typeof fetch,
+      navigate,
+    })
+    expect(navigate).toHaveBeenCalledWith('/publish/datasets/01EDIT0000000000000000000')
+    // The form is not mounted for a read-only caller.
+    expect(mount.querySelector<HTMLInputElement>('#dataset-title')).toBeNull()
   })
 
   it('surfaces the existing data_ref via the asset uploader’s "current" line + the manual override input', async () => {

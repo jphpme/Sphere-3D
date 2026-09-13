@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * Tests for `cli/lib/r2-frames.ts` — the R2-backed frame cache for
  * real-time Zyra workflow runs (`docs/ZYRA_INTEGRATION_PLAN.md`
@@ -26,6 +29,7 @@ import { join } from 'node:path'
 import {
   buildWorkflowFramesPrefix,
   isoDurationToSeconds,
+  purgeFramesFromR2,
   restoreFramesFromR2,
   saveFramesToR2,
   windowFrameBudget,
@@ -195,6 +199,27 @@ describe('restoreFramesFromR2', () => {
     expect(result.restored).toBe(2)
     expect(readdirSync(dir).sort()).toEqual(['f_1.png', 'f_2.png'])
   })
+
+  it('is non-fatal: one frame failing does not abort the rest of the restore', async () => {
+    const { fetchImpl } = makeFakeR2({
+      [`${PREFIX}f_1.png`]: bytes('1'),
+      [`${PREFIX}f_2.png`]: bytes('2'),
+      [`${PREFIX}f_3.png`]: bytes('3'),
+    })
+    // Fail the GET of f_2 with a non-retryable 403 so the pool can't
+    // ride it out via retry — the point is the OTHER frames still land.
+    const flaky = (async (input: Request): Promise<Response> => {
+      const url = new URL(input.url)
+      if (input.method === 'GET' && !url.searchParams.has('list-type') && url.pathname.endsWith('f_2.png')) {
+        return new Response('denied', { status: 403 })
+      }
+      return fetchImpl(input)
+    }) as unknown as typeof fetch
+    const dir = tmpFramesDir()
+    const result = await restoreFramesFromR2(CONFIG, DATASET, dir, { fetchImpl: flaky })
+    expect(result.restored).toBe(2)
+    expect(readdirSync(dir).sort()).toEqual(['f_1.png', 'f_3.png'])
+  })
 })
 
 describe('saveFramesToR2', () => {
@@ -210,6 +235,24 @@ describe('saveFramesToR2', () => {
     // The already-cached frame is not re-PUT.
     expect(new TextDecoder().decode(store.get(`${PREFIX}f_20240101.png`))).toBe('cached')
     expect(new TextDecoder().decode(store.get(`${PREFIX}f_20240108.png`))).toBe('new')
+  })
+
+  it('is non-fatal: one frame PUT failing does not abort the rest of the save', async () => {
+    const { store, fetchImpl } = makeFakeR2()
+    const dir = tmpFramesDir()
+    for (const n of ['f_1.png', 'f_2.png', 'f_3.png']) writeFileSync(join(dir, n), n)
+    // Fail the PUT of f_2 with a non-retryable 403.
+    const flaky = (async (input: Request): Promise<Response> => {
+      const url = new URL(input.url)
+      if (input.method === 'PUT' && url.pathname.endsWith('f_2.png')) {
+        return new Response('denied', { status: 403 })
+      }
+      return fetchImpl(input)
+    }) as unknown as typeof fetch
+    const result = await saveFramesToR2(CONFIG, DATASET, dir, { fetchImpl: flaky })
+    // 2 of 3 uploaded; the failed frame is simply not cached.
+    expect(result.uploaded).toBe(2)
+    expect([...store.keys()].sort()).toEqual([`${PREFIX}f_1.png`, `${PREFIX}f_3.png`])
   })
 
   it('prunes the cache to the newest N frames (window-only retention)', async () => {
@@ -290,6 +333,39 @@ describe('saveFramesToR2', () => {
     expect(store.size).toBe(1)
   })
 
+  it('uploads a large window via the bounded worker pool', async () => {
+    const { store, fetchImpl } = makeFakeR2()
+    const dir = tmpFramesDir()
+    const names: string[] = []
+    for (let i = 1; i <= 25; i++) {
+      const name = `f_202401${String(i).padStart(2, '0')}.png`
+      writeFileSync(join(dir, name), `frame-${i}`)
+      names.push(name)
+    }
+    const result = await saveFramesToR2(CONFIG, DATASET, dir, { fetchImpl })
+    // Every frame lands despite the pool fanning the PUTs out — more
+    // items than the concurrency width exercises the worker loop.
+    expect(result.uploaded).toBe(25)
+    expect(store.size).toBe(25)
+    for (const name of names) expect(store.has(`${PREFIX}${name}`)).toBe(true)
+  })
+
+  it('still uploads every frame when concurrency is non-finite', async () => {
+    const { store, fetchImpl } = makeFakeR2()
+    const dir = tmpFramesDir()
+    for (const d of ['20240101', '20240108', '20240115']) {
+      writeFileSync(join(dir, `f_${d}.png`), d)
+    }
+    // A NaN concurrency must clamp to a real worker, not collapse the
+    // pool to zero workers and silently skip every upload.
+    const result = await saveFramesToR2(CONFIG, DATASET, dir, {
+      fetchImpl,
+      concurrency: Number.NaN,
+    })
+    expect(result.uploaded).toBe(3)
+    expect(store.size).toBe(3)
+  })
+
   it('is a no-op when the frames directory does not exist', async () => {
     const { store, fetchImpl } = makeFakeR2({ [`${PREFIX}f.png`]: bytes('x') })
     const result = await saveFramesToR2(CONFIG, DATASET, join(tmpFramesDir(), 'nope'), {
@@ -298,5 +374,37 @@ describe('saveFramesToR2', () => {
     expect(result).toEqual({ uploaded: 0, pruned: 0, kept: 0 })
     // Cache untouched — a missing workdir must not wipe the cache.
     expect(store.size).toBe(1)
+  })
+})
+
+describe('purgeFramesFromR2', () => {
+  it('deletes every cached frame under the dataset prefix', async () => {
+    const { store, fetchImpl } = makeFakeR2({
+      [`${PREFIX}20260725T120000.png`]: bytes('a'),
+      [`${PREFIX}w000.png`]: bytes('b'),
+      [`${PREFIX}w006.png`]: bytes('c'),
+    })
+    expect(await purgeFramesFromR2(CONFIG, DATASET, { fetchImpl })).toBe(3)
+    expect(store.size).toBe(0)
+  })
+
+  it('leaves non-frame objects and other datasets alone', async () => {
+    const other = 'ZZZZZZZZZZZZZZZZZZZZZZZZZZ'
+    const { store, fetchImpl } = makeFakeR2({
+      [`${PREFIX}a.png`]: bytes('a'),
+      // A sidecar under the same prefix: not a frame, so not ours.
+      [`${PREFIX}report.json`]: bytes('{}'),
+      [`${WORKFLOW_FRAMES_PREFIX}/${other}/a.png`]: bytes('b'),
+    })
+    expect(await purgeFramesFromR2(CONFIG, DATASET, { fetchImpl })).toBe(1)
+    expect([...store.keys()].sort()).toEqual([
+      `${WORKFLOW_FRAMES_PREFIX}/${other}/a.png`,
+      `${PREFIX}report.json`,
+    ].sort())
+  })
+
+  it('is a no-op on an empty cache', async () => {
+    const { fetchImpl } = makeFakeR2()
+    expect(await purgeFramesFromR2(CONFIG, DATASET, { fetchImpl })).toBe(0)
   })
 })

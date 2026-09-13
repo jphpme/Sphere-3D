@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * Scene manifest for the Weblate screenshot pipeline.
  *
@@ -28,8 +31,11 @@ import type { Page } from 'playwright'
 
 import { gotoApp } from './core/browser'
 import type { FixtureRule } from './core/fixtures'
+import type { ExpectedBadResponse } from './core/signals'
+import type { Box } from './core/types'
 import { analyticsFixtures, feedbackFixtures } from './fixtures/admin'
-import { publisherFixtures } from './fixtures/publisher'
+import { catalogReportFixtures } from './fixtures/catalog'
+import { blogPublicFixtures, publisherFixtures } from './fixtures/publisher'
 
 export interface Scene {
   /** Stable id — used as the screenshot filename and Weblate name. */
@@ -92,6 +98,17 @@ export interface Scene {
    * is always local + stubbed).
    */
   requiresFixtures?: boolean
+  /**
+   * Bad responses this scene is *supposed* to provoke.
+   *
+   * A scene that exists to capture a failure surface stubs the failure
+   * deliberately, and the report would otherwise badge it forever —
+   * which is how a badge stops being read. Declaring the expectation
+   * keeps the badge meaningful and keeps the scene honest: a *different*
+   * endpoint failing, or the same one failing with a different code,
+   * still reports.
+   */
+  expectedBadResponses?: ExpectedBadResponse[]
 }
 
 /** Open the catalog landing surface (the Browse overlay). */
@@ -108,7 +125,7 @@ async function openCatalog(page: Page): Promise<void> {
  * The portal lives behind Cloudflare Access with a Pages-Functions
  * API backend — neither exists against a local dev server. What
  * *does* render without a backend is the part translators most need
- * context for: the topbar + section tabs, page headings, and (for
+ * context for: the sidebar + section nav, page headings, and (for
  * the static-form pages) field labels/placeholders. Every page
  * mounts its chrome synchronously before fetching data.
  *
@@ -121,7 +138,7 @@ async function openCatalog(page: Page): Promise<void> {
  */
 async function openPublish(page: Page, path: string): Promise<void> {
   await gotoApp(page, path)
-  await page.locator('#publisher-root .publisher-topbar').waitFor({ state: 'visible' })
+  await page.locator('#publisher-root .publisher-sidebar').waitFor({ state: 'visible' })
 }
 
 /**
@@ -173,6 +190,76 @@ async function openGlobe(page: Page): Promise<void> {
   await page.locator('#tools-menu-toggle').waitFor({ state: 'visible' })
 }
 
+/**
+ * Load the data-encoded fixture dataset onto the globe from the browse
+ * overlay, and wait for its colorbar to mount.
+ *
+ * Goes through the real browse card rather than a deep link so the
+ * scene exercises the path a viewer actually takes — and so a
+ * regression in `refreshPanelLegends` (which decides colorbar vs.
+ * legend image) is what fails, rather than being bypassed.
+ */
+async function openDataEncodedDataset(page: Page): Promise<void> {
+  await page.locator('#browse-search').fill('smoke')
+  const card = page.locator('.browse-card').first()
+  await card.waitFor({ state: 'visible' })
+  // The card's own Load button, not the card: clicking the card body
+  // opens its detail rather than loading the dataset, which leaves the
+  // browse overlay up and no globe behind it.
+  await card.locator('.browse-card-load').click()
+  await page.locator('.panel-colorbar').first().waitFor({ state: 'visible' })
+}
+
+/**
+ * Pick a point on `canvas` at the given fractions, moved clear of a
+ * fixed overlay panel if it would otherwise land on it.
+ *
+ * Exported for tests: a click that lands on a panel instead of the map
+ * fails as a bare 30-second `waitFor` timeout on whatever the map was
+ * supposed to produce, which says nothing about the cause. That is not
+ * hypothetical — see `analyze-panel`, where it broke one viewport for
+ * a week and froze the whole repository's visual baseline.
+ *
+ * A point that would not land on the panel is returned untouched, so a
+ * layout the panel does not cover is unaffected pixel for pixel. Only
+ * one that would land on it takes `fy` of the clear strip above the
+ * panel instead. Only the strip *above* is used: these panels anchor
+ * to the bottom edge, so below is where there is nothing.
+ *
+ * "Would land on it" tests both axes. Testing x alone is not a
+ * conservative approximation of that — it moves points that share the
+ * panel's columns while sitting well above its top edge, which for a
+ * bottom-anchored panel is most of the canvas above it.
+ */
+export function pointClearOfPanel(
+  canvas: Box,
+  panel: Box | null,
+  fx: number,
+  fy: number,
+  minClear = 120,
+): { x: number; y: number } {
+  const x = canvas.x + canvas.width * fx
+  const y = canvas.y + canvas.height * fy
+  if (panel === null) return { x, y }
+
+  const onPanel =
+    x >= panel.x && x <= panel.x + panel.width &&
+    y >= panel.y && y <= panel.y + panel.height
+  if (!onPanel) return { x, y }
+
+  const clear = panel.y - canvas.y
+  if (clear < minClear) {
+    throw new Error(
+      `pointClearOfPanel: only ${Math.round(clear)}px of canvas is clear of the ` +
+        `panel (need ${minClear}px). The panel has grown or the viewport has ` +
+        'shrunk; give the scene its own geometry rather than widening this ' +
+        'threshold — a click that lands on the panel fails as an unrelated ' +
+        'timeout somewhere downstream.',
+    )
+  }
+  return { x, y: canvas.y + clear * fy }
+}
+
 export const scenes: Scene[] = [
   {
     name: 'catalog-landing',
@@ -181,6 +268,7 @@ export const scenes: Scene[] = [
     // fresh capture, so its thumbnail/title differ run-to-run — mask it
     // out of the diff (it's prominent on mobile and flapped the gate).
     masks: ['#hero-panel'],
+    fixtures: catalogReportFixtures(),
     async setup(page) {
       await openCatalog(page)
     },
@@ -189,6 +277,7 @@ export const scenes: Scene[] = [
     name: 'browse-filters-open',
     description:
       'Browse overlay with the inline filter rail and an active facet filter applied',
+    fixtures: catalogReportFixtures(),
     async setup(page) {
       await openCatalog(page)
       // At the capturer's 1440px desktop viewport the Cards view shows
@@ -206,6 +295,7 @@ export const scenes: Scene[] = [
   {
     name: 'browse-search-active',
     description: 'Browse overlay with an active search query and the clear button shown',
+    fixtures: catalogReportFixtures(),
     async setup(page) {
       await openCatalog(page)
       await page.locator('#browse-search').fill('ocean')
@@ -216,6 +306,7 @@ export const scenes: Scene[] = [
   {
     name: 'orbit-chat-open',
     description: 'Orbit (digital docent) chat panel opened from the browser',
+    fixtures: catalogReportFixtures(),
     async setup(page) {
       await openCatalog(page)
       await page.locator('#browse-chat-btn').click()
@@ -225,6 +316,7 @@ export const scenes: Scene[] = [
   {
     name: 'help-panel',
     description: 'Help & feedback panel (Guide tab + feedback form)',
+    fixtures: catalogReportFixtures(),
     async setup(page) {
       await openCatalog(page)
       await page.locator('#help-trigger-browse').click()
@@ -237,6 +329,7 @@ export const scenes: Scene[] = [
     // The cytoscape force layout settles to slightly different pixel
     // positions per run; mask it so the diff doesn't flap.
     masks: ['#browse-graph'],
+    fixtures: catalogReportFixtures(),
     // The Graph toggle is dropped on portrait phones (Cards + Map only),
     // so only capture this on wider viewports.
     minWidth: 769,
@@ -249,6 +342,7 @@ export const scenes: Scene[] = [
   {
     name: 'browse-timeline-view',
     description: 'Browse overlay switched to the Timeline view',
+    fixtures: catalogReportFixtures(),
     // Like Graph, the Timeline toggle is absent on portrait phones.
     minWidth: 769,
     async setup(page) {
@@ -263,6 +357,7 @@ export const scenes: Scene[] = [
     // MapLibre renders tiles asynchronously and non-deterministically;
     // mask the map canvas so only the surrounding chrome is diffed.
     masks: ['#browse-map'],
+    fixtures: catalogReportFixtures(),
     async setup(page) {
       await openCatalog(page)
       await page.locator('#browse-view-mode [data-view-mode="map"]').click()
@@ -279,12 +374,15 @@ export const scenes: Scene[] = [
     name: 'tools-menu',
     description:
       'Globe view — Tools popover (view toggles, layout picker, Orbit settings entry)',
-    // The WebGL globe renders behind the popover and is
-    // non-deterministic (rotation, tiles) — mask it out of the diff.
-    masks: ['#map-grid'],
+    // The WebGL globe renders behind the popover and is non-deterministic
+    // (rotation, tiles). The report capturer hides `#map-grid` before
+    // every shot (`stabilizeBackdrop`), so no per-scene mask is needed —
+    // and dropping it lets the full-viewport shot diff the popover instead
+    // of being painted over by a full-viewport mask.
     // The popover is the focus; emit a tight crop of it alongside the
     // full-viewport shot.
     crop: '#tools-menu-popover',
+    fixtures: catalogReportFixtures(),
     // The full globe renders behind the popover. In the Weblate
     // capturer (long-lived shared browser, full-page screenshots) that
     // GPU load makes the *following* scenes' captures fail, so opt this
@@ -300,6 +398,7 @@ export const scenes: Scene[] = [
     name: 'orbit-settings',
     description:
       'Orbit chat — settings form (LLM endpoint, model, reading level)',
+    fixtures: catalogReportFixtures(),
     async setup(page) {
       await openCatalog(page)
       await page.locator('#browse-chat-btn').click()
@@ -308,9 +407,187 @@ export const scenes: Scene[] = [
       await page.locator('#chat-settings').waitFor({ state: 'visible' })
     },
   },
+  {
+    name: 'embed-globe',
+    description:
+      'Embed mode (?embed=1) — globe with the app shell stripped for iframe hosting (no tools bar, help, chat trigger, or home button)',
+    fixtures: catalogReportFixtures(),
+    // Boots the full WebGL globe (embed mode is presentational — the same
+    // app, minus chrome), so it carries the same GPU pressure that
+    // destabilizes the Weblate capturer's shared browser as the other
+    // globe scenes; and embed mode renders no unique translatable strings.
+    // Report-capturer only. The report capturer hides `#map-grid` via
+    // stabilizeBackdrop, so the shot is the stripped shell, not the globe.
+    skipWeblate: true,
+    async setup(page) {
+      await gotoApp(page, '/?embed=1')
+      // The mode class is applied synchronously at boot (before the WebGL
+      // check), so it is set even on a headless capture.
+      await page.locator('body.embed-mode').waitFor()
+      // Assert the app-shell chrome stays suppressed, so a regression that
+      // re-introduces it fails the capture loudly rather than silently.
+      await page.locator('#map-controls').waitFor({ state: 'hidden' })
+    },
+  },
+
+  {
+    name: 'colorbar-controls',
+    description:
+      'Colour & range controls for a data-encoded dataset — palette swatches, contrast stretch, and the value threshold, opened from the floating colorbar',
+    fixtures: catalogReportFixtures(),
+    // Loads a dataset onto the WebGL globe, so it carries the same GPU
+    // pressure as the other globe scenes; and the controls are captured
+    // as a crop, which the Weblate capturer ignores anyway.
+    skipWeblate: true,
+    crop: '.colorbar-controls',
+    async setup(page) {
+      await openCatalog(page)
+      await openDataEncodedDataset(page)
+      // The colorbar replaces the uploaded legend image for a
+      // data-encoded row; asserting on it here means a regression that
+      // silently falls back to the image legend fails the capture.
+      await page.locator('.panel-colorbar').first().click()
+      await page.locator('.colorbar-controls').waitFor({ state: 'visible' })
+    },
+  },
+
+  {
+    name: 'analyze-panel',
+    description:
+      'Analyze panel for a data-encoded dataset — region picker, palette-coloured histogram, area-weighted statistics, coverage, the quantisation caveat, and a drawn transect with its value profile. NOT captured: the zonal profile (between the statistics and the transect) and the contour section (below it). Both fall outside the full shot and this scene\'s single crop — see the note on `crop` below',
+    fixtures: catalogReportFixtures(),
+    // Loads a dataset onto the WebGL globe; the panel is captured as a
+    // crop, which the Weblate capturer ignores anyway.
+    skipWeblate: true,
+    // The panel now scrolls — statistics *and* a transect no longer fit
+    // in one screenful at either viewport. The full shot catches the top
+    // (histogram, tiles, coverage) and this crop catches the transect,
+    // which `Locator.screenshot` scrolls into view for us. Taken after
+    // the full shot, so that scroll cannot disturb it.
+    crop: '.analyze-transect-section',
+    async setup(page) {
+      await openCatalog(page)
+      await openDataEncodedDataset(page)
+      await page.locator('#tools-menu-toggle').click()
+      await page.locator('#tools-menu-popover:not(.hidden)').waitFor()
+      await page.locator('#tools-menu-analyze').click()
+      await page.locator('.analyze-panel').waitFor({ state: 'visible' })
+      // The statistics, not just the shell: a panel that mounted but
+      // computed nothing would otherwise capture as a plausible-looking
+      // empty state.
+      await page.locator('.analyze-stat').first().waitFor({ state: 'visible' })
+
+      // The transect is drawn into *this* scene rather than given one of
+      // its own. A separate scene meant one more page that loads the
+      // globe and takes a WebGL2 context, and the run is already close
+      // enough to the limit that adding it made three later scenes —
+      // including this one at the mobile viewport — fail to get a
+      // sampler and render the empty state instead. One scene, both
+      // surfaces: the transect section renders below the statistics, so
+      // the crop is a superset of what this captured before.
+      await page.locator('.analyze-transect-section button').first().click()
+      // Clicks in canvas space rather than by lat/lon, because reading
+      // the pointer's map coordinates is the path being exercised.
+      const globe = page.locator('.map-viewport canvas').first()
+      const box = await globe.boundingBox()
+      if (!box) throw new Error('analyze-panel: no globe canvas to click')
+
+      // The panel is `position: fixed` *over* the globe, so a point
+      // chosen as a fraction of the canvas can land on the panel rather
+      // than the map — and then the map never sees the click, no
+      // endpoint is set, and the wait below times out 30 s later saying
+      // only that `.analyze-transect` never appeared.
+      //
+      // That is not hypothetical: it is why this scene failed at the
+      // mobile viewport on every run from at least 2026-08-30. At
+      // ≤600px `analyze.css` swaps the panel to `inset-inline`, so it
+      // spans the full width instead of sitting in the bottom-right
+      // corner, and at its `max-block-size` of 34rem it covers y≈284
+      // to 828 of an 844px-tall viewport. Both old points (38% and 56%
+      // of the canvas) sat inside that. On desktop the same points are
+      // far to the *left* of a 352px-wide panel, which is why only one
+      // viewport ever broke — and why a hardcoded pair of fractions is
+      // the wrong shape for this: it encodes one viewport's layout.
+      //
+      // So derive the points from where the panel actually is. A point
+      // that would not land on the panel keeps its original position
+      // (desktop is unchanged, pixel for pixel); one that would land on
+      // it is placed in the clear strip above it instead.
+      const panel = await page.locator('.analyze-panel').boundingBox()
+      const a = pointClearOfPanel(box, panel, 0.4, 0.38)
+      const b = pointClearOfPanel(box, panel, 0.6, 0.56)
+      await page.mouse.click(a.x, a.y)
+      await page.mouse.click(b.x, b.y)
+      await page.locator('.analyze-transect').waitFor({ state: 'visible' })
+    },
+  },
 
   // ── Publisher portal ──────────────────────────────────────────
   // Populated via route-stub fixtures (Phase V7); see openPublish().
+  {
+    name: 'publish-overview',
+    description: 'Publisher portal — command-center Overview landing (populated via fixtures)',
+    // The Overview fans out beyond publisherFixtures' coverage; these
+    // extra rules (hero / feedback / analytics / public node-profile /
+    // workflow runs) precede the base set so the workflow-runs regex
+    // wins over the general `/publish/workflows` list rule.
+    fixtures: [
+      {
+        url: /\/publish\/workflows\/[^/?]+\/runs/,
+        json: {
+          runs: [
+            {
+              status: 'failed',
+              created_at: '2026-07-06T02:14:00Z',
+              finished_at: '2026-07-06T02:15:00Z',
+              error_summary: 'exit code 1',
+            },
+          ],
+        },
+      },
+      {
+        url: '/api/v1/featured-hero',
+        json: {
+          hero: {
+            datasetId: 'ds-hero',
+            window: { start: '2026-07-01T00:00:00Z', end: '2026-07-10T00:00:00Z' },
+            headline: 'Far-Flung Filaments of Fungi',
+          },
+        },
+      },
+      {
+        url: '/api/v1/publish/feedback',
+        json: {
+          data: {
+            byDay: [{ up: 22, down: 2 }],
+            recentFeedback: [
+              {
+                rating: 'thumbs-up',
+                comment: 'Orbit explained the temperature ramp perfectly.',
+                dataset_id: 'sst-2026-04',
+                created_at: '2026-07-08T09:00:00Z',
+              },
+              {
+                rating: 'thumbs-down',
+                comment: "Sea ice dataset wouldn't load on mobile.",
+                created_at: '2026-07-08T06:00:00Z',
+              },
+            ],
+          },
+        },
+      },
+      { url: '/api/v1/publish/analytics', json: { data: { totals: { sessions: 44200 } } } },
+      {
+        url: '/api/v1/node-profile',
+        json: { profile: { orgName: 'The Zyra Project', logoUrl: null } },
+      },
+      ...publisherFixtures({ admin: true }),
+    ],
+    async setup(page) {
+      await openPublish(page, '/publish/overview')
+      await page.locator('.publisher-overview').waitFor({ state: 'visible' })
+    },
+  },
   {
     name: 'publish-datasets',
     description: 'Publisher portal — datasets list (populated via fixtures)',
@@ -320,11 +597,51 @@ export const scenes: Scene[] = [
     },
   },
   {
+    name: 'publish-import',
+    description: 'Publisher portal — bulk import: method cards + validated manifest preview',
+    fixtures: publisherFixtures({ admin: true }),
+    async setup(page) {
+      await openPublish(page, '/publish/import')
+      // Inject a manifest so the ready/warning/error preview renders
+      // populated (the page parses + validates client-side; no backend).
+      const csv = [
+        'title,slug,format,data_ref,license',
+        'Sea Surface Temp — May 2026,sst-2026-05,mp4,https://example.org/sst.mp4,CC-BY-4.0',
+        'Arctic Sea Ice Extent — 2026,sea-ice-2026,mp4,https://example.org/ice.mp4,CC0-1.0',
+        'Global Nightlights 2026,nightlights-2026,png,https://example.org/nl.png,',
+        'Drought Risk — Q2 2026,drought-q2-2026,,,',
+        'CO2 Concentration 2026,co2-2026,png,https://example.org/co2.png,CC-BY-4.0',
+      ].join('\n')
+      await page.setInputFiles('.publisher-import-file-input', {
+        name: 'publisher-datasets.csv',
+        mimeType: 'text/csv',
+        buffer: Buffer.from(csv, 'utf-8'),
+      })
+      await page.locator('.publisher-import-preview').waitFor({ state: 'visible' })
+    },
+  },
+  {
     name: 'publish-dataset-new',
     description: 'Publisher portal — new-dataset form (field labels & placeholders)',
     fixtures: publisherFixtures(),
     async setup(page) {
       await openPublish(page, '/publish/datasets/new')
+    },
+  },
+  {
+    name: 'publish-dataset-data-encoded',
+    description:
+      'Publisher portal — new-dataset form, Media step: the data-encoded toggle and its colour-scale sidecar field',
+    fixtures: publisherFixtures(),
+    async setup(page) {
+      await openPublish(page, '/publish/datasets/new')
+      // The form is a stepper; the encoding controls live on the Media
+      // step, above the upload control.
+      await page.locator('.publisher-form-nav-link[data-section="ds-section-media"]').click()
+      await page.locator('#dataset-data-encoded').check()
+      // The sidecar field only exists once the mode is on, so wait for
+      // it rather than capturing the frame before it mounts.
+      await page.locator('#dataset-color-scale').waitFor({ state: 'visible' })
     },
   },
   {
@@ -341,6 +658,9 @@ export const scenes: Scene[] = [
     masks: ['.publisher-asset-uploader-generate-preview'],
     async setup(page) {
       await openPublish(page, '/publish/datasets/01HEXAMPLEDATASET00000001/edit')
+      // The dataset form is a stepper — open the Media section (where
+      // the thumbnail uploader lives) before interacting with it.
+      await page.locator('.publisher-form-nav-link[data-section="ds-section-media"]').click()
       // The thumbnail uploader's generator block (thumbnail kind only).
       await page.locator('.publisher-asset-uploader-generate').first().waitFor()
       // Feed a 2:1 equirectangular frame (the bundled Earth specular
@@ -379,19 +699,83 @@ export const scenes: Scene[] = [
     },
   },
   {
-    name: 'publish-import',
-    description: 'Publisher portal — import page',
-    fixtures: publisherFixtures(),
-    async setup(page) {
-      await openPublish(page, '/publish/import')
-    },
-  },
-  {
     name: 'publish-featured-hero',
     description: 'Publisher portal — "Right now" featured-hero override',
     fixtures: publisherFixtures({ admin: true }),
     async setup(page) {
       await openPublish(page, '/publish/featured-hero')
+    },
+  },
+  {
+    name: 'publish-events',
+    description: 'Publisher portal — current-events review queue (populated via fixtures)',
+    fixtures: publisherFixtures({ admin: true }),
+    async setup(page) {
+      // The detail pane's Suggested-media sources hit external hosts
+      // (Worldview snapshot preview, Commons geosearch) — stub them so
+      // the scene is deterministic and free of failed-request noise.
+      // An empty/invalid image body makes the card self-remove.
+      await page.route('https://wvs.earthdata.nasa.gov/**', r => r.fulfill({ status: 204, body: '' }))
+      await page.route('https://commons.wikimedia.org/**', r =>
+        r.fulfill({ status: 200, contentType: 'application/json', body: '{"query":{"pages":{}}}' }),
+      )
+      await page.route('https://earthquake.usgs.gov/**', r =>
+        r.fulfill({ status: 200, contentType: 'application/json', body: '{"features":[]}' }),
+      )
+      await openPublish(page, '/publish/events')
+      // Direction A master–detail: wait for the detail title (the first
+      // event auto-selects) so the capture includes the populated panes.
+      await page.locator('.publisher-events-detail-title').first().waitFor()
+    },
+  },
+  {
+    name: 'publish-feeds',
+    description: 'Publisher portal — current-events feed console (connectors + preset gallery)',
+    fixtures: publisherFixtures({ admin: true }),
+    async setup(page) {
+      await openPublish(page, '/publish/feeds')
+      await page.locator('.publisher-feeds-row').first().waitFor()
+    },
+  },
+  {
+    name: 'publish-node-profile',
+    description: 'Publisher portal — node / host-organization profile form + the admin Features toggles card (Phase 3d)',
+    fixtures: publisherFixtures({ admin: true }),
+    async setup(page) {
+      await openPublish(page, '/publish/node-profile')
+      await page.locator('#nodeprofile-org').waitFor()
+      await page.locator('.publisher-nodeprofile-feature-toggle').first().waitFor()
+    },
+  },
+  {
+    name: 'publish-blog',
+    description: 'Publisher portal — blog authoring list (Phase 3d)',
+    fixtures: publisherFixtures({ admin: true }),
+    async setup(page) {
+      await openPublish(page, '/publish/blog')
+      await page.locator('.publisher-blog-badge').first().waitFor()
+    },
+  },
+  {
+    name: 'publish-blog-edit',
+    description: 'Publisher portal — tabbed blog editor (Content / Sources / Media / AI draft)',
+    fixtures: publisherFixtures({ admin: true }),
+    async setup(page) {
+      await openPublish(page, '/publish/blog/new')
+      // Tabbed stepper — the Content tab is the default capture; the
+      // rail nav confirms the Sources/Media/AI-draft sections mounted.
+      await page.locator('#blog-title').waitFor()
+      await page.locator('.publisher-form-nav-link[data-section="blog-media"]').waitFor()
+      await page.locator('.publisher-form-nav-link[data-section="blog-aidraft"]').waitFor()
+    },
+  },
+  {
+    name: 'blog-public-post',
+    description: 'Public blog post page — sanitized markdown + dataset deep links + citation (Phase 3d)',
+    fixtures: blogPublicFixtures(),
+    async setup(page) {
+      await gotoApp(page, '/blog/city-lights-spread')
+      await page.locator('.blog-post-body h2').waitFor()
     },
   },
   {
@@ -469,6 +853,12 @@ export const scenes: Scene[] = [
     description: 'Publisher portal — datasets list, server-error card',
     fixtures: publisherFixtures({ datasets: 'error' }),
     requiresFixtures: true,
+    // The 500 *is* the scene: the fixture stubs it so the page renders
+    // its error card. Anchored rather than a bare substring, because
+    // `/publish/datasets/<id>` is a real route here (the fixtures stub
+    // it too) and a plain `includes` would suppress its failures as
+    // well — the opposite of what declaring an expectation is for.
+    expectedBadResponses: [{ url: /\/api\/v1\/publish\/datasets(\?|$)/, status: 500 }],
     async setup(page) {
       await openPublish(page, '/publish/datasets')
       await page.locator('.publisher-error').first().waitFor()

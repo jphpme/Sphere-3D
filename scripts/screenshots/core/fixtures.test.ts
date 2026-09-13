@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 import { describe, expect, it } from 'vitest'
 
 import { matchFixture, type FixtureRule } from './fixtures'
@@ -44,6 +47,18 @@ describe('matchFixture', () => {
 
   it('returns null when nothing matches', () => {
     expect(matchFixture(rules, 'http://h/api/other', 'GET')).toBeNull()
+  })
+
+  it('resolves a passthrough rule, and stub rules ahead of a trailing catch-all', () => {
+    const withPassthrough: FixtureRule[] = [
+      { url: '/api/v1/catalog', json: { datasets: [] } },
+      { url: '/api/', passthrough: true },
+    ]
+    const stub = matchFixture(withPassthrough, 'http://h/api/v1/catalog', 'GET')
+    expect(stub?.passthrough).toBeUndefined()
+    expect(stub?.body).toBe('{"datasets":[]}')
+    const tile = matchFixture(withPassthrough, 'http://h/api/tile/BlueMarble/0/0/0.jpg', 'GET')
+    expect(tile?.passthrough).toBe(true)
   })
 })
 

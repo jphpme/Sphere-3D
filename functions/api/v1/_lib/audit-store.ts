@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * Append-only writes to the `audit_events` table.
  *
@@ -32,6 +35,13 @@ export type AuditSubjectKind =
   | 'workflow'
   | 'analytics_day'
   | 'publisher'
+  | 'event'
+  | 'feed'
+  | 'node_profile'
+  | 'node_settings'
+  | 'blog_post'
+  | 'youtube_channel'
+  | 'video_source'
 
 /**
  * `action` is a free-form, dotted token recording *what happened*.
@@ -57,6 +67,30 @@ export type AuditAction =
   | 'publisher.suspend'
   | 'publisher.reactivate'
   | 'publisher.role_change'
+  | 'event.reviewed'
+  | 'event.ingested'
+  | 'event.refreshed'
+  | 'event.tour_generated'
+  | 'event.image_upload'
+  | 'youtube_channel.add'
+  | 'youtube_channel.remove'
+  | 'youtube_channel.disable'
+  | 'youtube_channel.enable'
+  | 'video_source.add'
+  | 'video_source.update'
+  | 'video_source.remove'
+  | 'video_source.refresh'
+  | 'feed.created'
+  | 'feed.updated'
+  | 'feed.deleted'
+  | 'node_profile.update'
+  | 'node_profile.logo_update'
+  | 'node_settings.update'
+  | 'blog.create'
+  | 'blog.update'
+  | 'blog.publish'
+  | 'blog.unpublish'
+  | 'blog.generate'
 
 export interface AuditEventInput {
   actor_kind: AuditActorKind

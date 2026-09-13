@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * Docent Service — orchestrates LLM-first responses with local fallback.
  *
@@ -8,7 +11,18 @@
 import type { Dataset, ChatMessage, ChatAction, DocentConfig, LegendCache, MapViewContext, LLMContextSnapshot, ReadingLevel } from '../types'
 import { streamChat, checkAvailability, type AvailabilityResult, type LLMMessage, type LLMContentPart, type LLMToolCall } from './llmProvider'
 import { isAvailable as isAppleIntelligenceAvailable, streamChatLocal } from './appleIntelligenceProvider'
-import { buildSystemPrompt, buildCompressedHistory, buildLanguageReminderMessage, getSearchCatalogTool, getSearchDatasetsTool, getListFeaturedDatasetsTool, getLoadDatasetTool, getLoadFrameTool, getFlyToTool, getSetTimeTool, getFitBoundsTool, getAddMarkerTool, getToggleLabelsTool, getHighlightRegionTool } from './docentContext'
+import { buildSystemPrompt, buildCompressedHistory, buildLanguageReminderMessage, getSearchCatalogTool, getSearchDatasetsTool, getListFeaturedDatasetsTool, getSearchEventsTool, getLoadDatasetTool, getLoadFrameTool, getFlyToTool, getSetTimeTool, getFitBoundsTool, getAddMarkerTool, getToggleLabelsTool, getHighlightRegionTool, getProbeValueTool, getSummarizeRegionTool, getFindExtremumTool } from './docentContext'
+import {
+  executeFindExtremum,
+  executeProbeValue,
+  executeSummarizeRegion,
+  analysisAvailability,
+  valuesQuestionKind,
+  type FindExtremumResult,
+  type SummarizeRegionResult,
+  type ResolvedScope,
+} from './docentAnalysisTools'
+import { fetchApprovedEvents, type PublicEvent } from './eventsService'
 import { parseIntent, generateResponse, searchDatasets, evaluateAutoLoad } from './docentEngine'
 import { clearDegraded as clearDegradedState, markDegraded as markDegradedState } from './docentDegradedState'
 import { apiFetch } from './catalogSource'
@@ -20,6 +34,11 @@ import { t } from '../i18n'
 
 // --- Constants ---
 const CONFIG_STORAGE_KEY = 'sos-docent-config'
+
+/** Max approved events injected into the `[CURRENT EVENTS]` block per turn.
+ *  The approved set is small in practice; the cap bounds token cost and
+ *  keeps the highest-weighted events visible. */
+const CURRENT_EVENTS_INJECTION_CAP = 12
 
 /**
  * Default vision-capable model for Cloudflare Workers AI. Gemma 4 26B A4B
@@ -260,6 +279,16 @@ export function loadConfig(): DocentConfig {
     const raw = localStorage.getItem(CONFIG_STORAGE_KEY)
     if (raw) {
       const parsed = JSON.parse(raw)
+      // Deliberately no apiKey trim here. The key is normalised
+      // where it is *used* — `llmProvider` trims before it builds
+      // the `Authorization: Bearer` header — rather than where it
+      // is read out of storage. Reading the field by name here
+      // gave CodeQL a sensitive-data source flowing into the
+      // localStorage write in `saveConfig`
+      // (js/clear-text-storage-of-sensitive-data), for a guard
+      // that covers nothing: the settings form has trimmed on
+      // save since before this config format existed, so a padded
+      // key cannot realistically be in storage to begin with.
       return { ...DEFAULT_CONFIG, ...parsed }
     }
   } catch {
@@ -276,6 +305,9 @@ export async function loadConfigWithKey(): Promise<DocentConfig> {
   const config = loadConfig()
   if (tauriInvoke) {
     try {
+      // Also deliberately untrimmed — see `loadConfig`. A padded
+      // keychain entry is normalised by `llmProvider` before it
+      // reaches the header, which is the only place it matters.
       config.apiKey = (await tauriInvoke('get_api_key')) as string
     } catch {
       logger.warn('[Docent] Failed to read API key from keychain')
@@ -412,6 +444,51 @@ export function executeSearchCatalog(
     }
     return result
   })
+}
+
+/** One approved event as the `search_events` tool returns it to the LLM.
+ *  No dataset id is exposed — the `<<EVENT:ID>>` marker resolves the dataset
+ *  client-side, so the model can't parrot an id into prose. */
+export interface EventSearchResult {
+  id: string
+  title: string
+  source_name: string
+  occurred: string
+}
+
+/** Default / max events `search_events` returns in one call. */
+const SEARCH_EVENTS_DEFAULT_LIMIT = 5
+const SEARCH_EVENTS_MAX_LIMIT = 20
+
+/**
+ * Execute a `search_events` tool call — a pure, in-memory keyword filter
+ * over the approved events already fetched for the turn (no network, works
+ * on any deploy). An empty query lists all approved events (capped by
+ * `limit`); otherwise a case-insensitive substring match over the event's
+ * title + summary. Returns the compact shape the LLM needs to surface an
+ * `<<EVENT:ID>>` marker — only these ids (plus the [CURRENT EVENTS] block)
+ * are valid event references.
+ */
+export function executeSearchEvents(
+  args: Record<string, unknown>,
+  events: readonly PublicEvent[],
+): { events: EventSearchResult[] } {
+  const query = typeof args.query === 'string' ? args.query.trim().toLowerCase() : ''
+  const rawLimit = typeof args.limit === 'number' && Number.isFinite(args.limit)
+    ? args.limit
+    : SEARCH_EVENTS_DEFAULT_LIMIT
+  const limit = Math.max(1, Math.min(SEARCH_EVENTS_MAX_LIMIT, Math.floor(rawLimit)))
+  const matched = query
+    ? events.filter(ev => `${ev.title} ${ev.summary ?? ''}`.toLowerCase().includes(query))
+    : events
+  return {
+    events: matched.slice(0, limit).map(ev => ({
+      id: ev.id,
+      title: ev.title,
+      source_name: ev.source.name,
+      occurred: (ev.occurredStart ?? ev.source.publishedAt ?? '').slice(0, 10),
+    })),
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -706,6 +783,11 @@ export type ExtractedGlobeAction =
    *  side resolution happens in `resolveFrameQuery` against the
    *  dataset's `frames` envelope. */
   | { type: 'load-frame'; datasetId: string; datasetTitle: string; frameQuery: string; displayName: string }
+  /** A cited current-event card from an `<<EVENT:ID>>` marker. The
+   *  accompanying dataset load + fly/seek are emitted as ordinary
+   *  load-dataset / fly-to / fit-bounds / set-time actions the marker
+   *  expands into, so this variant carries only the citation display. */
+  | { type: 'event-citation'; eventId: string; title: string; sourceName: string; sourceUrl: string }
 
 /**
  * Try to resolve the contents of a `<<LOAD:...>>` marker to a real
@@ -924,11 +1006,16 @@ function reconcileMarkerProse(text: string, datasets: Dataset[]): string {
 export function validateAndCleanText(
   text: string,
   datasets: Dataset[],
+  events: readonly PublicEvent[] = [],
 ): { cleanedText: string; validIds: Set<string>; invalidIds: Set<string>; globeActions: ExtractedGlobeAction[] } {
   const validIds = new Set<string>()
   const invalidIds = new Set<string>()
   const globeActions: ExtractedGlobeAction[] = []
   const datasetIdSet = new Set(datasets.map(d => d.id))
+  // Approved current events, keyed by uppercased id — the docent lowercases
+  // ULIDs about as often as it lowercases dataset ids, so match tolerantly.
+  const eventById = new Map<string, PublicEvent>()
+  for (const ev of events) eventById.set(ev.id.toUpperCase(), ev)
   // When the title-overlap fallback rescues a marker, remember the
   // mapping so the strip step downstream can rewrite the marker to
   // the canonical id (rather than leaving the LLM's title-shaped
@@ -1102,6 +1189,58 @@ export function validateAndCleanText(
     }
   }
 
+  // Extract <<EVENT:ID>> markers — a curator-approved current event
+  // (`docs/CURRENT_EVENTS_PLAN.md` §6.2). We expand each one, entirely
+  // from the approved event's own data (never LLM-authored numbers), into:
+  //   - an `event-citation` card (headline + cited source),
+  //   - a `load-dataset` of the dataset that explains it,
+  //   - a place move (`fly-to` for a point, `fit-bounds` for a box / named
+  //     region) and a `set-time` seek to when it happened.
+  // The load + fly + seek then ride the ordinary post-load flush the LLM's
+  // own <<LOAD>>+<<FLY>>+<<TIME>> sequences use. An id not present in the
+  // approved set is dropped (stripped below) — the anti-hallucination gate.
+  const EVENT_FLY_ALTITUDE_KM = 3000
+  for (const match of text.matchAll(/<?<EVENT:\s*([^>]+?)\s*>>?\n?/g)) {
+    const ev = eventById.get(match[1].trim().toUpperCase())
+    if (!ev) continue
+    // The card's contract is "one tap loads the dataset that explains it".
+    // If that dataset isn't in this client's catalog there's no Load button
+    // to anchor the card — and the deferred fly/seek would never flush
+    // (nothing loads to trigger it) — so drop the whole event this turn.
+    // The marker is still stripped from the prose below.
+    const datasetId = ev.datasetIds[0]
+    if (!datasetId || !datasetIdSet.has(datasetId)) continue
+    globeActions.push({
+      type: 'event-citation',
+      eventId: ev.id,
+      title: ev.title,
+      sourceName: ev.source.name,
+      sourceUrl: ev.source.url,
+    })
+    validIds.add(datasetId)
+    const g = ev.geometry
+    if (g.point) {
+      globeActions.push({ type: 'fly-to', lat: g.point.lat, lon: g.point.lon, altitude: EVENT_FLY_ALTITUDE_KM })
+    } else if (g.boundingBox) {
+      const { n, s, w, e } = g.boundingBox
+      globeActions.push({ type: 'fit-bounds', bounds: [w, s, e, n] })
+    } else if (g.regionName) {
+      const region = resolveRegion(g.regionName)
+      if (region) globeActions.push({ type: 'fit-bounds', bounds: region.bounds, label: region.name })
+    }
+    // Seek to the event's time only when the explaining dataset is actually
+    // seekable: `set-time` runs `seekToDate`, which needs an HLS <video>, so
+    // it only works on a video dataset with a time range. Image / sequence
+    // datasets (e.g. real-time clouds) have no seekable video — emitting a
+    // set-time there just surfaces a "no video dataset loaded" failure — so
+    // for those we fly to the place and leave the time control alone.
+    const dataset = datasets.find(x => x.id === datasetId)
+    const seekable = dataset?.format === 'video/mp4' && !!dataset.startTime && !!dataset.endTime
+    if (seekable && ev.occurredStart && !isNaN(new Date(ev.occurredStart).getTime())) {
+      globeActions.push({ type: 'set-time', isoDate: ev.occurredStart })
+    }
+  }
+
   // Fallback: parse bare `fly_to: lat, lon, alt` patterns (LLMs that ignore marker instructions)
   for (const match of text.matchAll(/\bfly_to\s*[:(\s]\s*([-\d.]+)\s*,\s*([-\d.]+)(?:\s*,\s*([-\d.]+))?\s*\)?/gi)) {
     const lat = parseFloat(match[1])
@@ -1185,6 +1324,9 @@ export function validateAndCleanText(
   cleanedText = cleanedText.replace(/<?<MARKER:[^>]+>>?\n?/g, '')
   cleanedText = cleanedText.replace(/<?<LABELS:[^>]+>>?\n?/g, '')
   cleanedText = cleanedText.replace(/<?<REGION:[^>]+>>?\n?/g, '')
+  // Strip <<EVENT:...>> markers — valid ones are carried forward as the
+  // event-citation + load + fly/seek actions; invalid ids just vanish.
+  cleanedText = cleanedText.replace(/<?<EVENT:[^>]+>>?\n?/g, '')
 
   // Strip bare fly_to/set_time text patterns (entire line)
   cleanedText = cleanedText.replace(/^.*\bfly_to\s*[:(\s]\s*[-\d.,\s]+\)?\s*$/gim, '')
@@ -1205,10 +1347,12 @@ async function* yieldActionsForValidIds(
   validIds: Set<string>,
   datasets: Dataset[],
   yieldedIds: Set<string>,
+  /** Gate for the measured-answer suggestion cap; defaults to open. */
+  allowSuggestion: () => boolean = () => true,
 ): AsyncGenerator<DocentStreamChunk> {
   for (const idStr of validIds) {
     const dataset = datasets.find(d => d.id === idStr)
-    if (dataset && !yieldedIds.has(dataset.id)) {
+    if (dataset && !yieldedIds.has(dataset.id) && allowSuggestion()) {
       yieldedIds.add(dataset.id)
       yield {
         type: 'action',
@@ -1231,8 +1375,10 @@ async function* emitValidatedActions(
   accumulatedText: string,
   datasets: Dataset[],
   yieldedIds: Set<string>,
+  events: readonly PublicEvent[] = [],
+  allowSuggestion: () => boolean = () => true,
 ): AsyncGenerator<DocentStreamChunk> {
-  const { cleanedText, validIds, invalidIds, globeActions } = validateAndCleanText(accumulatedText, datasets)
+  const { cleanedText, validIds, invalidIds, globeActions } = validateAndCleanText(accumulatedText, datasets, events)
   // Rewrite whenever the text was modified — covers stripped markers, hallucinated IDs,
   // and unresolved <<REGION:...>> names that still need to be removed from display.
   const needsRewrite = cleanedText !== accumulatedText
@@ -1242,7 +1388,7 @@ async function* emitValidatedActions(
   if (needsRewrite) {
     yield { type: 'rewrite', text: cleanedText }
   }
-  yield* yieldActionsForValidIds(validIds, datasets, yieldedIds)
+  yield* yieldActionsForValidIds(validIds, datasets, yieldedIds, allowSuggestion)
 
   // Yield globe-control actions extracted from inline markers
   for (const ga of globeActions) {
@@ -1269,6 +1415,17 @@ async function* emitValidatedActions(
           datasetTitle: ga.datasetTitle,
           frameQuery: ga.frameQuery,
           displayName: ga.displayName,
+        },
+      }
+    } else if (ga.type === 'event-citation') {
+      yield {
+        type: 'action',
+        action: {
+          type: 'event-citation',
+          eventId: ga.eventId,
+          title: ga.title,
+          sourceName: ga.sourceName,
+          sourceUrl: ga.sourceUrl,
         },
       }
     }
@@ -1353,12 +1510,31 @@ export async function* processMessage(
     // `turnIndex` is still computed above for `getRelevantQA` (which tunes
     // its output based on conversation depth), but is NOT passed to the
     // prompt builder anymore.
+    // §A6. One decision, read twice: it gates both the prompt's
+    // carve-out and the tool array below. Computing it separately in
+    // each place would let them drift, and either direction is a bug —
+    // the permission without the tools invites answering from memory,
+    // the tools without the permission leaves the model forbidden from
+    // stating what came back.
+    const analysisAvail = analysisAvailability()
+    const analysisToolsActive = analysisAvail.available
+    // Say which way the gate went, every turn.
+    //
+    // When it closes, Orbit answers about values anyway — from the
+    // picture, or from a sibling dataset's metadata — and the reply is
+    // indistinguishable from a measured one. Reported live as "no
+    // measurement card" on a build that renders them, which took a
+    // round to trace back to the tools never having been offered. The
+    // gate closing is correct behaviour; closing silently is not.
+    logger.info(`[Docent] value tools: ${analysisToolsActive ? 'offered' : `absent (${analysisAvail.reason})`}`)
+
     const systemPrompt = buildSystemPrompt(
       datasets, currentDataset, cfg.readingLevel, visionActive,
       !visionActive ? legendDescription : null,
       !visionActive ? currentTime : null,
       qaContext || null,
       mapViewContext,
+      analysisToolsActive,
     )
 
     if (cfg.debugPrompt) {
@@ -1490,6 +1666,12 @@ export async function* processMessage(
       return
     }
 
+    // Approved current events (curator-gated) for the [CURRENT EVENTS]
+    // injection, the `search_events` tool, and `<<EVENT:ID>>` validation.
+    // Cached 60 s in eventsService and degrades to [] on any failure, so a
+    // deploy without the events endpoint is a silent no-op here.
+    const approvedEvents = await fetchApprovedEvents()
+
     let preSearchContext = ''
     if (preSearchHits.length > 0) {
       const lines = preSearchHits.map(h => {
@@ -1530,12 +1712,135 @@ export async function* processMessage(
         `[AVAILABLE TOURS — guided experiences that walk the user through a topic with narration, camera movements, and dataset loads:\n${tourLines.join('\n')}\nRecommend a tour when the user seems new, asks for an overview, says they don't know where to start, or asks for a guided experience. Surface with the same <<LOAD:ID>> marker as a regular dataset — the SPA routes tour-format rows into the tour engine automatically.]\n`
     }
 
+    // [CURRENT EVENTS] injection — the cold-start path for the Orbit
+    // events surface (docs/CURRENT_EVENTS_PLAN.md §6.2). Like tours, the
+    // approved set is small, so we inject every event (capped) each turn
+    // rather than gating on a query; the model decides when a headline is
+    // relevant. Only these ids are valid <<EVENT:ID>> payloads — this block
+    // and the search_events tool are the anti-hallucination gate for events.
+    if (approvedEvents.length > 0) {
+      const eventLines = approvedEvents.slice(0, CURRENT_EVENTS_INJECTION_CAP).map(ev => {
+        const when = (ev.occurredStart ?? ev.source.publishedAt ?? '').slice(0, 10)
+        // No dataset id here — the <<EVENT:ID>> marker resolves the dataset
+        // client-side, and exposing an id invites the model to print it.
+        return `- ${ev.id} | ${ev.title} | ${ev.source.name}${when ? ' | ' + when : ''}`
+      })
+      preSearchContext +=
+        `[CURRENT EVENTS — reputable, curator-approved current events relevant to this node's data. This is INTERNAL context: never name this block or write any id in your reply — refer to an event by its headline. Surface one with an <<EVENT:ID>> marker on its own line: it shows a cited card AND loads the dataset that explains it, flying the globe to where and when it happened. Only the ids below are valid; never invent an event, headline, or source:\n${eventLines.join('\n')}]\n`
+    }
+
+    // §A6 — measure before the model answers, rather than hoping it
+    // calls the tool.
+    //
+    // Exactly the pattern `[RELEVANT DATASETS]` above uses for
+    // discovery: the app runs the search itself and injects the result,
+    // because a tool the model *may* call is a tool it sometimes does
+    // not. Live, asked "Where is the smoke worst?" with the tools
+    // offered, Orbit called nothing and wrote the answer anyway —
+    // "worst across an area", "at least 500 mg m-2", a coordinate, a
+    // time. Every one of those phrases is how the carve-out describes a
+    // *correct* answer, so the prompt had handed it the shape of the
+    // thing the prompt was trying to compel. No card, no camera move,
+    // no marker: three app-emitted artifacts absent at once, and
+    // nothing in the reply to say so.
+    //
+    // Now the superlative case cannot miss. The number exists before
+    // the first token, the card and the camera move come from it, and
+    // the model's job shrinks to narrating a measurement it has been
+    // handed. It may still call the tools for anything else.
+    // Turn-level rather than per-attempt: the pre-measurement happens
+    // once, before the retry loop exists, and a retry must not fly the
+    // globe a second time or stack a duplicate card under the answer.
+    const measuredTextsThisTurn = new Set<string>()
+    let flewThisTurn = false
+    let preMeasuredText: string | null = null
+
+    /** The app's own account of a reading: the card, and for an
+     *  extremum the camera move and the pin. One place, so the
+     *  pre-measured path and the tool-call path cannot drift. */
+    function* emitMeasurement(r: FindExtremumResult | SummarizeRegionResult): Generator<DocentStreamChunk> {
+      const text = (r as FindExtremumResult).valueText ?? (r as SummarizeRegionResult).meanText
+      if (text && !measuredTextsThisTurn.has(text)) {
+        measuredTextsThisTurn.add(text)
+        const at = r as FindExtremumResult
+        yield {
+          type: 'action',
+          action: {
+            type: 'measurement',
+            valueText: text,
+            ...(Number.isFinite(at.lat) ? { lat: at.lat } : {}),
+            ...(Number.isFinite(at.lon) ? { lon: at.lon } : {}),
+            ...(r.frameTime ? { frameTime: r.frameTime } : {}),
+            ...(r.dataset ? { dataset: r.dataset } : {}),
+          },
+        }
+      }
+      const ext = r as FindExtremumResult
+      if (ext.kind && Number.isFinite(ext.lat) && Number.isFinite(ext.lon) && !flewThisTurn) {
+        flewThisTurn = true
+        // `fromMeasurement` so the chat does not hold these behind a
+        // Load button for some *other* dataset the same reply happens
+        // to recommend — this camera move belongs to the frame already
+        // on the globe.
+        yield { type: 'action', action: { type: 'fly-to', lat: ext.lat!, lon: ext.lon!, fromMeasurement: true } }
+        const label = ext.pinLabel ?? `${ext.value ?? ''} ${ext.units ?? ''}`.trim()
+        yield {
+          type: 'action',
+          action: { type: 'add-marker', lat: ext.lat!, lng: ext.lon!, fromMeasurement: true, ...(label ? { label } : {}) },
+        }
+      }
+    }
+
+    /**
+     * A measured answer gets at most one dataset suggestion.
+     *
+     * "Where is the smoke worst?" came back as two sentences of answer
+     * followed by three datasets with paragraph-length descriptions.
+     * The prompt permits a related dataset *afterwards* and the answer
+     * did come first, so no rule was broken — the ratio was simply
+     * wrong, and it is the mild form of the failure `e5ff06d` fixed:
+     * discovery crowding out the question that was asked.
+     *
+     * Capped here rather than asked for in the prose, on this phase's
+     * evidence. Only applies when we actually measured something; an
+     * ordinary discovery turn is untouched.
+     */
+    const MEASURED_ANSWER_SUGGESTION_CAP = 1
+    let suggestionsThisTurn = 0
+    const suggestionAllowed = (): boolean => {
+      if (measuredTextsThisTurn.size === 0) return true
+      if (suggestionsThisTurn >= MEASURED_ANSWER_SUGGESTION_CAP) return false
+      suggestionsThisTurn++
+      return true
+    }
+
+    let measuredContext = ''
+    if (analysisToolsActive) {
+      const kind = valuesQuestionKind(input)
+      if (kind) {
+        const measured = executeFindExtremum({ kind }, currentTime)
+        logger.info(`[Docent] pre-measured ${kind}: ${measured.ok ? measured.valueText : `refused: ${measured.error}`}`)
+        if (measured.ok && measured.valueText) {
+          preMeasuredText = measured.valueText
+          measuredContext =
+            `[MEASURED — this is a real reading taken from the frame on screen, not an estimate. `
+            + `State it using this exact wording and do not recompute, convert or re-round it: `
+            + `"${measured.valueText}"`
+            + (Number.isFinite(measured.lat) ? `, at ${measured.lat}, ${measured.lon} (signed degrees)` : '')
+            + (measured.frameTime ? `, ${measured.frameTime}` : '')
+            + `. ${measured.precision ?? ''} ${measured.plateau ?? ''} ${measured.saturated ?? ''}`.trimEnd()
+            + ` The app has already shown this reading and moved the globe to it — do not call another value tool for the same question.]\n`
+          yield* emitMeasurement(measured)
+        }
+      }
+    }
+
     const userMessage: LLMMessage = visionActive
       ? { role: 'user', content: [
           { type: 'image_url' as const, image_url: { url: screenshotDataUrl! } },
-          { type: 'text' as const, text: statePrefix + preSearchContext + visionText },
+          { type: 'text' as const, text: statePrefix + preSearchContext + measuredContext + visionText },
         ] as LLMContentPart[] }
-      : { role: 'user', content: statePrefix + preSearchContext + input }
+      : { role: 'user', content: statePrefix + preSearchContext + measuredContext + input }
 
     // Anchor a fresh language-reminder system message right before
     // the user's turn — the system prompt's respond-in-{language}
@@ -1569,6 +1874,7 @@ export async function* processMessage(
       getSearchDatasetsTool(),
       getListFeaturedDatasetsTool(),
       getSearchCatalogTool(),
+      getSearchEventsTool(),
       getLoadDatasetTool(),
       getLoadFrameTool(),
       getFlyToTool(),
@@ -1577,6 +1883,12 @@ export async function* processMessage(
       getAddMarkerTool(),
       getToggleLabelsTool(),
       getHighlightRegionTool(),
+      // Absent unless a data-encoded frame is readable. Not disabled,
+      // not stubbed — absent, so a picture dataset leaves Orbit exactly
+      // as it behaves today (CONTRIBUTING §LLM Integrations rule 2).
+      ...(analysisToolsActive
+        ? [getProbeValueTool(), getSummarizeRegionTool(), getFindExtremumTool()]
+        : []),
     ]
 
     // Auto-switch to vision model when using the default CF proxy
@@ -1605,6 +1917,11 @@ export async function* processMessage(
     for (let attempt = 1; attempt <= MAX_LLM_ATTEMPTS; attempt++) {
       let llmProducedText = false
       let accumulatedText = ''
+      // §A6 — one Analyze chip per distinct region per attempt.
+      // (The card and the camera move are deduped per *turn* instead —
+      // see `measuredTextsThisTurn` — because the pre-measurement
+      // happens before this loop and a retry must not repeat it.)
+      const analysisChipsThisAttempt = new Set<string>()
       // Phase 3: each attempt maintains its own conversation state that may
       // grow across multiple streamChat rounds as the LLM calls search_catalog
       // and we feed the results back.
@@ -1666,11 +1983,14 @@ export async function* processMessage(
                 if (
                   chunk.call.name === 'search_catalog' ||
                   chunk.call.name === 'search_datasets' ||
-                  chunk.call.name === 'list_featured_datasets'
+                  chunk.call.name === 'list_featured_datasets' ||
+                  chunk.call.name === 'search_events' ||
+                  chunk.call.name === 'probe_value' ||
+                  chunk.call.name === 'summarize_region' ||
+                  chunk.call.name === 'find_extremum'
                 ) {
-                  // All three discovery tools need a tool-result message
-                  // sent back to the LLM — queue for the end-of-round
-                  // dispatch below.
+                  // All discovery tools need a tool-result message sent back
+                  // to the LLM — queue for the end-of-round dispatch below.
                   pendingSearchCalls.push(chunk.call)
                 } else if (chunk.call.name === 'load_dataset') {
                   const args = chunk.call.arguments as { dataset_id?: string; dataset_title?: string }
@@ -1698,7 +2018,7 @@ export async function* processMessage(
                     }
                   }
 
-                  if (resolvedId && !yieldedIds.has(resolvedId)) {
+                  if (resolvedId && !yieldedIds.has(resolvedId) && suggestionAllowed()) {
                     yieldedIds.add(resolvedId)
                     yield {
                       type: 'action',
@@ -1900,6 +2220,95 @@ export async function* processMessage(
                 tool_call_id: call.id,
                 content: JSON.stringify(result),
               })
+            } else if (
+              call.name === 'probe_value' ||
+              call.name === 'summarize_region' ||
+              call.name === 'find_extremum'
+            ) {
+              // §A6. Local and synchronous — the whole frame is already
+              // in memory, so this is arithmetic, not a fetch.
+              // `currentTime` is the label the globe is showing, so the
+              // answer and the screen name the same instant.
+              const result =
+                call.name === 'probe_value' ? executeProbeValue(call.arguments, currentTime)
+                : call.name === 'summarize_region' ? executeSummarizeRegion(call.arguments, currentTime)
+                : executeFindExtremum(call.arguments, currentTime)
+              // Args as well as outcome: when an answer looks wrong the
+              // first question is always what it was asked, and a
+              // region the model narrowed to without saying so is
+              // invisible in the reply itself.
+              logger.info(
+                `[Docent] ${call.name}(${JSON.stringify(call.arguments)}) → `
+                + (result.ok ? `ok: ${(result as { valueText?: string }).valueText ?? 'ok'}` : `refused: ${result.error}`),
+              )
+              // `scope` is for us, not the model — strip it before the
+              // result goes into the prompt so it cannot be mistaken
+              // for something to quote.
+              //
+              // The raw parts go with it. Every unit-bearing number
+              // already has a written form beside it (`valueText`,
+              // `meanText`, `distributionText`), and a rule asking the
+              // model to prefer the written one over `value` + `units`
+              // has now failed twice against a unit it finds more
+              // plausible for the subject. A rule it can decline is a
+              // rule; a field that isn't there is a constraint. What
+              // stays is what has no unit to get wrong: coordinates,
+              // coverage, an area named in its own key, and the prose
+              // caveats.
+              const {
+                scope: resultScope,
+                value: _value, units: _units, pinLabel: _pinLabel,
+                mean: _mean, median: _median, min: _min, max: _max, p10: _p10, p90: _p90,
+                ...forModel
+              } = result as typeof result & {
+                scope?: ResolvedScope
+                value?: number; units?: string; pinLabel?: string
+                mean?: number; median?: number; min?: number; max?: number; p10?: number; p90?: number
+              }
+              conversationMessages.push({
+                role: 'tool',
+                tool_call_id: call.id,
+                content: JSON.stringify(forModel),
+              })
+              // §A6 — offer to open Analyze on the region just measured.
+              // Chat cannot draw a chart, so the chip hands the same
+              // selection to the surface that can, rather than leaving
+              // the user to rebuild it by hand.
+              //
+              // Only for scopes the panel's picker can represent: a
+              // bbox answer gets no chip rather than one that opens a
+              // picker showing a region it cannot select. Deduped per
+              // turn, because a model comparing three regions would
+              // otherwise stack three chips on one message.
+              // §A6 — the app's account of the reading: card, camera,
+              // pin. Same helper the pre-measured path uses, so a
+              // number the model asked for and a number we took
+              // unprompted are presented identically.
+              if (result.ok) yield* emitMeasurement(result as FindExtremumResult | SummarizeRegionResult)
+              if (result.ok && resultScope && resultScope.kind !== 'bbox') {
+                const key = `${resultScope.kind}:${resultScope.name ?? ''}`
+                if (!analysisChipsThisAttempt.has(key)) {
+                  analysisChipsThisAttempt.add(key)
+                  yield {
+                    type: 'action',
+                    action: {
+                      type: 'show-analysis',
+                      scope: resultScope.kind,
+                      ...(resultScope.name ? { regionName: resultScope.name } : {}),
+                    },
+                  }
+                }
+              }
+            } else if (call.name === 'search_events') {
+              // In-memory filter over the approved events already fetched
+              // for this turn — no network, works on any deploy.
+              const result = executeSearchEvents(call.arguments, approvedEvents)
+              logger.info(`[Docent] search_events("${String(call.arguments.query ?? '')}") → ${result.events.length} result(s)`)
+              conversationMessages.push({
+                role: 'tool',
+                tool_call_id: call.id,
+                content: JSON.stringify(result),
+              })
             } else {
               // Legacy in-process search_catalog.
               const results = executeSearchCatalog(call.arguments, datasets)
@@ -1924,7 +2333,7 @@ export async function* processMessage(
           // Self-heal the degraded badge so the user knows
           // functionality is restored without a manual reload.
           clearDegradedState()
-          yield* emitValidatedActions(accumulatedText, datasets, yieldedIds)
+          yield* emitValidatedActions(accumulatedText, datasets, yieldedIds, approvedEvents, suggestionAllowed)
 
           // Safety net: if the LLM mentioned dataset titles from search_catalog
           // results in its prose but didn't emit <<LOAD:...>> markers for them,
@@ -1948,6 +2357,7 @@ export async function* processMessage(
                 lowerText.includes(titleLower) ||
                 (titleShort.length >= 8 && lowerText.includes(titleShort))
               ) {
+                if (!suggestionAllowed()) continue
                 yieldedIds.add(sr.id)
                 logger.info(`[Docent] Auto-injecting Load button for "${sr.title}" (${sr.id}) — title found in prose but no marker emitted`)
                 yield {

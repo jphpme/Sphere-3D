@@ -15,6 +15,10 @@ on:
       - 'src-tauri/**'
       - 'src/**'
       - 'public/**'
+      # Standalone design-preview mockup is a static artifact copied
+      # verbatim into the bundle — it can't affect a native build, so a
+      # change to it alone should not spin up the platform matrix.
+      - '!public/design-preview*.html'
       - 'package.json'
       - 'vite.config.ts'
       - '.github/workflows/mobile.yml'
@@ -24,6 +28,10 @@ on:
       - 'src-tauri/**'
       - 'src/**'
       - 'public/**'
+      # Standalone design-preview mockup is a static artifact copied
+      # verbatim into the bundle — it can't affect a native build, so a
+      # change to it alone should not spin up the platform matrix.
+      - '!public/design-preview*.html'
       - 'package.json'
       - 'vite.config.ts'
       - '.github/workflows/mobile.yml'
@@ -89,7 +97,7 @@ jobs:
       - run: npm ci
 
       - name: Export NDK_HOME
-        run: echo "NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> $GITHUB_ENV
+        run: echo "NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
 
       # Bootstrap: src-tauri/gen/android/ is gitignored as generated
       # scaffolding (per Tauri convention — gen/ is regenerated from

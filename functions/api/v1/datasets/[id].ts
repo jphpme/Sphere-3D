@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * Cloudflare Pages Function — GET /api/v1/datasets/{id}
  *
@@ -17,11 +20,12 @@ import { CatalogEnv } from '../_lib/env'
 import {
   getNodeIdentity,
   getPublicDataset,
+  IDENTITY_MISSING_MESSAGE,
   getDecorations,
 } from '../_lib/catalog-store'
 import { serializeDataset } from '../_lib/dataset-serializer'
 import { makeDataRefResolver } from '../_lib/data-ref-resolver'
-import { buildFramesUrlTemplate, resolveAssetRefStrict } from '../_lib/r2-public-url'
+import { buildFramesRedirectTemplate, resolveAssetRefStrict } from '../_lib/r2-public-url'
 import { computeEtag } from '../_lib/snapshot'
 
 const CACHE_CONTROL = 'public, max-age=60, stale-while-revalidate=300'
@@ -52,7 +56,7 @@ export const onRequestGet: PagesFunction<CatalogEnv, 'id'> = async context => {
     return jsonError(
       503,
       'identity_missing',
-      'Node identity has not been provisioned. Run `npm run gen:node-key`.',
+      IDENTITY_MISSING_MESSAGE,
     )
   }
   if (!row) return jsonError(404, 'not_found', `Dataset ${id} not found.`)
@@ -69,8 +73,8 @@ export const onRequestGet: PagesFunction<CatalogEnv, 'id'> = async context => {
   // against a non-public-bucket S3 endpoint).
   const assetResolver = (ref: string | null | undefined) =>
     resolveAssetRefStrict(context.env, ref)
-  const framesResolver = (ref: string, ext: string) =>
-    buildFramesUrlTemplate(context.env, ref, ext)
+  const framesResolver = (datasetId: string, baseUrl: string) =>
+    buildFramesRedirectTemplate(context.env, baseUrl, datasetId)
   const dataset = serializeDataset(
     row,
     decorations.get(id)!,

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * Tests for the Phase 3e dataset-overlay options helpers.
  *
@@ -10,7 +13,7 @@
 
 import { describe, expect, it } from 'vitest'
 import { isEarthBody, overlayOptionsFromDataset } from './datasetOverlayOptions'
-import type { Dataset } from '../types'
+import type { ColorScale, Dataset } from '../types'
 
 function makeDataset(over: Partial<Dataset> = {}): Dataset {
   return {
@@ -94,6 +97,10 @@ describe('overlayOptionsFromDataset', () => {
       lonOrigin: undefined,
       isFlippedInY: undefined,
       celestialBody: undefined,
+      // Identity rides along with the geometry so a frame can say
+      // which dataset it is without consulting app state.
+      datasetId: 'DS_X',
+      datasetTitle: 'Test',
     })
   })
 
@@ -133,6 +140,8 @@ describe('overlayOptionsFromDataset', () => {
       lonOrigin: 180,
       isFlippedInY: true,
       celestialBody: 'Mars',
+      datasetId: 'DS_X',
+      datasetTitle: 'Test',
     })
   })
 
@@ -145,6 +154,62 @@ describe('overlayOptionsFromDataset', () => {
     ).toBeUndefined()
     expect(
       overlayOptionsFromDataset(makeDataset({ lonOrigin: Infinity as unknown as number })),
+    ).toBeUndefined()
+  })
+})
+
+describe('overlayOptionsFromDataset — data-encoded video', () => {
+  const colorScale: ColorScale = {
+    stops: [
+      { t: 0, rgba: [0, 0, 0, 0] },
+      { t: 1, rgba: [255, 0, 0, 255] },
+    ],
+    vmin: 0,
+    vmax: 50,
+    units: 'mg m-2',
+  }
+
+  it('carries the palette through when the dataset declares data-luma', () => {
+    // This bundle is the only path the palette has to all four
+    // render surfaces, so it has to survive on its own — with no
+    // bbox, no lonOrigin, no flip, and an Earth body.
+    const options = overlayOptionsFromDataset(
+      makeDataset({ renderEncoding: 'data-luma', colorScale }),
+    )
+    expect(options?.colorScale).toEqual(colorScale)
+  })
+
+  it('alongside the Phase 3d fields, without disturbing them', () => {
+    const options = overlayOptionsFromDataset(
+      makeDataset({
+        renderEncoding: 'data-luma',
+        colorScale,
+        lonOrigin: 180,
+        isFlippedInY: true,
+      }),
+    )
+    expect(options?.colorScale).toEqual(colorScale)
+    expect(options?.lonOrigin).toBe(180)
+    expect(options?.isFlippedInY).toBe(true)
+  })
+
+  // The backwards-compatibility guarantee, stated as a test: a
+  // dataset that does not opt in must still take the pre-existing
+  // `undefined` fast path, so every render surface runs exactly the
+  // code it runs today.
+  it('still returns undefined for a plain legacy dataset', () => {
+    expect(overlayOptionsFromDataset(makeDataset())).toBeUndefined()
+  })
+
+  it('ignores a palette that is not paired with the encoding', () => {
+    // A colorScale without renderEncoding is inert by contract; it
+    // must not reach a shader and must not defeat the fast path.
+    expect(overlayOptionsFromDataset(makeDataset({ colorScale }))).toBeUndefined()
+  })
+
+  it('ignores an encoding that arrives without a palette', () => {
+    expect(
+      overlayOptionsFromDataset(makeDataset({ renderEncoding: 'data-luma' }))?.colorScale,
     ).toBeUndefined()
   })
 })

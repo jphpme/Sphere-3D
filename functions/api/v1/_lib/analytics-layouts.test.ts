@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * Round-trip tests for the analytics layout registry: every event
  * type is encoded through the REAL `toDataPoint()` from
@@ -282,6 +285,26 @@ const FIXTURES: { [K in TelemetryEventType]: EventFor<K> } = {
     dataset_id: 'a1b2c3d4e5f6',
     client_offset_ms: 100,
   },
+  output_added: {
+    event_type: 'output_added',
+    mode: 'sos-equirect',
+    framebuffer_bucket: '4k',
+    monitor_index: 1,
+    client_offset_ms: 100,
+  },
+  output_removed: {
+    event_type: 'output_removed',
+    mode: 'sos-equirect',
+    reason: 'crash',
+    client_offset_ms: 100,
+  },
+  output_failure: {
+    event_type: 'output_failure',
+    kind: 'crash',
+    retries: 0,
+    recovered: false,
+    client_offset_ms: 100,
+  },
   dwell: {
     event_type: 'dwell',
     view_target: 'chat',
@@ -457,6 +480,22 @@ describe('EVENT_LAYOUTS', () => {
     expect(decoded.fields.resumed).toBeUndefined()
     expect(decoded.fields.schema_version).toBe('1')
     expect(decoded.fields.vr_capable).toBe('none')
+  })
+
+  it('round-trips voice_interaction with a barge-in (interrupted present)', () => {
+    const event = { ...FIXTURES.voice_interaction, interrupted: true } as TelemetryEvent
+    const decoded = decodeAeRow(toAeSqlRow(event))
+    expect(decoded.layout).toBe('named')
+    expect(decoded.fields.interrupted).toBe(true)
+    // Later fields must not be mis-shifted when the optional is present.
+    expect(decoded.fields.trigger).toBe('replay')
+    expect(decoded.fields.lang).toBe('en')
+  })
+
+  it('voice_interaction optional-blob precondition: last blob is the never-empty trigger enum', () => {
+    const layout = EVENT_LAYOUTS.voice_interaction
+    expect(layout.blobs[layout.blobs.length - 1]).toBe('trigger')
+    expect(FIXTURES.voice_interaction.trigger).not.toBe('')
   })
 
   it('asserts the optional-blob detection precondition: the last blob field is never empty', () => {

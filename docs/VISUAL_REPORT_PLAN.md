@@ -81,6 +81,44 @@ These render as per-scene problem badges in the HTML, which is what
 makes the report a debugging *and* deploy-health surface, not just a
 gallery.
 
+### A badge that is always on is a badge nobody reads
+
+Some scenes exist to capture a *failure* surface —
+`publish-datasets-error` stubs a 500 so the datasets page renders its
+error card, and the 500 is the whole point of the scene. Counting that
+as a problem is not a harmless over-report: it puts a permanent badge
+on a scene that is working correctly, and a permanent badge trains
+people to ignore the column it sits in.
+
+So a `Scene` may declare `expectedBadResponses` — `{ url, status }`
+pairs the capture is supposed to provoke — and the signal collector
+drops exactly those. **Both halves must match**, deliberately: status
+alone would hide a *different* endpoint failing with the same code,
+which on a page that fetches several is the likely case rather than the
+unlikely one, and the declared endpoint failing with a *different* code
+still reports.
+
+Two details are load-bearing in the implementation. The bad response
+shows up twice — as a `response` event and as a console line the
+browser writes — and the console line carries the status but **not**
+the URL, so it cannot be matched as precisely. And the two can arrive
+in either order, so deciding as they come would make the result depend
+on timing. `consoleErrors` is therefore resolved on *read*, from final
+state: a resource line is dropped only when its status was expected
+**and** no unexpected response with that status survived. That last
+clause is the conservative half — a second endpoint failing with the
+same code keeps the line rather than hiding it behind the declaration.
+
+**A first-scene caveat worth knowing rather than fixing:** against a
+cold Vite dev server the run's very first navigation can abort a burst
+of in-flight module preloads, which lands as dozens of
+`net::ERR_ABORTED` failed requests on `.ts` URLs for whichever scene
+happens to be captured first. It does not recur once the server is
+warm, and it cannot happen against a built bundle (which serves `.js`),
+so it has never shown up in CI. If a scene is badged with a large
+number of aborted `/src`-shaped module requests and nothing else,
+re-run it in a different position before believing it.
+
 ---
 
 ## Architecture: one core, four consumers
@@ -158,6 +196,18 @@ reader knows the path not taken.
   report and the smoke tests, with no CI infrastructure. *Tradeoff:*
   fixtures can drift from the real API shape — keeping them typed catches
   the structural half of that drift at `type-check`.
+
+- **Catalog scenes are fixtured too (`catalogReportFixtures`).** The dev
+  server proxies `/api` to the production deployment, so the catalog /
+  browse / Orbit scenes used to capture the **live** catalog — every
+  content change or slow thumbnail diffed against the baseline, which
+  was the report's residual churn after the globe backdrop was hidden.
+  The report scenes now pin every content endpoint the SPA reads on
+  boot (catalog, tours, events, featured-event, models); a trailing
+  `{ url: '/api/', passthrough: true }` rule lets everything else (the
+  GIBS tile proxy, telemetry ingest) through unchanged, so problem
+  badges stay honest. Verified by running the report twice back-to-back
+  and diffing: 0 of 52 shots changed.
 
 - **Orbit smoke scope: local engine only.** Orbit's hybrid architecture
   falls back to the deterministic local engine

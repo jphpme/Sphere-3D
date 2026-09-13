@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 import { describe, it, expect } from 'vitest'
 import {
   parseISO8601Duration,
@@ -7,6 +10,14 @@ import {
   calculateFrameIndex,
   videoTimeToDate,
   dateToVideoTime,
+  computeSiblingSyncCorrection,
+  verifySiblingTime,
+  shownFrameTime,
+  MIN_PLAYBACK_RATE,
+  MAX_PLAYBACK_RATE,
+  SIBLING_MIN_READY_STATE,
+  SIBLING_HARD_SEEK_THRESHOLD_S,
+  SIBLING_SEEK_EPS_S,
   inferDisplayInterval,
   getSunPosition,
 } from './time'
@@ -290,6 +301,562 @@ describe('dateToVideoTime', () => {
     expect(position).toBe('inside')
     expect(videoTime).toBeGreaterThan(24)
     expect(videoTime).toBeLessThan(26)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// computeSiblingSyncCorrection — multi-viewport drift correction (#132)
+// ---------------------------------------------------------------------------
+describe('computeSiblingSyncCorrection', () => {
+  // The Climate Futures tour: all panels share 2015–2100 (85y) coverage.
+  const start = new Date('2015-12-31T00:00:00Z')
+  const end = new Date('2100-12-31T00:00:00Z')
+  const rangeMs = end.getTime() - start.getTime()
+
+  it('identical-range sibling of equal duration tracks the primary 1:1', () => {
+    // Primary at the midpoint of a 30s video → date ≈ 2058.
+    const mid = new Date((start.getTime() + end.getTime()) / 2)
+    const c = computeSiblingSyncCorrection({
+      date: mid,
+      sibCurrentTime: 15, // already at the midpoint of its own 30s video
+      sibDuration: 30,
+      sibStart: start,
+      sibEnd: end,
+      primaryDuration: 30,
+      primaryRangeMs: rangeMs,
+      hardSeekThresholdS: 0.15,
+    })
+    expect(c.position).toBe('inside')
+    expect(c.rate).toBeCloseTo(1, 5)
+    expect(c.targetTime).toBeCloseTo(15, 5)
+    expect(c.shouldSeek).toBe(false)
+  })
+
+  it('flags a seek once drift exceeds the threshold', () => {
+    const mid = new Date((start.getTime() + end.getTime()) / 2)
+    // Sibling has drifted to 15.5s while the target is 15s → 0.5s > 0.15s.
+    const c = computeSiblingSyncCorrection({
+      date: mid,
+      sibCurrentTime: 15.5,
+      sibDuration: 30,
+      sibStart: start,
+      sibEnd: end,
+      primaryDuration: 30,
+      primaryRangeMs: rangeMs,
+      hardSeekThresholdS: 0.15,
+    })
+    expect(c.shouldSeek).toBe(true)
+    expect(c.targetTime).toBeCloseTo(15, 5)
+  })
+
+  it('does not flag a seek for sub-threshold drift', () => {
+    const mid = new Date((start.getTime() + end.getTime()) / 2)
+    const c = computeSiblingSyncCorrection({
+      date: mid,
+      sibCurrentTime: 15.1, // 0.1s < 0.15s
+      sibDuration: 30,
+      sibStart: start,
+      sibEnd: end,
+      primaryDuration: 30,
+      primaryRangeMs: rangeMs,
+      hardSeekThresholdS: 0.15,
+    })
+    expect(c.shouldSeek).toBe(false)
+  })
+
+  it('maps to a fractional target when sibling duration differs from primary', () => {
+    // Same date range, but the sibling video is encoded at 60s vs 30s.
+    // The correct target is fraction-based (midpoint → 30s), not a raw
+    // currentTime copy — this is why issue #132 option 3 ("copy
+    // currentTime") is only safe when durations match.
+    const mid = new Date((start.getTime() + end.getTime()) / 2)
+    const c = computeSiblingSyncCorrection({
+      date: mid,
+      sibCurrentTime: 0,
+      sibDuration: 60,
+      sibStart: start,
+      sibEnd: end,
+      primaryDuration: 30,
+      primaryRangeMs: rangeMs,
+      hardSeekThresholdS: 0.15,
+    })
+    expect(c.targetTime).toBeCloseTo(30, 5)
+    expect(c.rate).toBeCloseTo(2, 5) // 60s sib / 30s primary over equal range
+    expect(c.shouldSeek).toBe(true)
+  })
+
+  it('paces a shorter-range sibling faster than the primary', () => {
+    // Sibling covers half the real-world span in the same video seconds.
+    const sibStart = new Date('2015-12-31T00:00:00Z')
+    const sibEnd = new Date('2058-06-30T00:00:00Z') // ~half of 85y
+    const dateInBoth = new Date('2030-01-01T00:00:00Z')
+    const c = computeSiblingSyncCorrection({
+      date: dateInBoth,
+      sibCurrentTime: 0,
+      sibDuration: 30,
+      sibStart,
+      sibEnd,
+      primaryDuration: 30,
+      primaryRangeMs: rangeMs,
+      hardSeekThresholdS: 0.15,
+    })
+    expect(c.position).toBe('inside')
+    // sibRange ≈ rangeMs/2 → rate ≈ 2× so it advances through its
+    // (shorter) timeline at the primary's real-world pace.
+    expect(c.rate).toBeGreaterThan(1.9)
+    expect(c.rate).toBeLessThan(2.1)
+  })
+
+  it('reports position before/after when the primary date is outside the sibling range', () => {
+    const sibStart = new Date('2050-01-01T00:00:00Z')
+    const sibEnd = new Date('2100-12-31T00:00:00Z')
+    const before = computeSiblingSyncCorrection({
+      date: new Date('2030-01-01T00:00:00Z'),
+      sibCurrentTime: 5,
+      sibDuration: 30,
+      sibStart,
+      sibEnd,
+      primaryDuration: 30,
+      primaryRangeMs: rangeMs,
+      hardSeekThresholdS: 0.15,
+    })
+    expect(before.position).toBe('before')
+    expect(before.targetTime).toBe(0)
+    expect(before.shouldSeek).toBe(true) // currentTime 5 → boundary 0
+
+    const after = computeSiblingSyncCorrection({
+      date: new Date('2100-12-31T00:00:00Z'),
+      sibCurrentTime: 30,
+      sibDuration: 30,
+      sibStart: new Date('2015-12-31T00:00:00Z'),
+      sibEnd: new Date('2058-06-30T00:00:00Z'),
+      primaryDuration: 30,
+      primaryRangeMs: rangeMs,
+      hardSeekThresholdS: 0.15,
+    })
+    expect(after.position).toBe('after')
+    expect(after.targetTime).toBe(30) // clamped to sibling duration
+  })
+
+  it('clamps an extreme high rate to the browser-honoured range', () => {
+    // A sibling covering a tiny real-world window in a full-length video
+    // would have to race through its timeline to keep the primary's
+    // real-world pace; the unclamped rate is absurd, so clamp to MAX.
+    const sibStart = new Date('2015-12-31T00:00:00Z')
+    const sibEnd = new Date('2016-01-01T00:00:00Z') // 1 day in 30s
+    const c = computeSiblingSyncCorrection({
+      date: new Date('2015-12-31T12:00:00Z'),
+      sibCurrentTime: 0,
+      sibDuration: 30,
+      sibStart,
+      sibEnd,
+      primaryDuration: 30,
+      primaryRangeMs: rangeMs,
+      hardSeekThresholdS: 0.15,
+    })
+    expect(c.rate).toBe(MAX_PLAYBACK_RATE)
+    expect(c.rate).toBeGreaterThanOrEqual(MIN_PLAYBACK_RATE)
+    expect(c.rate).toBeLessThanOrEqual(MAX_PLAYBACK_RATE)
+  })
+
+  it('falls back to rate 1 when a duration or range is degenerate', () => {
+    const c = computeSiblingSyncCorrection({
+      date: start,
+      sibCurrentTime: 0,
+      sibDuration: 0,
+      sibStart: start,
+      sibEnd: end,
+      primaryDuration: 30,
+      primaryRangeMs: rangeMs,
+      hardSeekThresholdS: 0.15,
+    })
+    expect(c.rate).toBe(1)
+  })
+
+  // --- soft-sync controller (terraviz#229 flicker fix) ---
+
+  const mid = () => new Date((start.getTime() + end.getTime()) / 2) // → target ≈ 15s of a 30s video
+
+  it('eases a slightly-ahead sibling by trimming the rate down, without seeking', () => {
+    const c = computeSiblingSyncCorrection({
+      date: mid(),
+      sibCurrentTime: 15.1, // 0.1s ahead of the 15s target
+      sibDuration: 30,
+      sibStart: start,
+      sibEnd: end,
+      primaryDuration: 30,
+      primaryRangeMs: rangeMs,
+      hardSeekThresholdS: 0.5,
+    })
+    expect(c.shouldSeek).toBe(false)
+    expect(c.rate).toBeLessThan(1)
+    // base 1 × (1 − 0.5·0.1) = 0.95
+    expect(c.rate).toBeCloseTo(0.95, 5)
+  })
+
+  it('eases a slightly-behind sibling by trimming the rate up, without seeking', () => {
+    const c = computeSiblingSyncCorrection({
+      date: mid(),
+      sibCurrentTime: 14.9, // 0.1s behind
+      sibDuration: 30,
+      sibStart: start,
+      sibEnd: end,
+      primaryDuration: 30,
+      primaryRangeMs: rangeMs,
+      hardSeekThresholdS: 0.5,
+    })
+    expect(c.shouldSeek).toBe(false)
+    expect(c.rate).toBeGreaterThan(1)
+    expect(c.rate).toBeCloseTo(1.05, 5)
+  })
+
+  it('caps the rate trim for a large-but-sub-hard-seek error', () => {
+    const c = computeSiblingSyncCorrection({
+      date: mid(),
+      sibCurrentTime: 20, // 5s ahead, but under a generous hard-seek threshold
+      sibDuration: 30,
+      sibStart: start,
+      sibEnd: end,
+      primaryDuration: 30,
+      primaryRangeMs: rangeMs,
+      hardSeekThresholdS: 10,
+    })
+    expect(c.shouldSeek).toBe(false)
+    // trim capped at 25% → rate = 1 × (1 − 0.25) = 0.75
+    expect(c.rate).toBeCloseTo(0.75, 5)
+  })
+
+  it('scales the rate by the primary playback speed (tour 5fps → 0.167x)', () => {
+    // Identical range/duration siblings: pacing ratio is 1, so the
+    // sibling must run at the primary's actual speed, not 1x — otherwise
+    // it races ahead and the hard-seek snaps it back (the #229 flicker).
+    const c = computeSiblingSyncCorrection({
+      date: mid(),
+      sibCurrentTime: 15, // aligned, no drift
+      sibDuration: 30,
+      sibStart: start,
+      sibEnd: end,
+      primaryDuration: 30,
+      primaryRangeMs: rangeMs,
+      primaryPlaybackRate: 5 / 30, // ≈ 0.167x
+      hardSeekThresholdS: 0.5,
+    })
+    expect(c.shouldSeek).toBe(false)
+    expect(c.rate).toBeCloseTo(5 / 30, 5)
+  })
+
+  it('defaults primaryPlaybackRate to 1x when omitted', () => {
+    const c = computeSiblingSyncCorrection({
+      date: mid(),
+      sibCurrentTime: 15,
+      sibDuration: 30,
+      sibStart: start,
+      sibEnd: end,
+      primaryDuration: 30,
+      primaryRangeMs: rangeMs,
+      hardSeekThresholdS: 0.5,
+    })
+    expect(c.rate).toBeCloseTo(1, 5)
+  })
+
+  it('hard-seeks (no trim) once in-range drift exceeds the hard-seek threshold', () => {
+    const c = computeSiblingSyncCorrection({
+      date: mid(),
+      sibCurrentTime: 16, // 1s ahead of target, over the 0.5s hard threshold
+      sibDuration: 30,
+      sibStart: start,
+      sibEnd: end,
+      primaryDuration: 30,
+      primaryRangeMs: rangeMs,
+      hardSeekThresholdS: 0.5,
+    })
+    expect(c.shouldSeek).toBe(true)
+    expect(c.targetTime).toBeCloseTo(15, 5)
+    expect(c.rate).toBeCloseTo(1, 5) // untrimmed pacing rate
+  })
+
+  // --- the loop wrap ---
+
+  it('sends a sibling parked at its own end home when the primary has wrapped', () => {
+    // The wrap: the primary has looped back to the start of its range
+    // while the sibling is still sitting at the end of its own video —
+    // the state `seekSiblingsToDate` leaves it in when the auto-loop
+    // pauses the primary a hair short of `duration`.
+    const c = computeSiblingSyncCorrection({
+      date: start,          // primary wrapped to the beginning of the range
+      sibCurrentTime: 30,   // sibling still parked at the end of its video
+      sibDuration: 30,
+      sibStart: start,
+      sibEnd: end,
+      primaryDuration: 30,
+      primaryRangeMs: rangeMs,
+      hardSeekThresholdS: 0.5,
+    })
+    // The control law was never the problem: the desync is a whole video
+    // duration, so it asks for a hard seek back to the start. What used
+    // to go wrong is that the caller's `readyState` guard skipped the
+    // sibling before this ever ran — see SIBLING_MIN_READY_STATE.
+    expect(c.position).toBe('inside')
+    expect(c.targetTime).toBeCloseTo(0, 5)
+    expect(c.shouldSeek).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// SIBLING_SEEK_EPS_S — a seek not worth issuing
+// ---------------------------------------------------------------------------
+describe('SIBLING_SEEK_EPS_S', () => {
+  // From a browser capture: four panels aligned at 0.5820 of a ~29s
+  // clip, pressing play moved the siblings to 0.5822 and cost five
+  // seconds of frozen panel. That move is this many seconds of video:
+  const POINTLESS_MOVE_S = 0.0002 * 29
+  const ONE_FRAME_AT_30FPS_S = 1 / 30
+
+  it('forgives a move smaller than the one that cost five seconds', () => {
+    expect(POINTLESS_MOVE_S).toBeLessThan(SIBLING_SEEK_EPS_S)
+  })
+
+  it('stays under a frame, so a skipped seek never changes what is shown', () => {
+    // The panel must still land on the frame it would have seeked to;
+    // the epsilon buys nothing if it can straddle two frames.
+    expect(SIBLING_SEEK_EPS_S).toBeLessThan(ONE_FRAME_AT_30FPS_S)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// SIBLING_HARD_SEEK_THRESHOLD_S — pinned to two measured numbers
+// ---------------------------------------------------------------------------
+describe('SIBLING_HARD_SEEK_THRESHOLD_S', () => {
+  // Both figures come from a browser capture of a 4-globe Climate
+  // Futures session: ~29s clips over 85 model years, sampled at 2 Hz.
+  const STEADY_STATE_DRIFT_S = 0.026
+  const POST_STALL_OFFSET_S = 0.35
+
+  const start = new Date('2015-12-31T00:00:00Z')
+  const end = new Date('2100-12-31T00:00:00Z')
+  const rangeMs = end.getTime() - start.getTime()
+  const mid = () => new Date((start.getTime() + end.getTime()) / 2)
+
+  const atDrift = (driftS: number) => computeSiblingSyncCorrection({
+    date: mid(),
+    sibCurrentTime: 15 - driftS,   // behind by driftS on a 30s video
+    sibDuration: 30,
+    sibStart: start,
+    sibEnd: end,
+    primaryDuration: 30,
+    primaryRangeMs: rangeMs,
+    hardSeekThresholdS: SIBLING_HARD_SEEK_THRESHOLD_S,
+  })
+
+  it('leaves steady-state drift to the rate trim', () => {
+    // Seeking here is the per-frame flicker terraviz#229 fixed. The
+    // threshold has to stay clear of what normal playback produces.
+    const c = atDrift(STEADY_STATE_DRIFT_S)
+    expect(c.shouldSeek).toBe(false)
+    expect(c.rate).toBeGreaterThan(1)   // trimmed up to catch back up
+  })
+
+  it('snaps out the offset a post-scrub buffering stall leaves', () => {
+    // ~2s at HAVE_METADATA while the primary keeps playing. Under the
+    // old 0.5s threshold this fell to the trim, which closes it at
+    // ~0.029 s/s — about twelve seconds of staggered globes.
+    expect(atDrift(POST_STALL_OFFSET_S).shouldSeek).toBe(true)
+  })
+
+  it('keeps usable margin on both sides rather than sitting near either', () => {
+    // A threshold that merely separates the two numbers would be one
+    // slow device away from being wrong in either direction.
+    expect(SIBLING_HARD_SEEK_THRESHOLD_S).toBeGreaterThan(STEADY_STATE_DRIFT_S * 3)
+    expect(SIBLING_HARD_SEEK_THRESHOLD_S).toBeLessThan(POST_STALL_OFFSET_S / 2)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// SIBLING_MIN_READY_STATE
+// ---------------------------------------------------------------------------
+describe('SIBLING_MIN_READY_STATE', () => {
+  // Mirrors the HTMLMediaElement constants, which jsdom does not expose
+  // on a bare object.
+  const HAVE_NOTHING = 0, HAVE_METADATA = 1, HAVE_CURRENT_DATA = 2
+
+  it('admits a sibling as soon as metadata is known', () => {
+    expect(SIBLING_MIN_READY_STATE).toBe(HAVE_METADATA)
+  })
+
+  it('still excludes HAVE_NOTHING, where duration is NaN', () => {
+    expect(HAVE_NOTHING).toBeLessThan(SIBLING_MIN_READY_STATE)
+  })
+
+  // Regression tripwire. Raising this to HAVE_CURRENT_DATA is what caused
+  // the multi-globe loop-wrap stall: a MediaSource-backed sibling seeked
+  // to within a segment of its buffered end sits at HAVE_METADATA
+  // indefinitely, and the sync paths would skip it at precisely the wrap,
+  // leaving the panel frozen. If you are about to change this line,
+  // read the doc comment on the constant first.
+  it('never requires frame data the corrective seek would itself fetch', () => {
+    expect(SIBLING_MIN_READY_STATE).toBeLessThan(HAVE_CURRENT_DATA)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// shownFrameTime — what the panel is showing, not what its element says
+// ---------------------------------------------------------------------------
+describe('shownFrameTime', () => {
+  it('prefers the frame that actually reached the texture', () => {
+    // The case this exists for: a seek reads its target back instantly
+    // while the element is still buffering, so `currentTime` claims a
+    // position whose frame is not on screen.
+    expect(shownFrameTime(12.5, 18.0)).toBe(12.5)
+  })
+
+  it('falls back to currentTime when nothing has been uploaded yet', () => {
+    expect(shownFrameTime(null, 18.0)).toBe(18.0)
+    expect(shownFrameTime(undefined, 18.0)).toBe(18.0)
+  })
+
+  it('keeps a legitimate zero rather than treating it as absent', () => {
+    // The first frame of a dataset is a real answer; a falsy check here
+    // would silently report the element's clock instead.
+    expect(shownFrameTime(0, 18.0)).toBe(0)
+  })
+
+  it('rejects a non-finite recording', () => {
+    expect(shownFrameTime(NaN, 18.0)).toBe(18.0)
+    expect(shownFrameTime(Infinity, 18.0)).toBe(18.0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// verifySiblingTime — does a panel show the date the label claims?
+// ---------------------------------------------------------------------------
+describe('verifySiblingTime', () => {
+  // A 60-hour range across a 2.033s / 61-frame clip: the 4-globe tour
+  // shape, where one frame is very nearly one hour of real-world time.
+  const start = new Date('2026-03-01T00:00:00Z')
+  const end = new Date('2026-03-03T12:00:00Z')
+  const DUR = 61 / 30
+  const HOUR = 60 * 60 * 1000
+
+  const at = (videoTime: number, over = { start, end, dur: DUR }) =>
+    new Date(over.start.getTime()
+      + (videoTime / over.dur) * (over.end.getTime() - over.start.getTime()))
+
+  it('accepts a sibling sitting on the labelled moment', () => {
+    const v = verifySiblingTime({
+      labelDate: at(1), sibFrameTime: 1, sibDuration: DUR,
+      sibStart: start, sibEnd: end, snapIntervalMs: HOUR,
+    })
+    expect(v.alignment).toBe('aligned')
+    expect(v.driftMs).toBe(0)
+  })
+
+  it('accepts sub-frame slop from the browser snapping a seek', () => {
+    // A seek lands on the nearest decodable frame rather than exactly
+    // where it was asked to; that must not read as a mismatch.
+    const v = verifySiblingTime({
+      labelDate: at(1), sibFrameTime: 1 + (1 / 30) * 0.4, sibDuration: DUR,
+      sibStart: start, sibEnd: end, snapIntervalMs: HOUR,
+    })
+    expect(v.alignment).toBe('aligned')
+  })
+
+  it('flags the loop-wrap stall: label at the start, panel still at the end', () => {
+    // The failure this exists to catch — the label reads the wrap
+    // position while the sibling is stranded at its own last frame.
+    const v = verifySiblingTime({
+      labelDate: start, sibFrameTime: DUR, sibDuration: DUR,
+      sibStart: start, sibEnd: end, snapIntervalMs: HOUR,
+    })
+    expect(v.alignment).toBe('off')
+    expect(v.shownDate.getTime()).toBe(end.getTime())
+    expect(v.driftMs).toBe(end.getTime() - start.getTime())
+  })
+
+  it('signs the drift so a caller can tell ahead from behind', () => {
+    const ahead = verifySiblingTime({
+      labelDate: at(1), sibFrameTime: 1.5, sibDuration: DUR,
+      sibStart: start, sibEnd: end, snapIntervalMs: HOUR,
+    })
+    const behind = verifySiblingTime({
+      labelDate: at(1), sibFrameTime: 0.5, sibDuration: DUR,
+      sibStart: start, sibEnd: end, snapIntervalMs: HOUR,
+    })
+    expect(ahead.driftMs).toBeGreaterThan(0)
+    expect(behind.driftMs).toBeLessThan(0)
+    expect(ahead.alignment).toBe('off')
+    expect(behind.alignment).toBe('off')
+  })
+
+  it('reports uncovered rather than off when the range misses the label', () => {
+    // The panel is pinned to a boundary frame on purpose and already
+    // says so through the out-of-range treatment; calling that a
+    // mismatch would explain one state twice in two vocabularies.
+    const before = verifySiblingTime({
+      labelDate: new Date('2026-02-01T00:00:00Z'),
+      sibFrameTime: 0, sibDuration: DUR,
+      sibStart: start, sibEnd: end, snapIntervalMs: HOUR,
+    })
+    expect(before.alignment).toBe('uncovered')
+
+    const after = verifySiblingTime({
+      labelDate: new Date('2026-04-01T00:00:00Z'),
+      sibFrameTime: DUR, sibDuration: DUR,
+      sibStart: start, sibEnd: end, snapIntervalMs: HOUR,
+    })
+    expect(after.alignment).toBe('uncovered')
+  })
+
+  it('compares against the displayed step, not raw milliseconds', () => {
+    // Both dates snap to the same hour, so the panels display the same
+    // label and the assertion the label makes is true.
+    const v = verifySiblingTime({
+      labelDate: new Date('2026-03-01T04:00:00Z'),
+      sibFrameTime: (4 * HOUR / (end.getTime() - start.getTime())) * DUR + 0.001,
+      sibDuration: DUR, sibStart: start, sibEnd: end, snapIntervalMs: HOUR,
+    })
+    expect(v.toleranceMs).toBe(HOUR / 2)
+    expect(v.alignment).toBe('aligned')
+  })
+
+  it('does not call a two-minute difference an hour apart at a bucket edge', () => {
+    // The label's instant and the panel's straddle an hour boundary two
+    // minutes apart. Snapping both to the label's grid and comparing
+    // buckets — the obvious implementation — reads that as a full hour
+    // of disagreement. They are the same frame.
+    const videoTimeFor = (d: Date) =>
+      ((d.getTime() - start.getTime()) / (end.getTime() - start.getTime())) * DUR
+    const v = verifySiblingTime({
+      labelDate: new Date('2026-03-01T03:29:00Z'),
+      sibFrameTime: videoTimeFor(new Date('2026-03-01T03:31:00Z')),
+      sibDuration: DUR, sibStart: start, sibEnd: end, snapIntervalMs: HOUR,
+    })
+    expect(Math.abs(v.driftMs - 2 * 60 * 1000)).toBeLessThan(1000)
+    expect(v.alignment).toBe('aligned')
+    // The date it would show is still snapped, so a notice reads in the
+    // same vocabulary as the label it contradicts.
+    expect(v.shownDate.toISOString()).toBe('2026-03-01T04:00:00.000Z')
+  })
+
+  it('falls back to one video frame of real time with no display cadence', () => {
+    const v = verifySiblingTime({
+      labelDate: at(1), sibFrameTime: 1, sibDuration: DUR,
+      sibStart: start, sibEnd: end,
+    })
+    // 60 hours over 2.033s of video → one 1/30s frame is ~59 minutes.
+    expect(v.toleranceMs).toBeGreaterThan(55 * 60 * 1000)
+    expect(v.toleranceMs).toBeLessThan(60 * 60 * 1000)
+    expect(v.alignment).toBe('aligned')
+  })
+
+  it('maps through each panel\'s own duration, not the primary\'s', () => {
+    // A sibling encoded at twice the length covers the same range, so
+    // the same real-world date sits at twice the video time. Comparing
+    // raw currentTime across panels would call this a mismatch.
+    const v = verifySiblingTime({
+      labelDate: at(1), sibFrameTime: 2, sibDuration: DUR * 2,
+      sibStart: start, sibEnd: end, snapIntervalMs: HOUR,
+    })
+    expect(v.alignment).toBe('aligned')
   })
 })
 

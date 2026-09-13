@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * Phase 3pt/E — publisher-side API client for the tour-authoring
  * dock. Thin wrapper over the shared `publisherGet` /
@@ -59,6 +62,34 @@ export async function fetchTourJson(
   )
   if (!result.ok) {
     return { error: errorLabel(result), kind: result.kind }
+  }
+  return result.data
+}
+
+/**
+ * Upload a media-rail image for the tour (task: tour media
+ * authoring). Sends `{ contentType, dataBase64 }` to
+ * `POST /publish/tours/{id}/media`; the returned `url` is what the
+ * dock writes into the `showImage` task's `filename`. Validation
+ * errors (type/size/magic mismatch) surface with the server's
+ * field-error message so the publisher sees exactly what was
+ * refused.
+ */
+export async function uploadTourMedia(
+  id: string,
+  payload: { contentType: string; dataBase64: string },
+  opts?: { fetchFn?: typeof fetch },
+): Promise<{ url: string } | { error: string }> {
+  const result = await publisherSend<{ url: string }>(
+    `/api/v1/publish/tours/${encodeURIComponent(id)}/media`,
+    payload,
+    { method: 'POST', fetchFn: opts?.fetchFn },
+  )
+  if (!result.ok) {
+    if (result.kind === 'validation' && result.errors.length > 0) {
+      return { error: result.errors[0].message }
+    }
+    return { error: errorLabel(result) }
   }
   return result.data
 }
@@ -234,8 +265,21 @@ function errorLabel(
       return 'Session expired — please sign in again'
     case 'not_found':
       return 'Tour not found'
-    case 'server':
-      return result.body || `Server error (${result.status ?? 'unknown'})`
+    case 'server': {
+      // The API sends `{ error, message }`; surface the human-readable
+      // message, never the raw JSON envelope (a 403 for a reviewer was
+      // rendering `{"error":"forbidden_role","message":"…"}` verbatim).
+      if (result.body) {
+        try {
+          const parsed = JSON.parse(result.body) as { message?: unknown }
+          if (typeof parsed.message === 'string' && parsed.message.trim()) return parsed.message
+        } catch {
+          // Not JSON — fall through to the raw body.
+        }
+        return result.body
+      }
+      return `Server error (${result.status ?? 'unknown'})`
+    }
     case 'validation':
       return result.errors[0]?.message ?? 'Validation failed'
   }

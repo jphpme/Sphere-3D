@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * Wire types for portal-bound publisher API responses.
  *
@@ -47,6 +50,18 @@ export interface PublisherDataset {
    *  for a thumbnail cell in the list table. Null/absent when there's
    *  no thumbnail or it can't be resolved (no R2 public base bound). */
   thumbnail_url?: string | null
+  /** Whether the current caller may mutate this row (edit / retract /
+   *  delete). The whole catalog is visible to every publisher, but
+   *  writes stay owner-scoped, so the portal only shows the mutation
+   *  controls when this is true. Absent on older payloads / fixtures,
+   *  which the UI treats as editable (`can_edit !== false`) since the
+   *  server is the authoritative gate regardless of what the UI
+   *  shows. */
+  can_edit?: boolean
+  /** Whether the caller may publish/retract this row (author-own or
+   *  editor/admin-any). Distinct from `can_edit`: a contributor edits
+   *  its own draft but can't publish it. Absent → treated as allowed. */
+  can_publish?: boolean
 }
 
 /**
@@ -72,6 +87,13 @@ export interface PublisherDatasetDetail extends PublisherDataset {
   bbox_e?: number | null
   lon_origin?: number | null
   is_flipped_in_y?: number | null
+  /** Source frames per second for an image-sequence encode. Null /
+   *  absent means the catalog default (30). */
+  playback_fps?: number | null
+  /** `'data-luma'` when the frames encode values rather than colour. */
+  render_encoding?: string | null
+  /** JSON sidecar (palette + scale) paired with `render_encoding`. */
+  color_scale?: string | null
   celestial_body?: string | null
   radius_mi?: number | null
   website_link: string | null

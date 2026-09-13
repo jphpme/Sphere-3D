@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * Chat UI — digital docent chat panel.
  *
@@ -23,8 +26,8 @@ import { isAvailable as isAppleIntelligenceAvailable } from '../services/appleIn
 import { setLogLevel, logger } from '../utils/logger'
 import { emit, startDwell, type DwellHandle } from '../analytics'
 import { enMessages, t, getLocale, type MessageKey } from '../i18n'
-import { resolveSttEngine, resolveTtsEngine, voiceSupportForLocale, splitIntoSpokenChunks, baseLanguage, listVoiceLanguageOptions, type SttSession, type TtsEngine } from '../services/voiceService'
-import { HandsFreeController } from './voiceHandsFree'
+import { resolveSttEngine, resolveTtsEngine, resolveStreamingSttEngine, voiceSupportForLocale, splitIntoSpokenChunks, baseLanguage, listVoiceLanguageOptions, type SttSession, type TtsEngine } from '../services/voiceService'
+import { HandsFreeController, isWakeWordConfigured } from './voiceHandsFree'
 import { registerBrowserVoiceEngines, primeBrowserTts, listBrowserVoices, curateVoices, onBrowserVoicesChanged } from '../services/voiceBrowserEngines'
 import { registerCloudVoiceEngines } from '../services/voiceCloudEngines'
 
@@ -51,6 +54,9 @@ export interface ChatCallbacks {
   onAddMarker: (lat: number, lng: number, label?: string) => void
   onToggleLabels: (visible: boolean) => void
   onHighlightRegion: (geojson: GeoJSON.GeoJSON, label?: string) => void
+  /** §A6 — open the Analyze panel on the region Orbit just measured.
+   *  Optional: a host without the panel simply renders no chip. */
+  onShowAnalysis?: (scope: 'dataset' | 'view' | 'named', regionName?: string) => void
   getMapViewContext: () => MapViewContext | null
   getDatasets: () => Dataset[]
   getCurrentDataset: () => Dataset | null
@@ -376,6 +382,26 @@ export function flushPendingGlobeActions(): void {
   }
 }
 
+/**
+ * Run just the globe actions that belong to a §A6 measurement.
+ *
+ * Everything else in the queue may legitimately be waiting on a
+ * `load-dataset` in the same message — an event card streams Load, Fly
+ * and Seek together and the fly has to follow the load. A measurement
+ * is the opposite case: it describes the dataset that is *already*
+ * loaded, so a Load button for some other dataset in the same reply
+ * must not gate it.
+ */
+function flushMeasurementGlobeActions(): void {
+  const keep: ChatAction[] = []
+  for (const action of pendingGlobeActions) {
+    const owned = (action.type === 'fly-to' || action.type === 'add-marker') && action.fromMeasurement
+    if (owned) executeGlobeAction(action)
+    else keep.push(action)
+  }
+  pendingGlobeActions = keep
+}
+
 // --- Session persistence ---
 
 function saveSession(): void {
@@ -453,12 +479,16 @@ function wireEvents(): void {
   micBtn?.addEventListener('pointerleave', releasePtt)
   micBtn?.addEventListener('pointercancel', releasePtt)
   document.getElementById('chat-stop-speaking')?.addEventListener('click', () => {
+    // Only a barge-in if speech was actually produced — Stop clicked
+    // before the first chunk speaks shouldn't count (§10.4).
+    const wasSpeaking = ttsEmitted
     stopSpeaking()
     // Hands-free interrupt: don't just stop Orbit's voice — hand the
     // turn back to the user immediately by resuming the mic and
     // restoring dataset audio, rather than waiting for the cancelled
     // reply to drain. (§9.1 "Stop speaking" → "interrupt".)
     if ((loadConfig().voiceHandsFree ?? 'off') !== 'off') {
+      if (wasSpeaking) emitBargeIn() // a real reply was cut short (§10.4)
       handsFree?.setBusy(false)
       setVoiceAudioFocus(false)
     }
@@ -556,6 +586,7 @@ function initVoiceInput(): void {
   // never picks them; web-only (no /api proxy in the desktop shell).
   registerCloudVoiceEngines()
   updateMicVisibility()
+  revealWakeWordOption()
   populateVoiceOptions()
   // System voices load asynchronously — refresh the picker when they
   // arrive. Release any prior subscription first so a re-init (hot
@@ -568,13 +599,14 @@ function initVoiceInput(): void {
   handsFree?.teardown()
   handsFree = new HandsFreeController({
     onPartial: (text) => fillVoiceInput(text),
-    onTurn: (text) => { fillVoiceInput(text); void handleSend() },
+    onTurn: (text) => { emitHandsFreeTurn(text); fillVoiceInput(text); void handleSend() },
     onStateChange: (state) => {
       setMicListening(state === 'capturing' || state === 'listening')
       // Duck dataset audio the moment we start capturing a turn (kept
       // ducked through send + reply; released at the resume point).
-      if (state === 'capturing') setVoiceAudioFocus(true)
+      if (state === 'capturing') { handsFreeCaptureStartedAt = Date.now(); setVoiceAudioFocus(true) }
     },
+    onWakeMisfire: () => emitWakeMisfire(),
   })
   syncHandsFree()
 }
@@ -584,6 +616,77 @@ let handsFree: HandsFreeController | null = null
 
 /** Whether dataset audio is currently ducked for a voice turn. */
 let voiceAudioFocused = false
+
+/** Wall-clock start of the current hands-free capture, for turn latency. */
+let handsFreeCaptureStartedAt = 0
+
+/**
+ * Tier B: record a completed hands-free STT turn — provider, language,
+ * latency, and which interaction model (`open-mic` vs `push-to-talk`).
+ * These are the §10.4 numbers that decide the exhibit's interaction
+ * model. No transcript text leaves the device.
+ */
+function emitHandsFreeTurn(transcript: string): void {
+  const cfg = loadConfig()
+  const mode = cfg.voiceHandsFree ?? 'off'
+  if (mode === 'off') return
+  const lang = cfg.voiceLang || getLocale()
+  const provider = resolveStreamingSttEngine(cfg.voiceProvider ?? 'auto', lang)?.provider ?? 'browser'
+  emit({
+    event_type: 'voice_interaction',
+    mode: 'stt',
+    provider,
+    trigger: mode, // 'open-mic' | 'push-to-talk'
+    duration_ms: handsFreeCaptureStartedAt ? Math.max(0, Date.now() - handsFreeCaptureStartedAt) : 0,
+    lang: baseLanguage(lang),
+    // An empty final transcript (the streaming engine can emit one) is
+    // not a successful turn — derive success from real text.
+    success: transcript.trim().length > 0,
+  })
+}
+
+/**
+ * Tier B: record a wake-word false fire — the wake phrase armed a turn
+ * but no speech followed. A `wake-word` STT row with `success:false` and
+ * no duration; the false-fire rate is the §10.4 metric that tells the
+ * exhibit whether the wake threshold is tuned for the hall.
+ */
+function emitWakeMisfire(): void {
+  const cfg = loadConfig()
+  const lang = cfg.voiceLang || getLocale()
+  const provider = resolveStreamingSttEngine(cfg.voiceProvider ?? 'auto', lang)?.provider ?? 'browser'
+  emit({
+    event_type: 'voice_interaction',
+    mode: 'stt',
+    provider,
+    trigger: 'wake-word',
+    duration_ms: 0,
+    lang: baseLanguage(lang),
+    success: false, // a wake with no turn — the false-fire signal
+  })
+}
+
+/**
+ * Tier B: record a hands-free barge-in — the user interrupted Orbit's
+ * spoken reply. Drives the barge-in-frequency metric (§10.4).
+ */
+function emitBargeIn(): void {
+  const lang = loadConfig().voiceLang || getLocale()
+  emit({
+    event_type: 'voice_interaction',
+    mode: 'tts',
+    // The reply that was cut short — use the engine/trigger that were
+    // actually speaking, not a fresh re-resolve.
+    provider: ttsEngine?.provider ?? 'browser',
+    trigger: ttsTrigger, // 'autospeak' | 'replay'
+    duration_ms: 0,
+    lang: baseLanguage(lang),
+    // TTS *had* started (success = "TTS started"); `interrupted` is what
+    // marks the barge-in. Caller only emits this once speech was produced.
+    success: true,
+    interrupted: true,
+  })
+}
 
 /** Duck / restore the dataset audio for a voice turn (deduped). */
 function setVoiceAudioFocus(active: boolean): void {
@@ -616,6 +719,17 @@ function syncHandsFree(): void {
     setMicListening(false)
     setVoiceAudioFocus(false)
   }
+}
+
+/**
+ * Reveal the wake-word hands-free option only when a deploy has
+ * configured the on-device model (`VITE_VOICE_WAKEWORD_MODEL_URL`,
+ * web-only). Otherwise it stays hidden so it isn't offered as a dead
+ * choice. (docs/ORBIT_WAKEWORD.md)
+ */
+function revealWakeWordOption(): void {
+  const opt = document.querySelector<HTMLOptionElement>('#chat-settings-voice-handsfree option[value="wake-word"]')
+  if (opt) opt.hidden = !isWakeWordConfigured()
 }
 
 /** Show the mic only when an STT engine resolves for the active locale (§3 matrix). */
@@ -694,11 +808,12 @@ function toggleListening(): void {
   // still be spoken aloud.
   primeBrowserTts()
   const mode = loadConfig().voiceHandsFree ?? 'off'
-  // Open-mic: the mic button is a mute toggle for the always-on session.
-  // Don't set the indicator here — unmute arms asynchronously and can
-  // fail (permission denied); the controller's state-change hook drives
-  // setMicListening so the UI never gets stuck showing "listening".
-  if (mode === 'open-mic' && handsFree?.isActive()) {
+  // Open-mic and wake-word: the mic button mutes/unmutes the always-on
+  // session (the wake listener, for wake-word). Don't set the indicator
+  // here — unmute arms asynchronously and can fail (permission denied);
+  // the controller's state-change hook drives setMicListening so the UI
+  // never gets stuck showing "listening".
+  if ((mode === 'open-mic' || mode === 'wake-word') && handsFree?.isActive()) {
     const muted = handsFree.toggleMute()
     callbacks?.announce(t(muted ? 'chat.announce.voiceMuted' : 'chat.announce.voiceListening'))
     return
@@ -1076,8 +1191,13 @@ function readSettingsForm(): DocentConfig {
     : current.voiceProvider
   // "" (Same as app) clears the override so voice tracks the UI locale.
   const voiceLang = voiceLangSelect ? (voiceLangSelect.value || undefined) : current.voiceLang
-  const handsFreeValue = handsFreeSelect?.value
-  const voiceHandsFree = handsFreeValue === 'push-to-talk' || handsFreeValue === 'open-mic' || handsFreeValue === 'off'
+  // A stale/persisted 'wake-word' on a deploy that no longer configures
+  // it (or Tauri) falls back to 'off' — the option is hidden, so it
+  // can't be re-selected and would otherwise strand a dead mode.
+  let handsFreeValue = handsFreeSelect?.value
+  if (handsFreeValue === 'wake-word' && !isWakeWordConfigured()) handsFreeValue = 'off'
+  const voiceHandsFree = handsFreeValue === 'push-to-talk' || handsFreeValue === 'open-mic'
+    || handsFreeValue === 'wake-word' || handsFreeValue === 'off'
     ? handsFreeValue
     : current.voiceHandsFree
   return {
@@ -1287,10 +1407,28 @@ async function handleSend(): Promise<void> {
           // happens later via executeGlobeAction. If the host
           // doesn't expose canSetTime, we fall through to the
           // optimistic render as before.
+          //
+          // But suppress the eager failure when this same message
+          // carries a Load button for a dataset that isn't on the
+          // globe yet: the seek is deferred and re-evaluates (and
+          // succeeds, or fails with a real reason) once the user taps
+          // Load. Flagging "no dataset loaded" before they've had the
+          // chance to load one is misleading — e.g. an Orbit
+          // current-event card streams Load + Fly + Seek together, so
+          // at app-start nothing is loaded yet but the seek will work
+          // right after the Load tap. The load-dataset action always
+          // streams before its sibling set-time, so it is already in
+          // `docentMsg.actions` here.
           if (action.type === 'set-time' && callbacks.canSetTime) {
-            const probe = callbacks.canSetTime(action.isoDate)
-            if (!probe.ok) {
-              action = { ...action, error: probe.message }
+            const currentId = callbacks.getCurrentDataset()?.id
+            const pendingLoad = docentMsg.actions.some(
+              a => a.type === 'load-dataset' && a.datasetId !== currentId,
+            )
+            if (!pendingLoad) {
+              const probe = callbacks.canSetTime(action.isoDate)
+              if (!probe.ok) {
+                action = { ...action, error: probe.message }
+              }
             }
           }
           docentMsg.actions.push(action)
@@ -1300,7 +1438,22 @@ async function handleSend(): Promise<void> {
           // gets queued so it can re-evaluate after the user loads
           // a dataset that might satisfy it (different time-enabled
           // dataset → different success conditions).
-          if (action.type !== 'load-dataset') {
+          // `event-citation` is display-only (the load + fly/seek ride on
+          // the sibling load-dataset / fly-to / set-time actions the
+          // <<EVENT:ID>> marker expanded into), so it renders but is never
+          // deferred for execution.
+          if (
+            action.type !== 'load-dataset'
+            && action.type !== 'event-citation'
+            // Display-only too: opening a panel is the user's click to
+            // make, not something to replay when a dataset finishes
+            // loading.
+            && action.type !== 'show-analysis'
+            // And a measurement is a statement, not an act. Deferring
+            // it would mean replaying a reading of one frame against
+            // whatever frame happened to be on screen later.
+            && action.type !== 'measurement'
+          ) {
             pendingGlobeActions.push(action)
           }
           updateStreamingMessage(docentMsg)
@@ -1363,8 +1516,29 @@ async function handleSend(): Promise<void> {
           const currentDataset = callbacks?.getCurrentDataset()
           const allAlreadyLoaded = loadActions.length > 0
             && loadActions.every(a => a.type === 'load-dataset' && a.datasetId === currentDataset?.id)
+          // A measurement's camera move is about the frame already on
+          // the globe, so it never waits on a Load button. Reported
+          // live: the reading was right, the card rendered, and the
+          // globe sat still because the same reply also recommended a
+          // different dataset and the fly-to was queued behind it.
+          flushMeasurementGlobeActions()
           if (loadActions.length === 0 || allAlreadyLoaded) {
             flushPendingGlobeActions()
+          } else {
+            // A load is pending, so the deferred set-time seek hasn't run —
+            // it flushes once the user taps Load. Any set-time error stamped
+            // by the streaming eager dry-check is therefore premature (the
+            // seek will re-evaluate post-load). This also catches the case
+            // the stream-time check can't: an inline `set_time` tool call
+            // arrives *before* the turn-end load-dataset, so its eager check
+            // saw no pending load. Clear those premature errors now that the
+            // full action set is known; a genuine failure re-stamps after
+            // load via executeGlobeAction.
+            let cleared = false
+            for (const a of docentMsg.actions ?? []) {
+              if (a.type === 'set-time' && a.error) { delete a.error; cleared = true }
+            }
+            if (cleared) updateStreamingMessage(docentMsg)
           }
           break
         }
@@ -1662,6 +1836,50 @@ function renderActions(actions: ChatAction[]): string {
       // the label.
       return `<button class="chat-action-btn chat-action-frame" data-dataset-id="${escapeAttr(a.datasetId)}" data-frame-query="${escapeAttr(a.frameQuery)}" aria-label="${escapeAttr(t('chat.action.loadFrame.aria', { name: a.displayName }))}"><span class="chat-action-title">${escapeHtml(a.displayName)}</span> <span class="chat-action-load">${escapeHtml(t('chat.action.loadFrame'))}</span></button>`
     }
+    if (a.type === 'show-analysis') {
+      // Rendered only where the host wired the panel — a chip that
+      // opens nothing is worse than no chip.
+      if (!callbacks?.onShowAnalysis) return ''
+      const label = a.scope === 'named' && a.regionName
+        ? t('chat.action.analyzeRegion', { region: a.regionName })
+        : a.scope === 'view'
+          ? t('chat.action.analyzeView')
+          : t('chat.action.analyzeDataset')
+      return `<button class="chat-action-btn chat-action-analyze" data-analyze-scope="${escapeAttr(a.scope)}"${a.regionName ? ` data-analyze-region="${escapeAttr(a.regionName)}"` : ''} aria-label="${escapeAttr(t('chat.action.analyze.aria', { region: a.regionName ?? label }))}"><span class="chat-action-title">${escapeHtml(label)}</span></button>`
+    }
+    if (a.type === 'measurement') {
+      // The reading as the tool returned it, not as the sentence above
+      // retold it. Display-only and deliberately plain: this is the
+      // one element in a chat bubble that is not the model's voice, so
+      // it should not look like a control the user can press.
+      //
+      // Coordinates are formatted here from the signed floats rather
+      // than parsed out of prose — the compass letters are for reading
+      // and never round-trip back into anything.
+      const place = Number.isFinite(a.lat) && Number.isFinite(a.lon)
+        ? t('chat.measurement.at', {
+            lat: `${Math.abs(a.lat!).toFixed(2)}°${a.lat! >= 0 ? 'N' : 'S'}`,
+            lon: `${Math.abs(a.lon!).toFixed(2)}°${a.lon! >= 0 ? 'E' : 'W'}`,
+          })
+        : ''
+      const meta = [place, a.frameTime, a.dataset].filter(Boolean).join(' · ')
+      return `<div class="chat-measurement">
+        <span class="chat-measurement-eyebrow">${escapeHtml(t('chat.measurement.eyebrow'))}</span>
+        <p class="chat-measurement-value">${escapeHtml(a.valueText)}</p>
+        ${meta ? `<p class="chat-measurement-meta">${escapeHtml(meta)}</p>` : ''}
+      </div>`
+    }
+    if (a.type === 'event-citation') {
+      // Cited current-event card. Display-only: the sibling load-dataset /
+      // fly-to / set-time actions (expanded from the same <<EVENT:ID>>
+      // marker) do the loading and globe move. `sourceUrl` is guaranteed
+      // http(s) by the events client's sanitizer.
+      return `<div class="chat-event-citation">
+        <span class="chat-event-eyebrow">${escapeHtml(t('chat.event.eyebrow'))}</span>
+        <p class="chat-event-title">${escapeHtml(a.title)}</p>
+        <a class="chat-event-source" href="${escapeAttr(a.sourceUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(a.sourceName)} ↗</a>
+      </div>`
+    }
     return ''
   }).join('')
   const loadActions = actions.filter(a => a.type === 'load-dataset')
@@ -1676,6 +1894,19 @@ function wireActionButtons(container: Element): void {
   container.querySelectorAll<HTMLElement>('.chat-action-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       const id = btn.dataset.datasetId
+      // §A6 — the Analyze chip carries no dataset id, so it has to be
+      // handled before the `load-dataset` path rather than falling
+      // through it. Exclusive for the same reason the frame branch is:
+      // an unbound host callback should be a quiet no-op, not a
+      // surprise dataset load.
+      const analyzeScope = btn.dataset.analyzeScope
+      if (analyzeScope) {
+        callbacks?.onShowAnalysis?.(
+          analyzeScope as 'dataset' | 'view' | 'named',
+          btn.dataset.analyzeRegion,
+        )
+        return
+      }
       // Phase 3pg/C — frame-load buttons carry a `data-frame-query`
       // attribute and route through `onLoadFrame` instead. The
       // analytics + dataset-load bookkeeping below stays on the
@@ -1759,13 +1990,63 @@ function wireActionButtons(container: Element): void {
 /**
  * Minimal markdown: **bold**, bullet lists, and newlines.
  */
+/** Unicode superscripts, for the exponent in a unit. */
+const SUPERSCRIPT_CHARS: Record<string, string> = {
+  '0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴',
+  '5': '⁵', '6': '⁶', '7': '⁷', '8': '⁸', '9': '⁹',
+  '-': '⁻', '−': '⁻', '+': '⁺',
+}
+
+/** All-or-nothing: an exponent we cannot render entirely is left alone
+ *  rather than half-converted. */
+function toSuperscript(exponent: string): string | null {
+  let out = ''
+  for (const ch of exponent) {
+    const mapped = SUPERSCRIPT_CHARS[ch]
+    if (!mapped) return null
+    out += mapped
+  }
+  return out
+}
+
+/**
+ * Render a unit exponent however the model chose to write it.
+ *
+ * §A6 answers quote units from the dataset's own sidecar — `kg m-2`,
+ * plain text — and the model has taken to re-setting them in LaTeX
+ * (`m$^{-2}$`), which this chat has no math renderer for, so the markup
+ * reached the user raw.
+ *
+ * Fixed here rather than with another prompt rule, on the evidence of
+ * this phase: rules about how to write a value have failed repeatedly,
+ * and the notation is a rendering concern anyway. Whatever the model
+ * picks, the reader sees units.
+ *
+ * Deliberately narrow. Only an exponent is converted, and only when
+ * every character of it maps; `$` pairs that are not wrapping one are
+ * untouched, so prices survive.
+ */
+function renderUnitExponents(line: string): string {
+  return line
+    // kg m$^{-2}$ — LaTeX inline math around the exponent alone.
+    .replace(/\$\^\{([^}]{1,4})\}\$/g, (m, exp) => toSuperscript(exp) ?? m)
+    // $\text{kg m}^{-2}$ and friends: math delimiters wrapping a unit.
+    .replace(/\$([^$\n]{1,24}?)\^\{([^}]{1,4})\}\$/g, (m, base, exp) => {
+      const sup = toSuperscript(exp)
+      return sup ? `${base}${sup}` : m
+    })
+    // Bare TeX exponents, no delimiters.
+    .replace(/\^\{([^}]{1,4})\}/g, (m, exp) => toSuperscript(exp) ?? m)
+    .replace(/\^(-?\d{1,3})(?![\w^])/g, (m, exp) => toSuperscript(exp) ?? m)
+}
+
 function renderMarkdownLite(html: string): string {
   const lines = html.split('\n')
   const out: string[] = []
   let inList = false
 
   for (const rawLine of lines) {
-    let line = rawLine.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    let line = renderUnitExponents(rawLine).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
     // Convert markdown links [text](url) → clickable <a> (new tab)
     line = line.replace(
       /\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g,

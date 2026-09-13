@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -106,8 +109,8 @@ impl DownloadManager {
 
     fn dataset_dir(&self, dataset_id: &str) -> PathBuf {
         // Sanitize the dataset ID for use as a directory name
-        let safe_id = dataset_id
-            .replace(|c: char| !c.is_alphanumeric() && c != '_' && c != '-', "_");
+        let safe_id =
+            dataset_id.replace(|c: char| !c.is_alphanumeric() && c != '_' && c != '-', "_");
         self.base_dir.join(safe_id)
     }
 
@@ -232,7 +235,9 @@ impl DownloadManager {
             written += chunk.len() as u64;
         }
 
-        file.flush().await.map_err(|e| format!("Flush error: {e}"))?;
+        file.flush()
+            .await
+            .map_err(|e| format!("Flush error: {e}"))?;
         Ok(written)
     }
 
@@ -331,7 +336,8 @@ mod tests {
 
     #[test]
     fn redacts_query_string_from_signed_vimeo_proxy_url() {
-        let url = "https://video-proxy.zyra-project.org/12345/master.mp4?token=abc.signed&expires=9999";
+        let url =
+            "https://video-proxy.zyra-project.org/12345/master.mp4?token=abc.signed&expires=9999";
         assert_eq!(
             redact_url_query(url),
             "https://video-proxy.zyra-project.org/12345/master.mp4"

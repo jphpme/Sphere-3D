@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * Tests for the searchDatasets helper.
  *
@@ -538,6 +541,9 @@ describe('rowOverlapsTimeRange (3pg/D)', () => {
       radius_mi: null,
       lon_origin: null,
       is_flipped_in_y: null,
+      render_encoding: null,
+      playback_fps: null,
+      color_scale: null,
       transcoding: null,
       active_transcode_upload_id: null,
       frame_count: null,

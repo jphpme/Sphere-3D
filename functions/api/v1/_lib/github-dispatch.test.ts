@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * Unit tests for `github-dispatch.ts`. The integration coverage
  * (the /complete handler firing the dispatch and stamping
@@ -57,6 +60,14 @@ describe('dispatchTranscode — config errors', () => {
     ).rejects.toThrow(ConfigurationError)
     expect(fetchSpy).not.toHaveBeenCalled()
   })
+
+  it('throws ConfigurationError when GITHUB_DISPATCH_TOKEN is whitespace-only', async () => {
+    const fetchSpy = vi.fn<typeof fetch>()
+    await expect(() =>
+      dispatchTranscode({ ...ENV_OK, GITHUB_DISPATCH_TOKEN: '   ' }, PAYLOAD, fetchSpy),
+    ).rejects.toThrow(ConfigurationError)
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
 })
 
 describe('dispatchTranscode — happy path', () => {
@@ -80,6 +91,28 @@ describe('dispatchTranscode — happy path', () => {
     }
     expect(body.event_type).toBe(TRANSCODE_HLS_EVENT_TYPE)
     expect(body.client_payload).toEqual(PAYLOAD)
+  })
+
+  it('trims whitespace off the token, owner, and repo', async () => {
+    // A secret pushed with `wrangler pages secret put` from a file
+    // keeps the file's newline. Untrimmed, GitHub answers 401 and
+    // it reads like a revoked token.
+    const fetchSpy = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response(null, { status: 204 }))
+    await dispatchTranscode(
+      {
+        ...ENV_OK,
+        GITHUB_OWNER: ' zyra-project\n',
+        GITHUB_REPO: 'terraviz\n',
+        GITHUB_DISPATCH_TOKEN: 'ghp_test\n',
+      },
+      PAYLOAD,
+      fetchSpy,
+    )
+    const [url, init] = fetchSpy.mock.calls[0]
+    expect(url).toBe('https://api.github.com/repos/zyra-project/terraviz/dispatches')
+    expect((init?.headers as Record<string, string>).Authorization).toBe('Bearer ghp_test')
   })
 })
 

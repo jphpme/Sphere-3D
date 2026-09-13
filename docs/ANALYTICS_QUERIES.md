@@ -413,6 +413,46 @@ PCVR session and buckets as `pcvr`).
 `error_detail` adds a `stack` blob at `blob9` (sanitized stack
 frame list).
 
+### `output_added` / `output_removed` / `output_failure` (Tier A)
+
+Multi-monitor output windows
+(`docs/MULTI_MONITOR_PLAN.md` §3, rung 13). All three fire from the
+**control window** — an output window emits nothing, ever, because §3.6
+keeps it capture-clean. Categorical fields only: no free text to hash,
+no coordinates to round, no device string. The one field that could
+identify hardware is `monitor_index`, an index into the enumeration,
+never the OS-reported display name.
+
+| Position | Field (output_added) | Field (output_removed) | Field (output_failure) |
+|---|---|---|---|
+| `blob5` | `framebuffer_bucket` (`1k` / `2k` / `4k` / `8k`) | `mode` | `kind` |
+| `blob6` | `mode` (`sos-equirect`) | `reason` | `recovered` (`true` / `false`) |
+| `double1` | `client_offset_ms` | `client_offset_ms` | `client_offset_ms` |
+| `double2` | `monitor_index` | — | `retries` |
+
+`output_removed.reason` is one of `operator-close`, `crash`,
+`monitor-gone`, `gpu-loss-timeout`, `rejected-by-storm-guard`.
+`operator-close` covers both halves of a deliberate close (the Outputs
+panel's Remove and the window's own close button) — the manager keeps
+those apart internally, but the interesting split for a dashboard is
+deliberate-versus-not. `rejected-by-storm-guard` is a **configured**
+output that never came back, so it has no paired `output_added`.
+
+`output_failure.kind` is one of `crash`, `hls-stalled`, `ipc-silence`,
+`gpu-loss`, `monitor-unplug`. A crash emits **both** an
+`output_removed` (reason `crash`) and an `output_failure` (kind
+`crash`) — the first answers "how many outputs stopped and why", the
+second "how healthy is this installation".
+
+> **Landed so far:** `crash` is the only `kind` with a detector, and
+> `monitor-gone` / `gpu-loss-timeout` are the only `reason`s without
+> one. The enums are complete now so a dashboard pinned to them does
+> not have to change when failure-recovery cases 2-5 ship.
+
+A framebuffer width that is not a rung on the ladder reports the rung
+**below** it, matching what `outputScene` actually renders — so a
+`4k` bucket never means a window running 8K.
+
 ### Tier B catalog (research mode only)
 
 Tier B events (`dwell`, `orbit_*`, `browse_search`, `vr_interaction`,
@@ -522,18 +562,35 @@ alphabetical layout. Per-event positions:
 
 Fields sort alphabetically (after the 4 server-stamped blobs, and
 excluding `event_type`): `client_offset_ms` (num), `duration_ms`
-(num), `lang` (str), `mode` (str), `provider` (str), `success`
-(bool → str), `trigger` (str).
+(num), `interrupted` (bool → str, **optional**), `lang` (str),
+`mode` (str), `provider` (str), `success` (bool → str),
+`trigger` (str).
 
-| Position | Field |
+`interrupted` is the **optional blob**: present only on a TTS
+barge-in (`interrupted = 'true'`). When present it sorts first and
+sits at `blob5`, shifting the rest up one; when absent (the common
+case — every STT turn and every non-interrupted reply) the positions
+below hold. Detect a barge-in row by `blob5 = 'true'` (a normal
+row's `blob5` is the `lang` enum, never `true`).
+
+| Position (no barge-in) | Field |
 |---|---|
 | `blob5` | `lang` (BCP-47 base, e.g. `en`) |
 | `blob6` | `mode` (`stt` / `tts`) |
 | `blob7` | `provider` (`cloud` / `local` / `browser`) |
 | `blob8` | `success` (`true` / `false`) |
-| `blob9` | `trigger` (`mic` / `autospeak` / `replay`) |
+| `blob9` | `trigger` (`mic` / `autospeak` / `replay` / `open-mic` / `push-to-talk` / `wake-word`) |
 | `double1` | `client_offset_ms` |
 | `double2` | `duration_ms` |
+
+**Hands-free turns** carry `trigger = 'open-mic'`, `'push-to-talk'` or
+`'wake-word'` — the §10.4 numbers for the open-mic-vs-button-vs-wake
+exhibit decision. **Barge-in frequency** = count of rows with
+`blob5 = 'true'`. Exclude those from the turn breakdown with
+`AND blob5 != 'true'`. **Wake-word false-fire rate** = share of
+`trigger = 'wake-word'` STT rows (`blob6 = 'stt'`) with
+`success = 'false'` (`blob8`) — a wake that armed a turn but heard no
+speech; raise the wake threshold if it climbs.
 
 ---
 

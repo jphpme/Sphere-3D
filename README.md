@@ -16,6 +16,56 @@ A WebGL-based globe that streams environmental data from the [Science On a Spher
 
 ![Terraviz interface showing the Earth globe with the dataset browse panel](initial-interface.jpg)
 
+## 🌍 Run your own node
+
+Terraviz is built to be self-hosted. A museum, a lab or a school can
+run its own instance, publish its own datasets, and federate with
+others — the public site is one node, not the product.
+
+Two ways in. They cover the same install — pick by where you are:
+
+- **[The install console](https://terraviz.zyra-project.org/setup)**
+  — a guided, resumable checklist in the browser. Filters itself to
+  the kind of node you want, substitutes your values into every
+  command, and prints a pre-flight sheet. **Use this first**, before
+  you have cloned anything, to size the job up and collect the
+  values you will need.
+- **[docs/SELF_HOSTING.md](docs/SELF_HOSTING.md)** — the canonical
+  reference, and the one to work from once you have a checkout. It
+  is the long form: every click path, every caveat, the
+  troubleshooting table. **Use this while you install.** It travels
+  with the repo, so it always matches the revision you are on.
+
+The console links into the Markdown per phase, so moving from one to
+the other is a click. It is generated from the same modules
+`npm run setup` uses, which is what keeps its binding list and
+prerequisites honest.
+
+**Both start with a fork.** Every step after the pre-flight sheet
+assumes your own copy of this repo: Phase 3 rewrites `wrangler.toml`
+with your resource IDs, and Cloudflare Pages builds from your remote.
+Cloning upstream directly fails late rather than early — nothing
+complains until you have IDs to push and nowhere to push them.
+[§0.2 of the install guide](docs/SELF_HOSTING.md#02-fork-the-repository)
+covers the two ways to get one and what differs between them.
+
+> On a fork, the console link above serves **upstream’s** revision.
+> Your checkout’s `docs/SELF_HOSTING.md` is the one that matches
+> your code — and once you finish Phase 5, your own node serves its
+> own `/setup`, generated from your checkout.
+
+| Tier | | |
+|---|---|---|
+| **Viewer node** | ~30 min | Globe, upstream catalog, Orbit, telemetry. No publishing. |
+| **Publisher node** | 2–3 h | Your own datasets and tours, the publisher portal, semantic search, events, blog. The usual choice. |
+| **Publisher + desktop** | +1 h | The above, plus branded desktop builds with your own update feed. |
+
+```bash
+npm run setup -- --manual        # the prerequisites only a human can do
+npm run setup -- --interactive   # guided, validated, resumable
+```
+
+
 ## ✨ Features
 
 - Searchable, filterable dataset browser with category and sub-category navigation, expandable cards, and thumbnails
@@ -90,10 +140,23 @@ docker-compose up
 If you prefer to run locally:
 
 **Prerequisites:**
-- Node.js 18+ and npm/pnpm
-- Git
+- Node.js 22+ and npm/pnpm ([nodejs.org](https://nodejs.org/en/download))
+- Git, and [Git LFS](https://git-lfs.com)
+
+> **Git LFS is not optional here.** The skybox faces and the Earth
+> specular map under `public/assets/` are stored in LFS. Clone without
+> it and you get 131-byte pointer files still named `.jpg` — and nothing
+> reports it. The build succeeds, and the globe renders with no stars.
+> Already cloned? `git lfs install && git lfs pull` fixes it in place.
 
 ```bash
+# Get the code. Running your own node? Fork first — see
+# "Run your own node" above. Contributing upstream? Clone this repo
+# directly, or your own fork if you plan to raise a pull request.
+git lfs install    # once per machine, before the clone
+git clone https://github.com/zyra-project/terraviz.git
+cd terraviz
+
 # Install dependencies
 npm install
 # or
@@ -143,11 +206,16 @@ that want to operate their own dataset catalog. Self-contained — no
 extra services required for local development.
 
 ```bash
-# 1. Generate the node identity keypair (one-time per clone).
-npm run gen:node-key
-
-# 2. Reset the local D1 (apply migrations + seed ~20 SOS rows).
+# 1. Reset the local D1 (apply migrations + seed ~20 SOS rows).
+#    This seeds node_identity with a PLACEHOLDER public key.
 npm run db:reset
+
+# 2. Generate the keypair and stamp its public half onto the row
+#    step 1 just seeded. This order matters: run gen:node-key first
+#    and it finds no row, warns, and exits 0 — then db:reset re-seeds
+#    the placeholder, which your node goes on to serve from
+#    /.well-known/terraviz.json.
+npm run gen:node-key
 
 # 3. Configure the publisher-API dev bypass.
 cp .dev.vars.example .dev.vars
@@ -169,6 +237,17 @@ npm run dev    # in pane 2
 curl http://localhost:8788/api/v1/catalog | jq '.datasets | length'
 # → 20
 ```
+
+> **Step 4 runs offline**, with no Cloudflare account and no
+> `wrangler login`. Every binding it needs is served from
+> `.wrangler/`, and `.dev.vars` sets `MOCK_AI=true` so the code
+> paths that would call Workers AI use a local mock instead.
+>
+> To exercise the real Workers AI — Orbit chat, voice, live
+> embeddings — run `wrangler login` and use `npm run
+> dev:functions:ai`. That adds the `AI` binding, which wrangler can
+> only run against Cloudflare, so it is the one thing here that
+> needs credentials.
 
 The full developer walkthrough — bindings, data model, and the
 publishing CLI — lives in
@@ -365,7 +444,7 @@ See **[ROADMAP.md](ROADMAP.md)** for the web app roadmap and **[docs/DESKTOP_APP
 ## 📚 Key Files to Review
 
 - **[ROADMAP.md](ROADMAP.md)** - Prioritized web app roadmap
-- **[docs/SELF_HOSTING.md](docs/SELF_HOSTING.md)** - Deploy your own Terraviz instance on Cloudflare Pages (Pages, D1, AE, KV, Access, Grafana)
+- **[docs/SELF_HOSTING.md](docs/SELF_HOSTING.md)** - Deploy your own Terraviz instance on Cloudflare Pages (Pages, D1, AE, KV, Access, Grafana). Most of the install is automated — `npm run setup -- --manual` lists the prerequisites only a human can do, `npm run setup -- --interactive` walks you through the rest.
 - **[docs/ANALYTICS.md](docs/ANALYTICS.md)** - Analytics pipeline reference (schema, privacy posture, how to add events)
 - **[docs/ANALYTICS_CONTRIBUTING.md](docs/ANALYTICS_CONTRIBUTING.md)** - Contributor + reviewer guide for analytics changes (privacy invariants, review checklist)
 - **[docs/PRIVACY.md](docs/PRIVACY.md)** - User-facing privacy policy
@@ -404,6 +483,34 @@ When you find issues, note:
 - **MapLibre GL JS Docs**: https://maplibre.org/maplibre-gl-js/docs/
 - **NASA GIBS**: https://nasa-gibs.github.io/gibs-api-docs/
 - **HLS.js Docs**: https://hlsjs.readthedocs.io/
+
+## 📄 License
+
+TerraViz is licensed under the [Apache License, Version 2.0](LICENSE). `NOTICE` carries the
+attribution notice that licence requires downstream users to preserve.
+
+Every source file opens with a two-line SPDX header, so a scanner can read the licence off
+any file on its own rather than inferring it from the repository root:
+
+```
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+```
+
+```bash
+npm run check:license           # verify every source file has it (runs inside `npm run type-check`)
+npm run check:license -- --fix  # insert or repair it — idempotent, never stacks
+```
+
+`--fix` picks the comment syntax for each file kind and places the header below any line that
+must come first (a `#!` shebang, an HTML doctype, `// swift-tools-version:`). The same check
+verifies that `LICENSE`, `NOTICE`, `package.json`, `CITATION.cff` and both Cargo manifests all
+name the same licence and holder, so the metadata downstream tools actually read cannot drift
+from the file headers. Coverage and the reasoning behind it are documented at the top of
+[`scripts/check-license-headers.ts`](scripts/check-license-headers.ts).
+
+Copyright holder and citation credit are separate: `The Zyra Project` holds copyright in the
+code, and [`CITATION.cff`](CITATION.cff) records who to cite for the software as scholarship.
 
 ---
 

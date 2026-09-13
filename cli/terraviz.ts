@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * `terraviz` CLI entry point.
  *
@@ -40,6 +43,7 @@ import {
   type CommandContext,
 } from './commands'
 import { runImportSnapshot } from './import-snapshot'
+import { runImportEvents } from './import-events'
 import { runInitNode } from './init-node'
 import { runVerifyDeploy } from './verify-deploy'
 import { runMigrateR2Hls } from './migrate-r2-hls'
@@ -112,6 +116,8 @@ async function main(argv: string[]): Promise<number> {
       return runInitNode(ctx)
     case 'import-snapshot':
       return runImportSnapshot(ctx)
+    case 'import-events':
+      return runImportEvents(ctx)
     case 'verify-deploy':
       return runVerifyDeploy(ctx, { config })
     case 'migrate-r2-hls':

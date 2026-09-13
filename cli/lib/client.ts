@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * Thin HTTP client wrapping fetch + the Access auth headers.
  *
@@ -297,6 +300,28 @@ export class TerravizClient {
 
   createTour<T = unknown>(body: Record<string, unknown>): Promise<Result<T>> {
     return this.request<T>('POST', '/api/v1/publish/tours', body)
+  }
+
+  /**
+   * Create / ingest a current event (`terraviz import-events`). The
+   * endpoint is idempotent on `(feed_id, external_id)`, so re-runs
+   * refresh rather than duplicate, and runs the matcher to propose
+   * dataset links. Returns `{ created, event, links }`.
+   */
+  createEvent<T = unknown>(body: Record<string, unknown>): Promise<Result<T>> {
+    return this.request<T>('POST', '/api/v1/publish/events', body)
+  }
+
+  /**
+   * Server-side registry-driven ingestion pull
+   * (`terraviz import-events`, the default mode): the backend iterates
+   * its **enabled feed connectors** (EONET + any operator-added RSS
+   * feeds), fetches each feed itself, and runs the shared upsert +
+   * match (+ slice-C AI enrichment) path. One call ingests everything
+   * the node is configured for.
+   */
+  refreshEvents<T = unknown>(): Promise<Result<T>> {
+    return this.request<T>('POST', '/api/v1/publish/events/refresh', {})
   }
 
   updateTour<T = unknown>(

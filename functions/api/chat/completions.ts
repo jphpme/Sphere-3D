@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * Cloudflare Pages Function — /api/chat/completions
  *
@@ -7,6 +10,11 @@
  */
 
 import { isWorkersAiQuotaError } from '../_lib/workers-ai-error'
+import {
+  extractModelText,
+  extractModelToolCalls,
+  type WorkersAiToolCall,
+} from '../_lib/workers-ai-text'
 
 interface Env {
   AI: {
@@ -38,7 +46,7 @@ interface RequestBody {
 
 // Model mapping: friendly names → Cloudflare AI model IDs
 const MODEL_MAP: Record<string, string> = {
-  'gemma-4-26b-a4b-it': '@cf/google/gemma-4-26b-a4b-it',
+  'gemma-4-26b-a4b-it':   '@cf/google/gemma-4-26b-a4b-it',
   'llama-4-scout':        '@cf/meta/llama-4-scout-17b-16e-instruct',
   'llama-3.3-70b':        '@cf/meta/llama-3.3-70b-instruct-fp8-fast',
   'llama-3.1-70b':        '@cf/meta/llama-3.1-70b-instruct',
@@ -66,6 +74,11 @@ const NATIVE_MULTIMODAL_MODELS = new Set([
   '@cf/meta/llama-4-scout-17b-16e-instruct',
 ])
 
+// Reasoning models that think out loud by default. Gemma 4 streams its
+// chain of thought into the reply unless the chat template is told not
+// to, which the client shows as a deliberation preamble — or, on the
+// raw stream envelope, as an empty reply. Every request to these models
+// asks for the answer up front.
 const THINKING_DEFAULT_OFF_MODELS = new Set([
   '@cf/google/gemma-4-26b-a4b-it',
 ])
@@ -128,6 +141,12 @@ function extractImageAndNormalise(
 // 512 tokens ≈ 380 words — enough for Orbit's 150-word guideline with headroom.
 const DEFAULT_MAX_TOKENS = 512
 
+/**
+ * Switch thinking off for models that deliberate by default, and clear
+ * the reasoning-effort knob explicitly (absent is not the same as off
+ * for the templates that read it). Called from every path that builds
+ * a Workers AI request body so no route to these models can miss it.
+ */
 function applyModelInputDefaults(model: string, inputs: Record<string, unknown>): void {
   if (!THINKING_DEFAULT_OFF_MODELS.has(model)) return
 
@@ -141,37 +160,34 @@ function applyModelInputDefaults(model: string, inputs: Record<string, unknown>)
   inputs.reasoning_effort ??= null
 }
 
-function firstString(...values: unknown[]): string {
-  for (const value of values) {
-    if (typeof value === 'string' && value.length > 0) return value
-  }
-  return ''
-}
-
-function extractWorkersAIText(result: unknown): string {
-  if (!result || typeof result !== 'object') return ''
-
-  const obj = result as Record<string, unknown>
-  const choices = Array.isArray(obj.choices) ? obj.choices : []
-  const firstChoice = choices[0]
-  const choiceObj = firstChoice && typeof firstChoice === 'object'
+/**
+ * Reply text for a single Workers AI streaming chunk.
+ *
+ * The shared `extractModelText` covers the classic `{ response }` chunk
+ * and the OpenAI `choices[0].message.content` envelope. It has no
+ * `delta` arm, though, and Gemma 4 streams
+ * `{ choices: [{ delta: { content } }] }` — so going through the shared
+ * extractor alone dropped every chunk and the reply arrived blank. The
+ * stream-only arms are read here rather than by widening the shared
+ * helper, which non-streaming callers also depend on.
+ */
+function streamChunkText(raw: unknown): string {
+  const extracted = extractModelText(raw)
+  if (extracted) return extracted
+  if (!raw || typeof raw !== 'object') return ''
+  const obj = raw as Record<string, unknown>
+  const firstChoice = Array.isArray(obj.choices) ? obj.choices[0] : undefined
+  const choice = firstChoice && typeof firstChoice === 'object'
     ? firstChoice as Record<string, unknown>
     : {}
-  const message = choiceObj.message && typeof choiceObj.message === 'object'
-    ? choiceObj.message as Record<string, unknown>
-    : {}
-  const delta = choiceObj.delta && typeof choiceObj.delta === 'object'
-    ? choiceObj.delta as Record<string, unknown>
+  const delta = choice.delta && typeof choice.delta === 'object'
+    ? choice.delta as Record<string, unknown>
     : {}
 
-  return firstString(
-    obj.response,
-    obj.output_text,
-    obj.text,
-    message.content,
-    delta.content,
-    choiceObj.text,
-  )
+  for (const candidate of [delta.content, choice.text, obj.text]) {
+    if (typeof candidate === 'string' && candidate.length > 0) return candidate
+  }
+  return ''
 }
 
 // Basic per-IP rate limiting (in-memory, resets on deploy)
@@ -326,13 +342,14 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       const inputs: Record<string, unknown> = { messages: wfMessages, max_tokens: DEFAULT_MAX_TOKENS }
       applyModelInputDefaults(cfModel, inputs)
       if (body.tools?.length) inputs.tools = body.tools
-      const result = (await context.env.AI.run(cfModel, inputs)) as {
-        response?: string
-        tool_calls?: Array<{ id?: string; type?: string; function?: { name: string; arguments: unknown }; name?: string; arguments?: Record<string, unknown> }>
-      }
+      const result = await context.env.AI.run(cfModel, inputs)
+      // Envelope-tolerant reads — some models answer { response, tool_calls }
+      // top-level, others the OpenAI { choices: [{ message }] } shape.
+      const resultText = extractModelText(result)
+      const resultToolCalls = extractModelToolCalls(result)
       const chatId = `chatcmpl-${Date.now()}`
       // Normalize tool_calls to OpenAI shape (same logic as toolStreamShim)
-      const normalizedToolCalls = result.tool_calls?.map((raw, i) => {
+      const normalizedToolCalls = resultToolCalls?.map((raw, i) => {
         const name = raw.function?.name ?? raw.name ?? ''
         const rawArgs = raw.function?.arguments ?? raw.arguments ?? {}
         return {
@@ -353,10 +370,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           index: 0,
           message: {
             role: 'assistant',
-            content: extractWorkersAIText(result),
+            content: resultText ?? '',
             ...(normalizedToolCalls?.length ? { tool_calls: normalizedToolCalls } : {}),
           },
-          finish_reason: result.tool_calls?.length ? 'tool_calls' : 'stop',
+          finish_reason: resultToolCalls?.length ? 'tool_calls' : 'stop',
         }],
       }
       return new Response(JSON.stringify(payload), {
@@ -470,7 +487,7 @@ async function visionStreamShim(
   let text: string
   try {
     const result = await ai.run(model, inputs)
-    text = extractWorkersAIText(result)
+    text = extractModelText(result) ?? ''
     if (!text) {
       text = '[Vision model returned an empty response. Try rephrasing your question.]'
     }
@@ -517,15 +534,14 @@ async function streamResponse(
   messages: { role: string; content: string }[],
   cors: Record<string, string>,
 ): Promise<Response> {
-  const response = (await ai.run(
-    model,
-    (() => {
-      const inputs: Record<string, unknown> = { messages, stream: true, max_tokens: DEFAULT_MAX_TOKENS }
-      applyModelInputDefaults(model, inputs)
-      return inputs
-    })(),
-    { returnRawResponse: true },
-  )) as Response
+  const inputs: Record<string, unknown> = {
+    messages,
+    stream: true,
+    max_tokens: DEFAULT_MAX_TOKENS,
+  }
+  applyModelInputDefaults(model, inputs)
+
+  const response = (await ai.run(model, inputs, { returnRawResponse: true })) as Response
 
   if (!response.body) {
     return new Response(JSON.stringify({ error: 'No response from AI' }), {
@@ -563,11 +579,14 @@ async function streamResponse(
 
         try {
           const parsed = JSON.parse(payload)
+          const parsedText = streamChunkText(parsed)
 
-          const parsedText = extractWorkersAIText(parsed)
-
-          // Skip usage-only chunks (response is null or empty with usage)
-          if (parsed.response === null || (parsed.response === '' && parsed.usage) || !parsedText) {
+          // Skip chunks that carry no text: the usage-only tail
+          // (`{ response: '', usage }`) and any envelope this transformer
+          // cannot read. Gemma 4 streams `choices[0].delta`, so without
+          // the delta arm in `streamChunkText` every chunk landed here
+          // and the reply arrived blank.
+          if (!parsedText) {
             continue
           }
 
@@ -621,7 +640,7 @@ async function nonStreamResponse(
     choices: [
       {
         index: 0,
-        message: { role: 'assistant', content: extractWorkersAIText(result) },
+        message: { role: 'assistant', content: extractModelText(result) ?? '' },
         finish_reason: 'stop',
       },
     ],
@@ -678,21 +697,9 @@ async function toolStreamShim(
   applyModelInputDefaults(model, inputs)
   if (tools?.length) inputs.tools = tools
 
-  type WorkersAIToolCall = {
-    id?: string
-    type?: string
-    function?: { name: string; arguments: unknown }
-    name?: string
-    arguments?: Record<string, unknown>
-  }
-  type WorkersAIResult = {
-    response?: string
-    tool_calls?: WorkersAIToolCall[]
-  }
-
-  let result: WorkersAIResult
+  let result: unknown
   try {
-    result = (await ai.run(model, inputs)) as WorkersAIResult
+    result = await ai.run(model, inputs)
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Workers AI error'
     // Phase 1f/D — distinguish quota-exhausted from generic
@@ -718,7 +725,10 @@ async function toolStreamShim(
   const base = { id: chatId, object: 'chat.completion.chunk', created, model }
   const chunks: string[] = []
 
-  const resultText = extractWorkersAIText(result)
+  // Envelope-tolerant reads — some models answer { response, tool_calls }
+  // top-level, others the OpenAI { choices: [{ message }] } shape.
+  const resultText = extractModelText(result)
+  const resultToolCalls: WorkersAiToolCall[] | null = extractModelToolCalls(result)
 
   // Text content chunk (if present)
   if (resultText) {
@@ -731,9 +741,9 @@ async function toolStreamShim(
   }
 
   // Tool call chunks (if present)
-  if (result.tool_calls?.length) {
-    for (let i = 0; i < result.tool_calls.length; i++) {
-      const raw = result.tool_calls[i]
+  if (resultToolCalls?.length) {
+    for (let i = 0; i < resultToolCalls.length; i++) {
+      const raw = resultToolCalls[i]
       // Normalize both response shapes into OpenAI's function-tool-call format
       const name = raw.function?.name ?? raw.name ?? ''
       const rawArgs = raw.function?.arguments ?? raw.arguments ?? {}
@@ -768,7 +778,7 @@ async function toolStreamShim(
       choices: [{
         index: 0,
         delta: {},
-        finish_reason: result.tool_calls?.length ? 'tool_calls' : 'stop',
+        finish_reason: resultToolCalls?.length ? 'tool_calls' : 'stop',
       }],
     })}\n\n`,
   )

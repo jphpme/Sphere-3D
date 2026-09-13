@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * Tests for the catalog wire-shape serializer.
  *
@@ -65,6 +68,9 @@ function fakeRow(overrides: Partial<DatasetRow> = {}): DatasetRow {
     radius_mi: null,
     lon_origin: null,
     is_flipped_in_y: null,
+    render_encoding: null,
+    playback_fps: null,
+    color_scale: null,
     transcoding: null,
     active_transcode_upload_id: null,
     frame_count: null,
@@ -312,6 +318,24 @@ describe('serializeDataset — Phase 3d columns (non-global metadata)', () => {
     const nullCase = serializeDataset(fakeRow({}), emptyDecoration, fakeIdentity)
     expect(nullCase.isFlippedInY).toBeUndefined()
   })
+
+  it('serves playback_fps, which the tour frame-rate maths divides by', () => {
+    // The column existed for a while without being served, so a tour
+    // asking for a rate on a slow dataset divided by 30 and came out
+    // wrong by the ratio between the two. Nothing on the client can
+    // recover a field the wire never carries.
+    const wire = serializeDataset(
+      fakeRow({ playback_fps: 2 }),
+      emptyDecoration,
+      fakeIdentity,
+    )
+    expect(wire.playbackFps).toBe(2)
+  })
+
+  it('omits playbackFps when the column is null (30 is the default)', () => {
+    const wire = serializeDataset(fakeRow({}), emptyDecoration, fakeIdentity)
+    expect(wire.playbackFps).toBeUndefined()
+  })
 })
 
 describe('serializeDataset — asset-ref resolution (3b/N)', () => {
@@ -463,9 +487,13 @@ describe('serializeDataset — frames envelope (3pg/A)', () => {
   const DS = '01HXAAAAAAAAAAAAAAAAAAAAAA'
   const UP = '01HYAAAAAAAAAAAAAAAAAAAAAA'
   const FRAMES_REF = `r2:uploads/${DS}/${UP}/source_filenames.json`
-  const TEMPLATE = `https://assets.test/uploads/${DS}/${UP}/frames/{index}.png`
-  const stubFramesResolver = (ref: string, ext: string) =>
-    ref === FRAMES_REF && ext === 'png' ? TEMPLATE : null
+  // The dataset-level urlTemplate now points at the /frames/{index}
+  // redirect endpoint (content-addressed frames have no direct-R2
+  // {index} template); the resolver builds it from (datasetId, baseUrl).
+  const tmpl = (datasetId: string) =>
+    `https://test.example.com/api/v1/datasets/${datasetId}/frames/{index}`
+  const stubFramesResolver = (datasetId: string, baseUrl: string) =>
+    `${baseUrl.replace(/\/$/, '')}/api/v1/datasets/${datasetId}/frames/{index}`
 
   it('omits frames when frame_count is null (legacy video / non-sequence row)', () => {
     const wire = serializeDataset(
@@ -497,7 +525,7 @@ describe('serializeDataset — frames envelope (3pg/A)', () => {
     )
     expect(wire.frames).toEqual({
       count: 240,
-      urlTemplate: TEMPLATE,
+      urlTemplate: tmpl(DS),
       framesDigest: 'sha256:' + 'a'.repeat(64),
     })
   })
@@ -519,7 +547,7 @@ describe('serializeDataset — frames envelope (3pg/A)', () => {
       undefined,
       stubFramesResolver,
     )
-    expect(wire.frames).toEqual({ count: 5, urlTemplate: TEMPLATE })
+    expect(wire.frames).toEqual({ count: 5, urlTemplate: tmpl('DS_TEST') })
   })
 
   it('omits frames when no resolver is supplied (legacy call sites pre-3pg)', () => {
@@ -571,5 +599,55 @@ describe('serializeDataset — frames envelope (3pg/A)', () => {
       stubFramesResolver,
     )
     expect(wire.frames).toBeUndefined()
+  })
+})
+
+describe('data-encoded video (renderEncoding / colorScale)', () => {
+  const SCALE = JSON.stringify({
+    stops: [
+      { t: 0, rgba: [0, 0, 0, 0] },
+      { t: 1, rgba: [255, 0, 0, 255] },
+    ],
+    vmin: 0,
+    vmax: 50,
+    units: 'mg m-2',
+    transparentRange: 12 / 256,
+  })
+
+  it('serializes the pair when both halves are valid', () => {
+    const wire = serializeDataset(
+      fakeRow({ render_encoding: 'data-luma', color_scale: SCALE }),
+      emptyDecoration,
+      fakeIdentity,
+    )
+    expect(wire.renderEncoding).toBe('data-luma')
+    const scale = wire.colorScale as { vmin: number; vmax: number; units: string; stops: unknown[] }
+    expect(scale.vmin).toBe(0)
+    expect(scale.vmax).toBe(50)
+    expect(scale.units).toBe('mg m-2')
+    expect(scale.stops).toHaveLength(2)
+  })
+
+  it('omits both when the row is a legacy picture', () => {
+    // This is the backwards-compatibility guarantee at the wire:
+    // a row that predates the columns serializes exactly as before.
+    const wire = serializeDataset(fakeRow(), emptyDecoration, fakeIdentity)
+    expect(wire.renderEncoding).toBeUndefined()
+    expect(wire.colorScale).toBeUndefined()
+  })
+
+  it.each([
+    ['an encoding with no sidecar', { render_encoding: 'data-luma', color_scale: null }],
+    ['a sidecar with no encoding', { render_encoding: null, color_scale: SCALE }],
+    ['an unknown encoding', { render_encoding: 'data-rgb', color_scale: SCALE }],
+    ['a malformed sidecar', { render_encoding: 'data-luma', color_scale: '{nope' }],
+    ['a sidecar with one stop', { render_encoding: 'data-luma', color_scale: '{"stops":[],"vmin":0,"vmax":1}' }],
+  ])('serves %s as a plain picture', (_label, over) => {
+    // All-or-nothing. A half-written row degrades to raw grayscale
+    // rather than to confidently-wrong colours, and the client is
+    // never handed an encoding it cannot interpret.
+    const wire = serializeDataset(fakeRow(over), emptyDecoration, fakeIdentity)
+    expect(wire.renderEncoding).toBeUndefined()
+    expect(wire.colorScale).toBeUndefined()
   })
 })

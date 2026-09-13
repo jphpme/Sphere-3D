@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * Publisher portal entry point.
  *
@@ -22,7 +25,8 @@ import { emit } from '../../analytics'
 import { logger } from '../../utils/logger'
 import { t } from '../../i18n'
 import { PublisherRouter, type RouteHandler } from './router'
-import { renderMePage } from './pages/me'
+import { renderOverviewPage } from './pages/overview'
+import { renderMePage, localizedRole } from './pages/me'
 import { renderDatasetsPage } from './pages/datasets'
 import { renderDatasetDetailPage } from './pages/dataset-detail'
 import { renderDatasetEditPage } from './pages/dataset-edit'
@@ -32,11 +36,19 @@ import { renderWorkflowsPage } from './pages/workflows'
 import { renderWorkflowDetailPage } from './pages/workflow-detail'
 import { renderWorkflowEditPage } from './pages/workflow-edit'
 import { renderFeaturedHeroPage } from './pages/featured-hero'
+import { renderNodeProfilePage } from './pages/node-profile'
+import { renderBlogPage } from './pages/blog'
+import { renderBlogEditPage } from './pages/blog-edit'
+import { renderFeedsPage } from './pages/feeds'
+import { renderEventsPage } from './pages/events'
 import { renderAnalyticsPage } from './pages/analytics'
 import { renderUsersPage } from './pages/users'
 import { renderFeedbackPage } from './pages/feedback'
-import { renderTopbar } from './components/topbar'
+import { renderImportPage } from './pages/import'
+import { renderSidebar, type SidebarIdentity } from './components/sidebar'
 import { publisherGet } from './api'
+import { FEATURES_CHANGE_EVENT, fetchFeatures, fetchPublicOrgName } from './features'
+import type { FeatureMap } from '../../types/node-features'
 import '../../styles/publisher.css'
 
 const PORTAL_ROOT_ID = 'publisher-root'
@@ -54,25 +66,38 @@ const PORTAL_CONTENT_ID = 'publisher-content'
 export function routeForPath(
   pathname: string,
 ):
+  | 'overview'
   | 'me'
   | 'datasets'
   | 'tours'
   | 'featured_hero'
+  | 'node_profile'
+  | 'blog'
+  | 'events'
+  | 'feeds'
   | 'import'
   | 'workflows'
   | 'analytics'
   | 'feedback'
   | 'users'
   | 'unknown' {
-  if (pathname === '/publish' || pathname.startsWith('/publish/me')) return 'me'
-  if (pathname.startsWith('/publish/datasets')) return 'datasets'
-  if (pathname.startsWith('/publish/tours')) return 'tours'
-  if (pathname.startsWith('/publish/workflows')) return 'workflows'
-  if (pathname.startsWith('/publish/featured-hero')) return 'featured_hero'
-  if (pathname.startsWith('/publish/import')) return 'import'
-  if (pathname.startsWith('/publish/analytics')) return 'analytics'
-  if (pathname.startsWith('/publish/feedback')) return 'feedback'
-  if (pathname.startsWith('/publish/users')) return 'users'
+  // Normalise a trailing slash so `/publish/` maps to the same route
+  // as `/publish` (the router treats them identically).
+  const path = pathname.length > 1 && pathname.endsWith('/') ? pathname.slice(0, -1) : pathname
+  if (path === '/publish' || path.startsWith('/publish/overview')) return 'overview'
+  if (path.startsWith('/publish/me')) return 'me'
+  if (path.startsWith('/publish/datasets')) return 'datasets'
+  if (path.startsWith('/publish/tours')) return 'tours'
+  if (path.startsWith('/publish/workflows')) return 'workflows'
+  if (path.startsWith('/publish/featured-hero')) return 'featured_hero'
+  if (path.startsWith('/publish/node-profile')) return 'node_profile'
+  if (path.startsWith('/publish/blog')) return 'blog'
+  if (path.startsWith('/publish/events')) return 'events'
+  if (path.startsWith('/publish/feeds')) return 'feeds'
+  if (path.startsWith('/publish/import')) return 'import'
+  if (path.startsWith('/publish/analytics')) return 'analytics'
+  if (path.startsWith('/publish/feedback')) return 'feedback'
+  if (path.startsWith('/publish/users')) return 'users'
   return 'unknown'
 }
 
@@ -155,6 +180,13 @@ function renderPlaceholder(mount: HTMLElement, sectionLabel: string, subPhase: s
   shell.appendChild(comingSoon)
 
   mount.replaceChildren(shell)
+}
+
+function overviewPage(mount: HTMLElement, router: () => PublisherRouter): RouteHandler {
+  return () =>
+    renderOverviewPage(mount, {
+      routerNavigate: path => void router().navigate(path),
+    })
 }
 
 function mePage(mount: HTMLElement): RouteHandler {
@@ -260,11 +292,31 @@ function workflowEditPage(
 }
 
 function importPage(mount: HTMLElement): RouteHandler {
-  return () => renderPlaceholder(mount, t('publisher.section.import'), '3pf')
+  return () => renderImportPage(mount)
 }
 
 function featuredHeroPage(mount: HTMLElement): RouteHandler {
   return () => void renderFeaturedHeroPage(mount)
+}
+
+function nodeProfilePage(mount: HTMLElement): RouteHandler {
+  return () => void renderNodeProfilePage(mount)
+}
+
+function blogPage(mount: HTMLElement, getRouter: () => { navigate: (p: string) => void }): RouteHandler {
+  return () => void renderBlogPage(mount, { navigate: p => getRouter().navigate(p) })
+}
+
+function blogEditPage(mount: HTMLElement, getRouter: () => { navigate: (p: string) => void }): RouteHandler {
+  return params => void renderBlogEditPage(mount, { postId: params.id, navigate: p => getRouter().navigate(p) })
+}
+
+function eventsPage(mount: HTMLElement): RouteHandler {
+  return () => void renderEventsPage(mount)
+}
+
+function feedsPage(mount: HTMLElement): RouteHandler {
+  return () => void renderFeedsPage(mount)
 }
 
 function analyticsPage(mount: HTMLElement): RouteHandler {
@@ -283,19 +335,48 @@ function notFoundPage(mount: HTMLElement): RouteHandler {
   return () => renderPlaceholder(mount, t('publisher.section.notFound'), '3pa/A')
 }
 
+interface PortalChrome {
+  isAdmin: boolean
+  identity: SidebarIdentity
+  eventsBadge: number
+  features: FeatureMap
+}
+
 /**
- * Best-effort identity probe used only to decide whether the topbar
- * renders admin-only tabs. Returns false on any error — the Users
- * page and its API both enforce admin access independently, so a
- * hidden-but-reachable tab degrades safely.
+ * Best-effort probe that fills in the sidebar's admin-only links,
+ * feature-gated links, footer identity, and events badge. Every read
+ * degrades safely — the pages and their APIs enforce access
+ * independently, so a hidden-but-reachable link (or a missing badge)
+ * is harmless. The events count is only fetched for admins with the
+ * events feature on (the endpoint 403s otherwise).
  */
-async function resolveIsAdmin(): Promise<boolean> {
-  const res = await publisherGet<{ role: string; is_admin: boolean }>('/api/v1/publish/me')
-  if (!res.ok) return false
-  return res.data.is_admin === true || res.data.role === 'admin'
+async function resolvePortalChrome(): Promise<PortalChrome> {
+  // The org name and the toggle map ride the same public
+  // node-profile payload, read once through the module cache the
+  // gated pages share — one fetch + parse, fail-open to all-enabled.
+  const [meRes, orgName, features] = await Promise.all([
+    publisherGet<{ role: string; is_admin: boolean; display_name: string }>(
+      '/api/v1/publish/me',
+    ),
+    fetchPublicOrgName(),
+    fetchFeatures(),
+  ])
+  const isAdmin = meRes.ok && (meRes.data.is_admin === true || meRes.data.role === 'admin')
+  const identity: SidebarIdentity = {
+    orgName,
+    displayName: meRes.ok ? meRes.data.display_name : null,
+    roleLabel: meRes.ok ? localizedRole(meRes.data.role) : null,
+  }
+  let eventsBadge = 0
+  if (isAdmin && features.events) {
+    const ev = await publisherGet<{ events: unknown[] }>('/api/v1/publish/events?status=proposed')
+    if (ev.ok && Array.isArray(ev.data.events)) eventsBadge = ev.data.events.length
+  }
+  return { isAdmin, identity, eventsBadge, features }
 }
 
 let activeRouter: PublisherRouter | null = null
+let featuresChangeListener: (() => void) | null = null
 
 /**
  * Boot the publisher portal. Idempotent — calling twice reuses the
@@ -317,7 +398,8 @@ export async function bootPublisherPortal(): Promise<void> {
   }
   activeRouter = new PublisherRouter(
     [
-      { pattern: '/publish', handler: mePage(content) },
+      { pattern: '/publish', handler: overviewPage(content, getRouter) },
+      { pattern: '/publish/overview', handler: overviewPage(content, getRouter) },
       { pattern: '/publish/me', handler: mePage(content) },
       { pattern: '/publish/datasets', handler: datasetsPage(content, getRouter) },
       // `/publish/datasets/new` must come BEFORE the `:id` pattern
@@ -340,6 +422,12 @@ export async function bootPublisherPortal(): Promise<void> {
       },
       { pattern: '/publish/workflows/:id', handler: workflowDetailPage(content, getRouter) },
       { pattern: '/publish/featured-hero', handler: featuredHeroPage(content) },
+      { pattern: '/publish/node-profile', handler: nodeProfilePage(content) },
+      { pattern: '/publish/blog/new', handler: blogEditPage(content, getRouter) },
+      { pattern: '/publish/blog/:id/edit', handler: blogEditPage(content, getRouter) },
+      { pattern: '/publish/blog', handler: blogPage(content, getRouter) },
+      { pattern: '/publish/events', handler: eventsPage(content) },
+      { pattern: '/publish/feeds', handler: feedsPage(content) },
       { pattern: '/publish/analytics', handler: analyticsPage(content) },
       { pattern: '/publish/feedback', handler: feedbackPage(content) },
       { pattern: '/publish/users', handler: usersPage(content) },
@@ -347,13 +435,14 @@ export async function bootPublisherPortal(): Promise<void> {
     ],
     notFoundPage(content),
   )
-  // Render the topbar immediately (without admin-only tabs) so the
-  // portal never blocks on the network. The admin-tab probe is
-  // best-effort and only controls visibility of the Users tab, so we
-  // fire it in the background and re-render the topbar if it resolves
-  // true. The page and API both gate independently.
+  // Render the sidebar immediately (without admin-only links, footer
+  // identity, or the events badge) so the portal never blocks on the
+  // network. The chrome probe is best-effort — it fills in admin
+  // links, the user footer, and the events count — so we fire it in
+  // the background and re-render once it resolves. The pages and APIs
+  // gate independently.
   const bootedRouter = activeRouter
-  renderTopbar(root, bootedRouter, { isAdmin: false })
+  renderSidebar(root, bootedRouter, { isAdmin: false })
   await bootedRouter.start()
   // One emit per portal-chunk load — the publisher visits
   // /publish/*, the chunk resolves, the first route dispatches,
@@ -366,13 +455,24 @@ export async function bootPublisherPortal(): Promise<void> {
   })
   logger.info('[publisher] portal booted at', window.location.pathname)
 
-  void resolveIsAdmin().then(isAdmin => {
+  void resolvePortalChrome().then(chrome => {
     // Guard against a teardown (or re-boot) that happened while the
-    // probe was in flight — only re-render the topbar we mounted.
-    if (isAdmin && activeRouter === bootedRouter) {
-      renderTopbar(root, bootedRouter, { isAdmin: true })
+    // probe was in flight — only re-render the sidebar we mounted.
+    if (activeRouter === bootedRouter) {
+      renderSidebar(root, bootedRouter, chrome)
     }
   })
+
+  // An admin saving the Features card resets the toggle cache and
+  // fires this event — re-resolve the chrome so hidden/re-enabled
+  // tabs appear without a reload.
+  featuresChangeListener = () => {
+    if (activeRouter !== bootedRouter) return
+    void resolvePortalChrome().then(chrome => {
+      if (activeRouter === bootedRouter) renderSidebar(root, bootedRouter, chrome)
+    })
+  }
+  window.addEventListener(FEATURES_CHANGE_EVENT, featuresChangeListener)
 }
 
 /** Tear down the portal — only used by tests. */
@@ -380,6 +480,10 @@ export function teardownPublisherPortal(): void {
   if (activeRouter) {
     activeRouter.stop()
     activeRouter = null
+  }
+  if (featuresChangeListener) {
+    window.removeEventListener(FEATURES_CHANGE_EVENT, featuresChangeListener)
+    featuresChangeListener = null
   }
   const root = document.getElementById(PORTAL_ROOT_ID)
   if (root) root.remove()

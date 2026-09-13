@@ -17,6 +17,24 @@ work.
   ensure it is compatible with the Apache License, Version 2.0 and include proper attribution as required by the original license.
 - No CLA is required at this time; contributions are accepted under the project's Apache License terms.
 - This project enforces the Developer Certificate of Origin (DCO). All commits must include a Signed-off-by trailer.
+- **Every source file carries a two-line SPDX header**, and `npm run check:license` (part of `type-check`)
+  fails CI when one is missing:
+
+  ```
+  // SPDX-License-Identifier: Apache-2.0
+  // Copyright 2026 The Zyra Project
+  ```
+
+  Never hand-write these across a batch of files — `npm run check:license -- --fix` inserts the header
+  in the right comment syntax for each file kind, below any line that must come first (a shebang, a
+  doctype, `// swift-tools-version:`). Re-running it is safe: it repairs a wrong header rather than
+  stacking a second one on top.
+
+  The year may widen (`2026-2027`) but the holder is pinned. `The Zyra Project` is the copyright holder;
+  `CITATION.cff` separately records who to cite, and the two are deliberately different fields. Changing
+  the holder is one edit to the `COPYRIGHT` constant in `scripts/check-license-headers.ts` plus a
+  `--fix` — the same check verifies `LICENSE`, `NOTICE`, `package.json`, `CITATION.cff` and both Cargo
+  manifests still agree with it.
 
 If you have questions about licensing or attribution, please open an issue before submitting your PR.
 
@@ -130,6 +148,10 @@ Open issues at <https://github.com/zyra-project/terraviz/issues>.
   `functions/` and `cli/`. `npm run check:doc-coverage` (part of
   `type-check`) fails CI otherwise. For a module that genuinely needs no
   row, add a `// doc-exempt: <reason>` comment to its source.
+- **Licence headers**: a new source file needs the two-line SPDX header before CI will accept it. See
+  *License and Contributor Terms* above; `npm run check:license -- --fix` writes it for you. The check
+  reads untracked files too, so a file you have written but not yet `git add`ed fails locally rather
+  than surprising you in CI.
 - **Rust** (desktop app): follow the existing patterns in `src-tauri/src/`.
   Run `cargo fmt` and `cargo clippy` before submitting changes.
 - Check `package.json` for the available `scripts` (lint, format, type-check,
@@ -137,6 +159,46 @@ Open issues at <https://github.com/zyra-project/terraviz/issues>.
 
 For AI-assisted development, see [CLAUDE.md](CLAUDE.md) and [AGENTS.md](AGENTS.md)
 for codebase conventions and constraints.
+
+---
+
+## LLM Integrations
+
+TerraViz uses LLMs in a few narrow places (Orbit, voice, current-events
+enrichment). Every LLM touchpoint follows one convention, enforced in review:
+
+1. **Speak through an existing contract.** Vendor engines sit behind an
+   interface that a different engine — or a human — could satisfy: the
+   OpenAI-compatible provider client
+   ([`src/services/llmProvider.ts`](src/services/llmProvider.ts)), the
+   workflow run-status callback, the metadata sidecar. A capability that
+   can't be expressed through an existing contract needs the contract
+   designed first, not a bespoke integration.
+2. **Availability-gate with a working fallback.**
+   [`src/services/appleIntelligenceProvider.ts`](src/services/appleIntelligenceProvider.ts)
+   is the exemplar: vendor-specific engine, same `StreamChunk` interface,
+   `isAvailable()` gate, transparent fallback to the HTTP provider. A
+   deployment without the vendor (a fork without an API key, non-Apple
+   hardware) degrades to the fallback or a silent no-op — never a broken
+   feature.
+3. **No vendor LLM SDK in `dependencies`.** The agnostic layer is the wire
+   protocol: `llmProvider.ts` is raw `fetch` + SSE with no dependencies, and
+   stays that way. Vendor-specific *code* is fine when rules 1–2 hold;
+   vendor SDK *packages* are not.
+4. **External content in model input is data, never instructions.** Anything
+   an LLM reads that originates outside the trust boundary — catalog
+   metadata, feed items, remote directory listings, run logs quoting a
+   remote server — may be adversarial (prompt injection). Model *output*
+   influenced by such content only ever reaches the world through a
+   validated contract (the stage/command allowlist, `/validate`, a
+   human-approved save); it is never executed, auto-published, or granted a
+   write path of its own. Rule 2's gate includes quota exhaustion: a
+   provider that runs out mid-flight (see `_lib/workers-ai-error.ts`)
+   degrades like a provider that was never configured.
+
+Verdicts on specific agentic-integration proposals (and the reasoning
+behind this convention) are recorded in
+[docs/AGENT_SDK_EVALUATION.md](docs/AGENT_SDK_EVALUATION.md).
 
 ---
 

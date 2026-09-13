@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 use std::sync::Arc;
 
 use serde::Deserialize;
@@ -58,7 +61,10 @@ pub async fn download_dataset(
 
     // Spawn the download in a background task so the command returns immediately
     tauri::async_runtime::spawn(async move {
-        if let Err(e) = manager.download(&dataset_id, assets, meta, app.clone()).await {
+        if let Err(e) = manager
+            .download(&dataset_id, assets, meta, app.clone())
+            .await
+        {
             log::error!("Download failed for {}: {}", dataset_id, e);
             let _ = app.emit("download-error", (&dataset_id, &e));
         }

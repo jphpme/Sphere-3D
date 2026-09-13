@@ -1,15 +1,34 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * Data service - fetches and manages SOS dataset metadata
  */
 
 import axios from 'axios'
-import type { Dataset, DatasetFormat, DatasetMetadata, EnrichedMetadata, TimeInfo, Tour } from '../types'
+import type {
+  Dataset,
+  DatasetFormat,
+  DatasetMetadata,
+  EnrichedMetadata,
+  ProbingInfo,
+  TimeInfo,
+  Tour,
+} from '../types'
+import {
+  parseColorScale,
+  RENDER_ENCODING_DATA_LUMA,
+  type ColorScale,
+  type RenderEncoding,
+} from '../types/color-scale'
+import { toDisplayUnits } from '../types/unit-scale'
 import { isLiveCadence, parseISO8601Duration, safePeriodMs } from '../utils/time'
+import { resolveDatasetRef } from '../utils/datasetUrl'
 import { logger } from '../utils/logger'
 import { reportError } from '../analytics'
-import { apiFetch, getCatalogSource } from './catalogSource'
+import { apiFetch, getCatalogSource, sampleToursEnabled } from './catalogSource'
 
-/** Milliseconds floor for period-driven cache expiry â€” even a PT15M
+/** Milliseconds floor for period-driven cache expiry — even a PT15M
  *  workflow shouldn't make every page interaction re-fetch the
  *  catalog. */
 const MIN_PERIOD_TTL_MS = 5 * 60 * 1000
@@ -19,7 +38,7 @@ const MIN_PERIOD_TTL_MS = 5 * 60 * 1000
  * given its contents. Static catalogs keep the default; when any
  * dataset carries `period` (a workflow-maintained real-time row),
  * the TTL shrinks to the shortest period present, floored at
- * 5 minutes â€” fresh enough to pick up the next scheduled
+ * 5 minutes — fresh enough to pick up the next scheduled
  * re-publish, bounded enough to not hammer the API.
  */
 export function effectiveCatalogTtl(
@@ -29,14 +48,14 @@ export function effectiveCatalogTtl(
 ): number {
   let shortest = defaultMs
   for (const dataset of datasets) {
-    // Only LIVE cadences count â€” historical time-series rows carry
+    // Only LIVE cadences count — historical time-series rows carry
     // `period` too, and malformed periods are ignored rather than
     // thrown (PR #179 review).
     if (!isLiveCadence(dataset.period, dataset.endTime, now)) continue
     const ms = safePeriodMs(dataset.period)
     if (ms !== null && ms < shortest) shortest = ms
   }
-  // Floor at 5 min, but never grow past the caller's default â€” the
+  // Floor at 5 min, but never grow past the caller's default — the
   // helper's contract is shrink-only (PR #179 review).
   return Math.min(defaultMs, Math.max(shortest, MIN_PERIOD_TTL_MS))
 }
@@ -69,16 +88,16 @@ interface RawEnrichedEntry {
   dataset_developer?: { name?: string; affiliation_url?: string }
   vis_developer?: { name?: string; affiliation_url?: string }
   related_datasets?: Array<{ title: string; url: string }>
-  /** Catalog surfaces this dataset is published on â€” `["SOS"]`,
-   *  `["Explorer"]`, or `["SOS","Explorer"]`. Phase 4 Â§6.4 keys
+  /** Catalog surfaces this dataset is published on — `["SOS"]`,
+   *  `["Explorer"]`, or `["SOS","Explorer"]`. Phase 4 §6.4 keys
    *  the `availableFor` tag and the SOS-only synthesis path off
    *  this field. */
   available_for?: string[]
-  /** Lower-fidelity preview URL â€” used as `dataLink` for the
-   *  synthesised SOS-only datasets (Â§6.4). Plays back from the
+  /** Lower-fidelity preview URL — used as `dataLink` for the
+   *  synthesised SOS-only datasets (§6.4). Plays back from the
    *  SOS-public CloudFront origin rather than the SOSx Vimeo HLS. */
   movie_preview?: string
-  /** Thumbnail URL â€” used as `thumbnailLink` for synthesised
+  /** Thumbnail URL — used as `thumbnailLink` for synthesised
    *  SOS-only datasets. */
   thumbnail_image?: string
 }
@@ -101,7 +120,7 @@ const SOS_ONLY_ID_SLUG_MAX = 60
  * Derive a stable slug for a SOS-only dataset ID. Lowercases,
  * replaces non-alphanumeric runs with `_`, trims edge underscores,
  * caps length. The result is deterministic for a given input
- * title â€” Phase 4 Â§6.4 deep links keyed off the synthesised ID
+ * title — Phase 4 §6.4 deep links keyed off the synthesised ID
  * stay stable across enriched-JSON reorderings or additions.
  *
  * Exported for tests.
@@ -138,26 +157,26 @@ export function deriveAvailableFor(
 /**
  * Synthesise `Dataset` rows for entries that exist only in the
  * broader SOS catalog (the enriched metadata file) and have no
- * live-catalog counterpart. Phase 4 Â§6.4 from the catalog
+ * live-catalog counterpart. Phase 4 §6.4 from the catalog
  * features plan.
  *
  * `existingTitleKeys` is the set of normalized titles already
  * represented in the live catalog; entries with a matching key
  * are skipped so we don't duplicate the SOSx subset. Returns a
  * list of `Dataset` records suitable for merging alongside the
- * live catalog â€” each carries `availableFor: 'SOS'` so consumers
+ * live catalog — each carries `availableFor: 'SOS'` so consumers
  * can filter them in/out independently.
  *
  * Synthesis maps:
  *
- *   movie_preview     â†’  dataLink
- *   thumbnail_image   â†’  thumbnailLink
- *   description       â†’  abstractTxt
- *   dataset_developer â†’  organization
- *   keywords          â†’  tags  (also via the enrichedMap)
- *   url               â†’  websiteLink
+ *   movie_preview     →  dataLink
+ *   thumbnail_image   →  thumbnailLink
+ *   description       →  abstractTxt
+ *   dataset_developer →  organization
+ *   keywords          →  tags  (also via the enrichedMap)
+ *   url               →  websiteLink
  *
- * Entries without a `movie_preview` URL are skipped â€” without a
+ * Entries without a `movie_preview` URL are skipped — without a
  * playable asset there's nothing to load on click.
  *
  * `normalizeTitle` is injected so the function stays pure (no
@@ -179,14 +198,14 @@ export function synthesizeSosOnlyDatasets(
   for (const entry of enrichedEntries) {
     if (!entry.title || !entry.movie_preview) continue
     const availableFor = deriveAvailableFor(entry.available_for)
-    // Only synthesise pure SOS-only rows â€” Both and Explorer
+    // Only synthesise pure SOS-only rows — Both and Explorer
     // entries are already covered by the live catalog merge.
     if (availableFor !== 'SOS') continue
 
     const titleKey = normalizeTitle(entry.title)
     if (existingTitleKeys.has(titleKey)) continue
 
-    // Stable, title-derived ID â€” Phase 4 Â§6.4 follow-up. Earlier
+    // Stable, title-derived ID — Phase 4 §6.4 follow-up. Earlier
     // version used an iteration-order counter, which meant adding
     // a single new entry to the enriched file could shift every
     // downstream ID and break shared `?dataset=SOS_ONLY_X` links.
@@ -206,13 +225,13 @@ export function synthesizeSosOnlyDatasets(
       tags: entry.keywords,
       websiteLink: entry.url,
       availableFor: 'SOS',
-      // Worldwide bbox by default â€” synthesised SOS-only rows
+      // Worldwide bbox by default — synthesised SOS-only rows
       // have no spatial-extent source data, and the SOS catalog
       // is overwhelmingly global (see GLOBAL_BBOX docstring on
       // `wireToDataset`). Keeping the default in lockstep so
       // SPA-side `Dataset.boundingBox` is always populated.
       boundingBox: { n: 90, s: -90, w: -180, e: 180 },
-      // No live-catalog provenance, no weight signal â€” sort to
+      // No live-catalog provenance, no weight signal — sort to
       // the bottom of catalog-weight-ordered listings until
       // explicit relevance signals layer on.
       weight: 0,
@@ -225,15 +244,15 @@ export function synthesizeSosOnlyDatasets(
 
 /**
  * The wire shape served by `/api/v1/catalog`. Subset of the full
- * server-side `WireDataset` interface â€” we only declare the fields
+ * server-side `WireDataset` interface — we only declare the fields
  * we actually consume, so the frontend doesn't drift if the backend
  * adds federation-only fields later.
  */
 interface WireDataset {
   id: string
-  /** Phase 1d/T â€” bulk-import provenance (e.g. `INTERNAL_SOS_768`). */
+  /** Phase 1d/T — bulk-import provenance (e.g. `INTERNAL_SOS_768`). */
   legacyId?: string
-  /** Phase 3pg/C â€” URL-safe slug used for frame-button display naming. */
+  /** Phase 3pg/C — URL-safe slug used for frame-button display naming. */
   slug?: string
   title: string
   format: string
@@ -243,6 +262,14 @@ interface WireDataset {
   thumbnailLink?: string
   legendLink?: string
   closedCaptionLink?: string
+  /** Colour-ramp image used by interactive probing — distinct from
+   *  `legendLink` on the rows that carry both. The server has always
+   *  serialized this; the SPA simply never declared it. */
+  colorTableLink?: string
+  /** Pixel-coords → data-value mapping for the colour table. Declared
+   *  in the JSON schema and emitted by the serializer; likewise never
+   *  declared here until now. */
+  probingInfo?: ProbingInfo
   websiteLink?: string
   startTime?: string
   endTime?: string
@@ -257,26 +284,43 @@ interface WireDataset {
    * spatial extent. Phase 3d typed-column promotion (see the
    * backend serializer's docstring); the SPA's regional-projection
    * feature reads this at render time. Missing on rows whose
-   * `bbox_*` D1 columns are NULL â€” `wireToDataset` defaults those
+   * `bbox_*` D1 columns are NULL — `wireToDataset` defaults those
    * to worldwide so the SPA-side `Dataset.boundingBox` is always
-   * populated. Phase 4 Â§6.9 Map view depends on every dataset
+   * populated. Phase 4 §6.9 Map view depends on every dataset
    * carrying *some* bbox so the include-global toggle has a
    * complete view of the catalog.
    */
   boundingBox?: { n: number; s: number; w: number; e: number }
   /** Celestial body the dataset visualises. Omitted == Earth.
-   *  Non-Earth values (Mars / Moon / Sun / Jupiter / â€¦) cue the
+   *  Non-Earth values (Mars / Moon / Sun / Jupiter / …) cue the
    *  SPA's Phase 3e base-texture swap. */
   celestialBody?: string
   /** Radius of the celestial body in miles, when non-Earth. */
   radiusMi?: number
   /** Globe longitude rotation reference in degrees. Omitted == 0
-   *  (prime-meridian-centered); Â±180 is dateline-centered (Pacific-
+   *  (prime-meridian-centered); ±180 is dateline-centered (Pacific-
    *  focused datasets). */
   lonOrigin?: number
+  /** How the frames encode their pixels. Omitted means a picture —
+   *  colourised upstream and rendered as-is, which is every dataset
+   *  published before this field existed. `'data-luma'` means luma
+   *  carries the normalised value and `colorScale` colours it at
+   *  display time. The serializer emits this only as a validated
+   *  pair with `colorScale`. */
+  renderEncoding?: RenderEncoding
+  /** Palette + scale for a `data-luma` dataset. Already parsed and
+   *  validated server-side; re-parsed here anyway, because the
+   *  catalog can also be served from a static snapshot. */
+  colorScale?: ColorScale
   /** Image Y-axis flip flag for datasets with inverted Y conventions.
    *  Omitted == false. */
   isFlippedInY?: boolean
+  /** How many source frames this dataset advances per second. The
+   * rate is already baked into the file, so nothing applies it on
+   * load; it is served because the tour `frameRate` task must divide
+   * a requested rate by what the dataset already does. Omitted means
+   * 30. */
+  playbackFps?: number
   /**
    * Set by the node-catalog serializer for tour rows: the resolved
    * URL the tour engine fetches the tour document from. Bypasses
@@ -286,7 +330,7 @@ interface WireDataset {
    */
   tourJsonUrl?: string
   /**
-   * Phase 3pg/A â€” image-sequence frame envelope, populated only
+   * Phase 3pg/A — image-sequence frame envelope, populated only
    * for rows transcoded from a frames upload. Older clients ignore
    * this and continue to play the HLS bundle via `dataLink`.
    */
@@ -300,8 +344,8 @@ interface WireDataset {
 /**
  * Map a `WireDataset` from `/api/v1/catalog` (or the token-gated
  * preview consumer) into the frontend's `Dataset` shape. The two
- * shapes are mostly the same â€” `WireDataset` is the additive
- * superset documented in CATALOG_BACKEND_PLAN.md â€” so this is a
+ * shapes are mostly the same — `WireDataset` is the additive
+ * superset documented in CATALOG_BACKEND_PLAN.md — so this is a
  * field-rename layer rather than a real conversion. Kept as a
  * named helper so both the catalog fetch and the preview path
  * stay in lockstep when new wire fields land.
@@ -310,16 +354,16 @@ interface WireDataset {
  * Default geographic bounding box for SPA-side datasets that
  * arrive on the wire without one. The SOS catalog is overwhelmingly
  * worldwide (sea surface temperature, atmospheric reanalysis,
- * satellite imagery â€” all global by design); only a handful of
+ * satellite imagery — all global by design); only a handful of
  * regional datasets (specific hurricane basins, named-region
  * studies) carry a narrower bbox today. Defaulting to worldwide
  * at the SPA boundary makes the spatial extent explicit on every
- * `Dataset` record so the Â§6.9 Map view's include-global toggle
+ * `Dataset` record so the §6.9 Map view's include-global toggle
  * sees the complete catalog, rather than the ~95% of rows whose
  * `bbox_*` D1 columns are still NULL falling out of the Map
  * surface entirely.
  *
- * Publishers should set a regional bbox when applicable â€” the
+ * Publishers should set a regional bbox when applicable — the
  * default acknowledges the current data-shape reality without
  * blocking a future where bboxes are populated row-by-row.
  */
@@ -338,6 +382,13 @@ function wireToDataset(d: WireDataset): Dataset {
     thumbnailLink: d.thumbnailLink,
     legendLink: d.legendLink,
     closedCaptionLink: d.closedCaptionLink,
+    // The server has always emitted these two and the SPA has
+    // always discarded them here — the loss started one level up,
+    // at `WireDataset`, which never declared them. `colorTableLink`
+    // in particular means `downloadService`'s colour-table bundling
+    // has been reading `undefined` on every catalog-sourced dataset.
+    colorTableLink: d.colorTableLink,
+    probingInfo: d.probingInfo,
     websiteLink: d.websiteLink,
     startTime: d.startTime,
     endTime: d.endTime,
@@ -347,9 +398,9 @@ function wireToDataset(d: WireDataset): Dataset {
     runTourOnLoad: d.runTourOnLoad,
     tags: d.tags,
     enriched: d.enriched,
-    // Phase 3d typed metadata â€” propagate boundingBox /
+    // Phase 3d typed metadata — propagate boundingBox /
     // celestialBody / lonOrigin / isFlippedInY from the wire so
-    // the SPA's regional-projection feature + the Â§6.9 Map view
+    // the SPA's regional-projection feature + the §6.9 Map view
     // see them. boundingBox defaults to worldwide (see
     // GLOBAL_BBOX docstring) so the Map's spatial-extent
     // surface is complete even before publishers populate the
@@ -358,15 +409,45 @@ function wireToDataset(d: WireDataset): Dataset {
     celestialBody: d.celestialBody,
     lonOrigin: d.lonOrigin,
     isFlippedInY: d.isFlippedInY,
+    playbackFps: d.playbackFps,
+    // Data-encoded video. Re-validated rather than trusted: the
+    // catalog can be served from a static snapshot that never went
+    // through the write-side validator, and a malformed sidecar
+    // here would colour real measurements through an invented
+    // palette. `parseColorScale` returning null drops the pair, and
+    // the dataset renders as the picture it appears to be.
+    ...dataEncodingFromWire(d),
     tourJsonUrl: d.tourJsonUrl,
     frames: d.frames,
   }
 }
 
 /**
+ * Accept the `renderEncoding` / `colorScale` pair only when both
+ * halves are present and the sidecar parses.
+ *
+ * This is also the one seam where a scale is restated in readable
+ * units. Everything downstream — colorbar, hover readout, Analyze,
+ * contours, CSV, Orbit's measurement tools, the VR label — derives its
+ * numbers through `lumaToValue` and labels them with `scale.units`, so
+ * rewriting the pair here is the whole of the change for all of them.
+ * Doing it per-surface instead would be the same arithmetic written a
+ * dozen times, and the first one anybody forgot would be a globe
+ * reporting `µg m-3` beside a CSV reporting `kg m-3`.
+ */
+function dataEncodingFromWire(
+  d: WireDataset,
+): { renderEncoding?: RenderEncoding; colorScale?: ColorScale } {
+  if (d.renderEncoding !== RENDER_ENCODING_DATA_LUMA) return {}
+  const colorScale = parseColorScale(d.colorScale)
+  if (!colorScale) return {}
+  return { renderEncoding: RENDER_ENCODING_DATA_LUMA, colorScale: toDisplayUnits(colorScale) }
+}
+
+/**
  * Error class for the SPA-side `?preview=` consumer. Carries the
  * server's typed error code (`invalid_token`, `token_id_mismatch`,
- * `not_found`, `preview_unconfigured`, â€¦) so the caller can map
+ * `not_found`, `preview_unconfigured`, …) so the caller can map
  * to a user-facing message without parsing the raw response body.
  */
 export class PreviewFetchError extends Error {
@@ -391,21 +472,21 @@ interface RealtimeDashEntry {
   /** Legacy field. In schema <1.2 this carried `forecast` to mark a row;
    *  in 1.2+ it is always `stream` and the kind lives in `dataProductType`. */
   type?: string
-  /** schema 1.2+ â€” `realtime` | `forecast`. Preferred forecast signal. */
+  /** schema 1.2+ — `realtime` | `forecast`. Preferred forecast signal. */
   dataProductType?: string
   categories?: string[]
   units?: string
   mpd: string
   dsa?: string
-  /** schema 1.2+ â€” `global` | `regional`. */
+  /** schema 1.2+ — `global` | `regional`. */
   coverage?: string
-  /** schema 1.2+ â€” human-readable org name (e.g. "NOAA Science On a Sphere"). */
+  /** schema 1.2+ — human-readable org name (e.g. "NOAA Science On a Sphere"). */
   organization?: string
-  /** schema 1.2+ â€” URL-style org slug used in the R2 path. */
+  /** schema 1.2+ — URL-style org slug used in the R2 path. */
   organizationSlug?: string
-  /** schema 1.2+ â€” region slug for `coverage: regional` rows (e.g. "conus"). */
+  /** schema 1.2+ — region slug for `coverage: regional` rows (e.g. "conus"). */
   region?: string
-  /** schema 1.2+ â€” human-readable region name. */
+  /** schema 1.2+ — human-readable region name. */
   regionName?: string
   thumbnail?: string
   colorbar?: string
@@ -416,24 +497,31 @@ interface RealtimeDashEntry {
  * paths. Pulled out as a function so both call sites get identical
  * rows; once these are publishable as real `tours/json` rows we can
  * delete this helper.
+ *
+ * Returns nothing when the deployment builds with
+ * `VITE_SAMPLE_TOURS=false` — see `sampleToursEnabled` in
+ * `catalogSource.ts` for why a downstream node wants that. The gate
+ * lives here rather than at the two call sites so neither path can
+ * grow a third injection that forgets it.
  */
 function sampleTourBuiltins(): Dataset[] {
+  if (!sampleToursEnabled()) return []
   return [
     {
       id: 'SAMPLE_TOUR',
-      title: "Climate Connections â€” How Earth's Systems Tell One Story",
+      title: "Climate Connections — How Earth's Systems Tell One Story",
       format: 'tour/json',
       dataLink: '/assets/test-tour.json',
       organization: 'Pachamama Studios',
       abstractTxt:
-        "An educational tour exploring how climate change shows up across Earth's systems â€” temperature anomalies, Arctic sea ice loss, sea level rise, ocean acidification, the carbon cycle, and global vegetation. Six datasets, one connected story.",
+        "An educational tour exploring how climate change shows up across Earth's systems — temperature anomalies, Arctic sea ice loss, sea level rise, ocean acidification, the carbon cycle, and global vegetation. Six datasets, one connected story.",
       tags: ['Tours'],
       weight: 50,
       thumbnailLink: '',
     },
     {
       id: 'SAMPLE_TOUR_CLIMATE_FUTURES',
-      title: 'Climate Futures â€” Three Paths to 2100',
+      title: 'Climate Futures — Three Paths to 2100',
       format: 'tour/json',
       dataLink: '/assets/climate-futures-tour.json',
       organization: 'Pachamama Studios',
@@ -465,6 +553,12 @@ function prefixedRealtimeDashTitle(rawTitle: string, isForecast: boolean): strin
   return `${isForecast ? 'Forecast' : 'Real Time'}: ${titleWithoutKind}`
 }
 
+/**
+ * Fetch the realtime DASH catalog index and map it into `Dataset`
+ * rows. The index is written by the R2 catalog publisher; a missing
+ * index (404) or an unreachable one is non-fatal — the app continues
+ * with the static catalog alone.
+ */
 async function fetchRealtimeDashDatasets(): Promise<Dataset[]> {
   try {
     const res = await fetch(REALTIME_DASH_INDEX_URL, { headers: { Accept: 'application/json' } })
@@ -521,7 +615,7 @@ async function fetchRealtimeDashDatasets(): Promise<Dataset[]> {
 }
 
 /**
- * Phase 3pt/G follow-up â€” wire shape of the public tour
+ * Phase 3pt/G follow-up — wire shape of the public tour
  * discovery endpoint (`GET /api/v1/tours`). Mirrors the
  * `Tour` UI type but uses snake_case (the server format) so
  * the conversion lives in `tourWireToDataset` alongside
@@ -543,7 +637,7 @@ interface WireTour {
 }
 
 /**
- * Phase 3pt/G follow-up â€” convert a publisher-portal tour into
+ * Phase 3pt/G follow-up — convert a publisher-portal tour into
  * the same Dataset shape `sampleTourBuiltins` produces, so the
  * Browse UI's existing `format === 'tour/json'` card path
  * surfaces them without per-surface changes. The `Tour`
@@ -578,7 +672,7 @@ export function tourWireToDataset(t: WireTour): Dataset {
 }
 
 /**
- * Phase 3pt/G follow-up â€” convert the same wire shape into the
+ * Phase 3pt/G follow-up — convert the same wire shape into the
  * structured Tour type. Used by the docent and any future
  * tour-specific UI that needs the unflattened metadata.
  */
@@ -600,7 +694,7 @@ export function tourWireToTour(t: WireTour): Tour {
 }
 
 /**
- * Phase 1f/L â€” collapse the legacy SOS catalog's non-standard
+ * Phase 1f/L — collapse the legacy SOS catalog's non-standard
  * JPEG MIME values to the standard `image/jpeg` at the
  * source-fetch boundary. The publisher API's validator already
  * canonicalises on the way in (`functions/api/v1/_lib/validators.ts`
@@ -608,7 +702,7 @@ export function tourWireToTour(t: WireTour): Tour {
  * downstream code (logs, analytics, debugger views) only ever
  * sees one canonical JPEG value regardless of which catalog
  * source the deploy reads from. The renderer (`isImageDataset`)
- * still tolerates the legacy values as defense in depth â€” a
+ * still tolerates the legacy values as defense in depth — a
  * future fork that bypasses this normaliser keeps working
  * rather than silently dropping rows like the cutover did
  * pre-1f/K.
@@ -631,11 +725,11 @@ export class DataService {
   private cacheTime: number = 0
   private readonly CACHE_DURATION = 60 * 60 * 1000 // 1 hour
   private enrichedMap: Map<string, EnrichedMetadata> | null = null
-  /** Parallel map of normalized titles â†’ raw `available_for` array
+  /** Parallel map of normalized titles → raw `available_for` array
    *  from the enriched file. Kept separate from `enrichedMap`
    *  because `EnrichedMetadata` doesn't carry the field (it's a
    *  data-source artefact, not a renderable metadata field).
-   *  Phase 4 Â§6.4. */
+   *  Phase 4 §6.4. */
   private rawAvailableForMap: Map<string, string[]> | null = null
 
   /**
@@ -655,8 +749,8 @@ export class DataService {
     try {
       const now = Date.now()
       // Phase Z4: a catalog containing period-bearing (real-time)
-      // rows expires early â€” at the shortest period present,
-      // floored at 5 minutes â€” so a workflow re-publish is picked
+      // rows expires early — at the shortest period present,
+      // floored at 5 minutes — so a workflow re-publish is picked
       // up on the next fetch instead of waiting out the full hour.
       const ttl = this.cache
         ? effectiveCatalogTtl(this.cache.datasets, this.CACHE_DURATION, now)
@@ -667,6 +761,9 @@ export class DataService {
       }
 
       const source = getCatalogSource()
+      // The realtime DASH index is source-independent — it is a static
+      // asset served alongside the SPA — so it is fetched once here and
+      // merged into whichever catalog path runs below.
       const realtimeDashDatasets = await fetchRealtimeDashDatasets()
       if (source === 'node') {
         const datasets = await this.fetchDatasetsFromNode()
@@ -705,10 +802,10 @@ export class DataService {
         .sort((a, b) => (b.weight || 0) - (a.weight || 0))
         .map(d => this.enrichDataset(d))
 
-      // Phase 4 Â§6.4 â€” synthesise rows for entries that exist only
+      // Phase 4 §6.4 — synthesise rows for entries that exist only
       // in the broader SOS catalog. They carry `availableFor: 'SOS'`
       // so downstream UI (Phase 4 chip rail) can filter them in/out
-      // independently. The synthesis is unconditional here â€” gating
+      // independently. The synthesis is unconditional here — gating
       // happens at the consumer (browse UI default-excludes them
       // until the toggle lands) so no user-visible regression today.
       const liveTitleKeys = new Set(liveDatasets.map(d => this.normalizeTitle(d.title)))
@@ -735,7 +832,7 @@ export class DataService {
    *
    * The wire shape is the existing `Dataset` interface plus a few
    * additive Phase-1a fields (originNode, visibility, etc.) which
-   * the frontend can ignore â€” the renderers only read the original
+   * the frontend can ignore — the renderers only read the original
    * fields. Backend rows already merge the enriched metadata under
    * `enriched`, so no second-source lookup is needed.
    *
@@ -745,11 +842,15 @@ export class DataService {
    * registered them in the catalog. Once Phase 1a's CLI lands those
    * tours as real `tours/json` rows, this client-side injection
    * becomes redundant; we'll remove it then.
+   *
+   * A node that never held the legacy SOS datasets those tours drive
+   * builds with `VITE_SAMPLE_TOURS=false` and gets none of them —
+   * `sampleTourBuiltins` returns empty and this push is a no-op.
    */
   private async fetchDatasetsFromNode(): Promise<Dataset[]> {
     logger.info('[DataService] Fetching datasets from node catalog...')
     // Fetch datasets + tours in parallel. Tours are a separate
-    // public endpoint (see `functions/api/v1/tours.ts`) â€” the
+    // public endpoint (see `functions/api/v1/tours.ts`) — the
     // catalog stays dataset-only by design so federation peers
     // can mirror each surface independently. A tours fetch
     // failure is non-fatal: browse should still render datasets
@@ -778,12 +879,12 @@ export class DataService {
   }
 
   /**
-   * Phase 3pt/G follow-up â€” fetch the publisher-portal tours
+   * Phase 3pt/G follow-up — fetch the publisher-portal tours
    * from `GET /api/v1/tours` and synthesise them as
    * `format: 'tour/json'` datasets so the Browse UI's existing
    * tour-card path surfaces them without a separate render
    * pass. Returns an empty array on any fetch / parse / shape
-   * failure â€” tours are additive discovery, not a blocker for
+   * failure — tours are additive discovery, not a blocker for
    * dataset browse.
    */
   private async fetchToursFromNode(): Promise<Dataset[]> {
@@ -800,10 +901,10 @@ export class DataService {
         logger.warn('[DataService] /api/v1/tours: unexpected response shape')
         return []
       }
-      // Phase 3pt/G follow-up â€” drop tours the server couldn't
+      // Phase 3pt/G follow-up — drop tours the server couldn't
       // resolve to an HTTPS URL (typically R2_PUBLIC_BASE unset
       // on the deployment). Surfacing a card the user can't
-      // launch is worse UX than a missing card â€” the launch
+      // launch is worse UX than a missing card — the launch
       // path would call `fetch('')` and confuse on the HTML
       // response. Operators see the warning and can wire the
       // bucket up.
@@ -819,7 +920,7 @@ export class DataService {
       if (droppedNullUrl > 0) {
         logger.warn(
           `[DataService] Dropped ${droppedNullUrl} publisher tour(s) with no tour_json_url ` +
-            '(server could not resolve an HTTPS URL â€” check R2_PUBLIC_BASE).',
+            '(server could not resolve an HTTPS URL — check R2_PUBLIC_BASE).',
         )
       }
       logger.info(`[DataService] Loaded ${usable.length} publisher tours`)
@@ -861,7 +962,7 @@ export class DataService {
    * Build a lookup map from enriched metadata, keyed by normalized
    * title. Also populates `rawAvailableForMap` so the live-catalog
    * merge can tag rows with `availableFor` without re-walking the
-   * raw entries. Phase 4 Â§6.4.
+   * raw entries. Phase 4 §6.4.
    */
   private buildEnrichedMap(entries: RawEnrichedEntry[]): Map<string, EnrichedMetadata> {
     const map = new Map<string, EnrichedMetadata>()
@@ -959,21 +1060,22 @@ export class DataService {
   }
 
   /**
-   * Get a single dataset by ID. Primary match is `dataset.id` (the
-   * post-cutover ULID); falls back to `dataset.legacyId` (the
-   * `INTERNAL_SOS_*` id from before the SOS bulk import) so tour
-   * files and other long-lived references that hard-code legacy IDs
-   * keep resolving against the new ULID-keyed catalog. The fallback
-   * is the operator-friendly equivalent of doing a one-off rewrite
-   * of every tour file in the wild â€” see Phase 1d/T.
+   * Get a single dataset by any of the references a URL, tour file,
+   * or chat marker might name it with — canonical `id` first, then
+   * `legacyId` (the `INTERNAL_SOS_*` id from before the SOS bulk
+   * import), then `slug` (the human-readable name `/dataset/<slug>`
+   * links carry). The fallbacks are the operator-friendly equivalent
+   * of doing a one-off rewrite of every tour file in the wild — see
+   * Phase 1d/T.
+   *
+   * The resolution order lives in `src/utils/datasetUrl.ts` so the
+   * URL grammar and this lookup can't drift apart.
    */
   getDatasetById(id: string): Dataset | undefined {
     if (!this.cache) {
       return undefined
     }
-    const direct = this.cache.datasets.find(d => d.id === id)
-    if (direct) return direct
-    return this.cache.datasets.find(d => d.legacyId === id)
+    return resolveDatasetRef(id, this.cache.datasets)
   }
 
   /**
@@ -1046,14 +1148,14 @@ export class DataService {
    * publisher can upload, the SPA can render:
    *
    *   - `image/png`
-   *   - `image/jpeg` â€” the standard MIME and what the publisher
+   *   - `image/jpeg` — the standard MIME and what the publisher
    *     API canonicalises to
-   *   - `image/webp` â€” accepted by the validator since 1c; no
+   *   - `image/webp` — accepted by the validator since 1c; no
    *     catalog rows use it today, but keeping the gate in sync
    *     with the validator means a future publisher uploading
    *     WebP doesn't get silently dropped from the browse list
    *     (Phase 1f/M)
-   *   - `image/jpg` / `images/jpg` â€” legacy SOS-catalog typos.
+   *   - `image/jpg` / `images/jpg` — legacy SOS-catalog typos.
    *     Normalised to `image/jpeg` at the source-fetch boundary
    *     by `normaliseSourceFormat` (Phase 1f/L); the renderer
    *     tolerance is defense-in-depth in case a fork bypasses
@@ -1061,7 +1163,7 @@ export class DataService {
    *
    * Pre-Phase-1f-cleanup this function only accepted the legacy
    * typo'd values, which silently dropped every imported JPEG
-   * row from the browse list â€” visible to operators as "the
+   * row from the browse list — visible to operators as "the
    * catalog suddenly shrank by ~30 datasets after the cutover"
    * (1f/K).
    */
@@ -1111,7 +1213,7 @@ export class DataService {
         if (errBody && typeof errBody.error === 'string') code = errBody.error
         if (errBody && typeof errBody.message === 'string') message = errBody.message
       } catch {
-        // Non-JSON body â€” keep the http_<status> code + statusText.
+        // Non-JSON body — keep the http_<status> code + statusText.
       }
       throw new PreviewFetchError(code, message)
     }
@@ -1128,7 +1230,7 @@ export class DataService {
    * `?preview=` boot path to surface a draft alongside the
    * regular catalog without baking preview-mode awareness into
    * the loader. If a dataset with the same id is already cached,
-   * it's replaced â€” the preview row is fresher than whatever the
+   * it's replaced — the preview row is fresher than whatever the
    * catalog snapshot held.
    *
    * Non-mutating: we swap `this.cache.datasets` for a freshly

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * Cloudflare Pages Function — GET /.well-known/terraviz.json
  *
@@ -29,13 +32,16 @@
  */
 
 import { CatalogEnv } from '../api/v1/_lib/env'
-import { getNodeIdentity } from '../api/v1/_lib/catalog-store'
+import { getNodeIdentity, IDENTITY_MISSING_MESSAGE } from '../api/v1/_lib/catalog-store'
 import { computeEtag } from '../api/v1/_lib/snapshot'
 
 const CACHE_CONTROL = 'public, max-age=300, stale-while-revalidate=600'
 const CONTENT_TYPE = 'application/json; charset=utf-8'
 
-interface WellKnownDoc {
+// Exported so `scripts/build-protocol-schemas.ts` can pin this shape
+// as the published `well-known.schema.json` wire contract (federation
+// §7 Directive 2 / WordPress plan Phase 0).
+export interface WellKnownDoc {
   node_id: string
   display_name: string
   base_url: string
@@ -75,7 +81,7 @@ export const onRequestGet: PagesFunction<CatalogEnv> = async context => {
     return jsonError(
       503,
       'identity_missing',
-      'Node identity has not been provisioned. Run `npm run gen:node-key`.',
+      IDENTITY_MISSING_MESSAGE,
     )
   }
 

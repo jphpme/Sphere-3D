@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * `asset_uploads` row-level helpers + per-kind validation rules.
  *
@@ -68,6 +71,10 @@ export interface AssetInitBody {
   mime?: unknown
   size?: unknown
   content_digest?: unknown
+  /** Opt out of the transcode for a `data` + `video/mp4` upload,
+   *  publishing the uploaded bytes as the served asset. See
+   *  `ValidatedAssetInit.transcode`. */
+  transcode?: unknown
 }
 
 export interface ValidatedAssetInit {
@@ -75,6 +82,26 @@ export interface ValidatedAssetInit {
   mime: string
   size: number
   content_digest: string
+  /**
+   * Whether a `data` + `video/mp4` upload should go through the GHA
+   * transcode. Defaults to `true`, which is the historical behaviour
+   * and stays the behaviour for every other kind.
+   *
+   * `false` publishes the uploaded file *as* the served asset: the
+   * mint hands back a content-addressed key instead of the
+   * `uploads/…/source.mp4` one the workflow watches, so `/complete`
+   * writes `data_ref` directly and no workflow is dispatched.
+   *
+   * It exists because the transcode is destructive for a data-encoded
+   * video. `DATA_ENCODED_RENDITIONS` pins one rung at 4096×2048, so a
+   * larger frame is decimated — and when luma *is* the measurement,
+   * re-encoding changes the values rather than the picture quality.
+   * The route gates this on `render_encoding`, since for an ordinary
+   * video the transcode earns its keep: it normalises to 30 fps, which
+   * the tour engine's `requestedFps / 30` maths assumes, and builds the
+   * ladder the player expects.
+   */
+  transcode: boolean
 }
 
 export interface AssetInitValidationError {
@@ -150,6 +177,24 @@ export function validateAssetInit(
     })
   }
 
+  // Absent means "transcode", which is what every caller written
+  // before this field did. Only a literal boolean is accepted — a
+  // string "false" arriving from a hand-rolled client would otherwise
+  // be truthy and silently transcode the file it was meant to
+  // preserve, which is the failure this flag exists to prevent.
+  let transcode = true
+  if (body.transcode !== undefined) {
+    if (typeof body.transcode !== 'boolean') {
+      errors.push({
+        field: 'transcode',
+        code: 'invalid_type',
+        message: 'transcode must be a boolean when present.',
+      })
+    } else {
+      transcode = body.transcode
+    }
+  }
+
   if (errors.length) return { ok: false, errors }
   // `kind` is non-null in the success path because errors would be
   // non-empty otherwise; the `!` makes the narrowing explicit.
@@ -160,6 +205,7 @@ export function validateAssetInit(
       mime: body.mime as string,
       size: body.size as number,
       content_digest: body.content_digest as string,
+      transcode,
     },
   }
 }
@@ -491,6 +537,43 @@ function formatBytes(n: number): string {
   if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(0)} MB`
   if (n >= 1024) return `${(n / 1024).toFixed(0)} KB`
   return `${n} B`
+}
+
+/** Max frames the `/complete` handler HEAD-verifies. */
+export const FRAME_VERIFY_SAMPLE_SIZE = 16
+
+/**
+ * Pick up to `max` evenly-spread frame indices to HEAD-verify at
+ * `/complete` (`docs/INCREMENTAL_FRAME_UPLOAD_PLAN.md`).
+ *
+ * HEAD-verifying all N frames before stamping `transcoding` is a
+ * fail-fast guard, but at the 10 000-frame ceiling it's thousands of
+ * server-side R2 HEADs per `/complete` — minutes of latency and close
+ * to the Workers subrequest budget. Since the transcode re-downloads
+ * and re-hashes *every* frame against the manifest digest (a missing or
+ * corrupt frame fails the encode regardless), the `/complete` check
+ * only needs to catch a broadly-failed upload cheaply. Sampling a
+ * spread (always the first and last, plus interior points) does that in
+ * a handful of HEADs.
+ *
+ * Returns sorted, distinct indices in `[0, count)`. For
+ * `count <= max` it returns all of them (small uploads verify in full).
+ */
+export function sampleFrameIndices(count: number, max: number = FRAME_VERIFY_SAMPLE_SIZE): number[] {
+  if (count <= 0) return []
+  if (count === 1) return [0]
+  // n in [2, count]: at least 2 so the spread always covers BOTH the
+  // first and last frame and `(n - 1)` is never zero (a `max` that
+  // floors/clamps to 1, or a non-finite `max`, would otherwise divide
+  // by zero → NaN indices). Non-finite `max` falls back to the default.
+  const m = Number.isFinite(max) ? Math.floor(max) : FRAME_VERIFY_SAMPLE_SIZE
+  const n = Math.min(count, Math.max(2, m))
+  if (count <= n) return Array.from({ length: count }, (_, i) => i)
+  const indices = new Set<number>()
+  for (let i = 0; i < n; i++) {
+    indices.add(Math.round((i * (count - 1)) / (n - 1)))
+  }
+  return [...indices].sort((a, b) => a - b)
 }
 
 /**
@@ -1089,6 +1172,52 @@ export async function clearTranscoding(
        WHERE id = ? AND active_transcode_upload_id = ?`,
     )
     .bind(dataRef, now, datasetId, uploadId)
+    .run()
+  return result.meta?.changes ?? 0
+}
+
+/**
+ * Failure counterpart to `clearTranscoding`: the transcode job failed
+ * (encode error, or the GHA job timeout that SIGKILLs the runner before
+ * it can post `/transcode-complete`), so no bundle was produced.
+ *
+ * Release the transcode lock — `transcoding = NULL`,
+ * `active_transcode_upload_id = NULL` — and leave `data_ref`,
+ * `content_digest`, and the `frame_*` columns exactly as the stamp HELD
+ * them: on a re-upload to a published row those still hold the prior
+ * published bundle, so dropping the lock reverts the row to its last
+ * good state; on a draft they stay unset.
+ *
+ * `source_digest` IS cleared, though: the stamp overwrote it with the
+ * *failed* upload's digest while holding the prior `frame_*`/`data_ref`,
+ * and the serializer surfaces `source_digest` as the public
+ * `framesDigest`. Leaving it would advertise the failed upload's digest
+ * against the prior bundle's frames. The prior digest wasn't persisted,
+ * so clearing (⇒ `framesDigest` omitted) is the correct degradation —
+ * better no digest than a wrong one. The transcode-complete guard reads
+ * `source_digest` too, but `transcoding` is now NULL so no completion
+ * callback will apply against this row.
+ *
+ * Guarded by the active-upload binding so a stale failure callback can't
+ * unstick a *newer* upload's in-flight transcode. Returns the affected
+ * row count (0 ⇒ the binding had already moved on).
+ */
+export async function abandonTranscoding(
+  db: D1Database,
+  datasetId: string,
+  uploadId: string,
+  now: string,
+): Promise<number> {
+  const result = await db
+    .prepare(
+      `UPDATE datasets
+         SET transcoding = NULL,
+             active_transcode_upload_id = NULL,
+             source_digest = NULL,
+             updated_at = ?
+       WHERE id = ? AND active_transcode_upload_id = ?`,
+    )
+    .bind(now, datasetId, uploadId)
     .run()
   return result.meta?.changes ?? 0
 }

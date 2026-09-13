@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * Share Service — share datasets via the Web Share API or clipboard.
  *
@@ -10,6 +13,7 @@
  */
 
 import { logger } from '../utils/logger'
+import { DATASET_PATH_PREFIX, datasetUrlRef, type DatasetUrlRef } from '../utils/datasetUrl'
 import { getApiOrigin } from './catalogSource'
 
 export interface ShareData {
@@ -58,11 +62,16 @@ export async function shareDataset(data: ShareData): Promise<boolean> {
 
 /**
  * Build a shareable URL for a dataset.
+ *
+ * Names the dataset by its slug (`/dataset/north-america-smoke`) so
+ * the link reads as something a person would want to paste into a
+ * message. Rows without a usable slug — the legacy SOS snapshot —
+ * fall back to their id, which the same path form still resolves.
  */
-export function buildDatasetShareUrl(datasetId: string): string {
+export function buildDatasetShareUrl(dataset: DatasetUrlRef): string {
   // Prefer the live page origin; fall back to the configured API
   // origin (VITE_API_ORIGIN, defaulting upstream) when `window` is
   // absent (SSR / tests) so a fork's share links carry its own host.
   const origin = typeof window !== 'undefined' ? window.location.origin : getApiOrigin()
-  return `${origin}/dataset/${encodeURIComponent(datasetId)}`
+  return `${origin}${DATASET_PATH_PREFIX}${encodeURIComponent(datasetUrlRef(dataset))}`
 }

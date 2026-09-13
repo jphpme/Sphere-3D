@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 
 vi.mock('../../analytics', () => ({
@@ -13,7 +16,9 @@ import {
 
 describe('routeForPath', () => {
   it.each<[string, ReturnType<typeof routeForPath>]>([
-    ['/publish', 'me'],
+    ['/publish', 'overview'],
+    ['/publish/', 'overview'],
+    ['/publish/overview', 'overview'],
     ['/publish/me', 'me'],
     ['/publish/me/', 'me'],
     ['/publish/datasets', 'datasets'],

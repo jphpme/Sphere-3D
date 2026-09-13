@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * @vitest-environment happy-dom
  */
@@ -147,6 +150,63 @@ describe('createCatalogTimeline', () => {
     // One visible (real-time), one display:none (static).
     const visible = Array.from(markers).filter(m => m.style.display !== 'none')
     expect(visible).toHaveLength(1)
+    controller.destroy()
+  })
+
+  it('renders an amber event marker and previews its linked dataset on click', async () => {
+    const { createCatalogTimeline } = await import('./catalogTimelineUI')
+    const host = document.getElementById('host')!
+    const onPreviewDataset = vi.fn()
+    const controller = createCatalogTimeline(host, {
+      onBrushChange: vi.fn(),
+      onPreviewDataset,
+    })
+    controller.update({
+      datasets: [makeDataset({ id: 'linked', startTime: '2020-01-01', endTime: '2024-01-01' })],
+      filterState: {},
+      searchQuery: '',
+      events: [
+        {
+          eventId: 'evt1',
+          title: 'Hurricane makes landfall',
+          source: { name: 'NOAA', url: 'https://example.gov/storm' },
+          occurredStart: '2022-06-01',
+          geometry: { point: { lat: 25, lon: -80 } },
+          linkedDatasetIds: ['linked'],
+        },
+      ],
+    })
+    const marker = host.querySelector<SVGCircleElement>('circle.browse-timeline-event')
+    expect(marker).not.toBeNull()
+    expect(marker!.querySelector('title')?.textContent).toBe('Hurricane makes landfall')
+    marker!.dispatchEvent(new Event('click', { bubbles: true }))
+    expect(onPreviewDataset).toHaveBeenCalledWith('linked')
+    controller.destroy()
+  })
+
+  it('drops an event whose occurredStart falls outside the visible domain', async () => {
+    const { createCatalogTimeline } = await import('./catalogTimelineUI')
+    const host = document.getElementById('host')!
+    const controller = createCatalogTimeline(host, {
+      onBrushChange: vi.fn(),
+      onPreviewDataset: vi.fn(),
+    })
+    controller.update({
+      datasets: [makeDataset({ id: 'linked', startTime: '2020-01-01', endTime: '2024-01-01' })],
+      filterState: {},
+      searchQuery: '',
+      events: [
+        {
+          eventId: 'old',
+          title: 'Ancient event',
+          source: { name: 'NOAA', url: 'https://example.gov/old' },
+          occurredStart: '1850-01-01', // before the 2020–2024 domain
+          geometry: { point: { lat: 0, lon: 0 } },
+          linkedDatasetIds: ['linked'],
+        },
+      ],
+    })
+    expect(host.querySelectorAll('circle.browse-timeline-event')).toHaveLength(0)
     controller.destroy()
   })
 

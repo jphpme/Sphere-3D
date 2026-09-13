@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * Expected binding manifest for the production Cloudflare Pages
  * project. The check-pages-bindings script (Phase 1f/B) diffs the
@@ -222,7 +225,7 @@ export const EXPECTED_BINDINGS: ExpectedBinding[] = [
   // publisher API's video-upload finalisation 503s with
   // `github_dispatch_unconfigured`. The matching GHA repo secrets
   // (R2 + Access creds for the workflow runner) live on the
-  // GitHub side; see SELF_HOSTING.md §8e.
+  // GitHub side; see SELF_HOSTING.md Phase 13.2.
   {
     name: 'GITHUB_OWNER',
     type: 'plaintext',

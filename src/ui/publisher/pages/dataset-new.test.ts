@@ -1,5 +1,10 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { renderDatasetNewPage, dateTimeToIso } from './dataset-new'
+import { suggestedLicense } from '../components/dataset-form'
+import { until } from '../../../test-utils'
 
 function jsonResponse(body: unknown, status = 201): Response {
   return new Response(JSON.stringify(body), {
@@ -76,6 +81,61 @@ describe('renderDatasetNewPage', () => {
     expect(mount.querySelectorAll('input[name="visibility"]').length).toBe(4)
   })
 
+  it('is a stepper: shows only the active section, switchable via the rail', () => {
+    renderDatasetNewPage(mount)
+    // Identity is the default active section.
+    expect(mount.querySelector<HTMLElement>('#ds-section-identity')?.style.display).not.toBe('none')
+    expect(mount.querySelector<HTMLElement>('#ds-section-licensing')?.style.display).toBe('none')
+    expect(mount.querySelector('.publisher-form-nav-link-active')?.textContent).toBe('Identity')
+    // Publish-readiness checklist renders with the deck's 5 items.
+    expect(mount.querySelector('.publisher-form-readiness-count')?.textContent).toBe('1 of 5 ready')
+    expect(mount.querySelectorAll('.publisher-form-readiness-item').length).toBe(5)
+
+    // Clicking a rail item switches the visible section.
+    const licensingTab = Array.from(
+      mount.querySelectorAll<HTMLButtonElement>('.publisher-form-nav-link'),
+    ).find(b => b.textContent === 'Licensing & attribution')!
+    licensingTab.click()
+    expect(mount.querySelector<HTMLElement>('#ds-section-licensing')?.style.display).not.toBe('none')
+    expect(mount.querySelector<HTMLElement>('#ds-section-identity')?.style.display).toBe('none')
+    expect(mount.querySelector('.publisher-form-nav-link-active')?.textContent).toBe('Licensing & attribution')
+  })
+
+  it('suggestedLicense maps the two chooser answers to a CC license', () => {
+    expect(suggestedLicense('yes', 'yes')?.spdx).toBe('CC-BY-4.0')
+    expect(suggestedLicense('yes', 'no')?.spdx).toBe('CC-BY-NC-4.0')
+    expect(suggestedLicense('sharealike', 'yes')?.spdx).toBe('CC-BY-SA-4.0')
+    expect(suggestedLicense('no', 'no')?.spdx).toBe('CC-BY-NC-ND-4.0')
+    expect(suggestedLicense('yes', '')).toBeNull()
+    expect(suggestedLicense('', '')).toBeNull()
+  })
+
+  it('the license chooser fills the SPDX + URL fields', () => {
+    renderDatasetNewPage(mount)
+    // Open the Licensing section (stepper).
+    const tab = Array.from(mount.querySelectorAll<HTMLButtonElement>('.publisher-form-nav-link')).find(
+      b => b.dataset.section === 'ds-section-licensing',
+    )!
+    tab.click()
+    expect(mount.querySelector('.publisher-license-chooser')).not.toBeNull()
+
+    // A quick-pick chip fills SPDX directly.
+    const cc0 = Array.from(mount.querySelectorAll<HTMLButtonElement>('.publisher-license-chooser-chip')).find(
+      b => b.textContent === 'CC0-1.0',
+    )!
+    cc0.click()
+    expect(mount.querySelector<HTMLInputElement>('#dataset-license-spdx')?.value).toBe('CC0-1.0')
+
+    // Answering both questions and clicking Apply fills the suggestion.
+    mount.querySelector<HTMLInputElement>('input[name="dataset-license-adapt"][value="yes"]')!.click()
+    mount.querySelector<HTMLInputElement>('input[name="dataset-license-commercial"][value="yes"]')!.click()
+    mount.querySelector<HTMLButtonElement>('.publisher-license-chooser-apply')!.click()
+    expect(mount.querySelector<HTMLInputElement>('#dataset-license-spdx')?.value).toBe('CC-BY-4.0')
+    expect(mount.querySelector<HTMLInputElement>('#dataset-license-url')?.value).toContain(
+      'creativecommons.org/licenses/by/4.0',
+    )
+  })
+
   it('defaults to format=video/mp4 and visibility=public', () => {
     renderDatasetNewPage(mount)
     const checkedFormat = mount.querySelector<HTMLInputElement>(
@@ -137,6 +197,13 @@ describe('renderDatasetNewPage', () => {
           // on/off so it can be toggled back off on edit); false is a
           // no-op the serializer treats the same as null.
           is_flipped_in_y: false,
+          // Likewise always sent, as null when blank. Omitting it
+          // would make the field one-way: the PATCH treats an absent
+          // key as "leave untouched", so a publisher who set a rate
+          // could never clear it back to the catalog default. That is
+          // the existing behaviour of lon_origin, which omits when
+          // empty; not copied here deliberately.
+          playback_fps: null,
         }),
       }),
     )
@@ -707,14 +774,71 @@ describe('renderDatasetNewPage', () => {
     expect(body.tags).toEqual(['featured'])
   })
 
-  it('renders the media card with thumbnail + legend manual inputs but no uploaders in create mode', () => {
-    // The guided uploader needs a saved row to scope its /asset
-    // endpoint against, so create mode (no id yet) shows only the
-    // manual ref inputs. The uploader appears on the edit page.
+  it('single-step: picking a file mints the draft first, then uploads against the new id', async () => {
+    const fetchFn = vi
+      .fn()
+      // 1. create draft (POST) — ensureDraftId
+      .mockResolvedValueOnce(jsonResponse({ dataset: { id: '01CREATEDDRAFTID000000000' } }, 201))
+      // 2. /asset init (mock:true skips the XHR PUT)
+      .mockResolvedValueOnce(
+        jsonResponse(
+          {
+            upload_id: 'UP-1',
+            kind: 'data',
+            target: 'r2',
+            r2: { method: 'PUT', url: 'https://mock-r2.localhost/put', headers: {}, key: 'k' },
+            expires_at: 'soon',
+            mock: true,
+          },
+          201,
+        ),
+      )
+      // 3. /complete → direct image ref
+      .mockResolvedValueOnce(jsonResponse({ dataset: { data_ref: 'r2:datasets/NEW/asset.png' } }))
+
+    renderDatasetNewPage(mount, {
+      fetchFn: fetchFn as unknown as typeof fetch,
+      routerNavigate: vi.fn(),
+    })
+
+    setInput(mount, '#dataset-title', 'Single step')
+    clickRadio(mount, 'format', 'image/png')
+
+    // The data uploader's file input (first uploader in the data-upload
+    // block). Picking a file drives the single-step flow.
+    const input = mount.querySelector<HTMLInputElement>(
+      '.publisher-form-data-upload .publisher-asset-uploader input[type="file"]',
+    )!
+    const file = new File(['png-bytes'], 'frame.png', { type: 'image/png' })
+    Object.defineProperty(input, 'files', {
+      value: { 0: file, length: 1, item: (i: number) => (i === 0 ? file : null) } as unknown as FileList,
+      configurable: true,
+    })
+    input.dispatchEvent(new Event('change', { bubbles: true }))
+    // Both requests, not just the draft-create POST. This is the exact
+    // race in #364: `calls[1]` was read while only `calls[0]` existed.
+    await until(() => fetchFn.mock.calls.length >= 2, 'the draft-create POST and the /asset mint')
+
+    // First call is the draft-create POST…
+    expect(fetchFn.mock.calls[0][0]).toBe('/api/v1/publish/datasets')
+    expect(fetchFn.mock.calls[0][1].method).toBe('POST')
+    // …then the /asset mint targets the freshly-created id.
+    expect(fetchFn.mock.calls[1][0]).toContain(
+      '/api/v1/publish/datasets/01CREATEDDRAFTID000000000/asset',
+    )
+  })
+
+  it('mounts the guided uploaders (single-step) alongside the manual inputs in create mode', () => {
+    // Create mode mounts the data / thumbnail / legend uploaders even
+    // though no row exists yet: picking a file mints the draft lazily
+    // (via `ensureDatasetId`) and continues the upload against the new
+    // row. The manual ref inputs stay as the paste-a-ref escape hatch.
     renderDatasetNewPage(mount)
+    expect(mount.querySelector('#dataset-data-ref')).not.toBeNull()
     expect(mount.querySelector('#dataset-thumbnail-ref')).not.toBeNull()
     expect(mount.querySelector('#dataset-legend-ref')).not.toBeNull()
-    expect(mount.querySelector('.publisher-asset-uploader')).toBeNull()
+    // data + thumbnail + legend = three guided uploaders.
+    expect(mount.querySelectorAll('.publisher-asset-uploader')).toHaveLength(3)
   })
 
   it('omits thumbnail_ref + legend_ref from the body when blank', async () => {
@@ -794,6 +918,32 @@ describe('renderDatasetNewPage', () => {
     expect(body.is_flipped_in_y).toBe(true)
     expect(body.celestial_body).toBe('Mars')
     expect(body.radius_mi).toBe(2106)
+  })
+
+  it('sends playback_fps as a number, and as null when cleared', async () => {
+    // Null rather than omitted is the whole point: the PATCH reads an
+    // absent key as "leave untouched", so omitting on blank would let a
+    // publisher set a rate and never get back to the catalog default.
+    const fetchFn = vi.fn().mockResolvedValue(jsonResponse({ dataset: { id: 'X' } }))
+    renderDatasetNewPage(mount, {
+      fetchFn: fetchFn as unknown as typeof fetch,
+      routerNavigate: vi.fn(),
+    })
+    setInput(mount, '#dataset-title', 'My Dataset')
+    setInput(mount, '#dataset-playback-fps', '0.5')
+    submitForm(mount)
+    await new Promise(r => setTimeout(r, 0))
+    const set = JSON.parse(fetchFn.mock.calls[0][1].body as string) as Record<string, unknown>
+    // Sub-1 rates are the interesting ones for a long forecast, so the
+    // value must survive as a float rather than being rounded.
+    expect(set.playback_fps).toBe(0.5)
+
+    setInput(mount, '#dataset-playback-fps', '')
+    submitForm(mount)
+    await new Promise(r => setTimeout(r, 0))
+    const cleared = JSON.parse(fetchFn.mock.calls[1][1].body as string) as Record<string, unknown>
+    expect(cleared.playback_fps).toBeNull()
+    expect('playback_fps' in cleared, 'cleared must send null, not omit').toBe(true)
   })
 
   it('omits bounding_box when not all four corners are filled', async () => {

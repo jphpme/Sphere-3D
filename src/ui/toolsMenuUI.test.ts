@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 
 /**
@@ -10,6 +13,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
  */
 
 import { initToolsMenu, syncToolsMenuState, isToolsMenuOpen, pulseBrowseButton } from './toolsMenuUI'
+import { createFullscreenController } from '../services/windowChrome'
+import { until } from '../test-utils'
 
 // ---------------------------------------------------------------------------
 // Minimal ViewportManager stand-in
@@ -114,6 +119,68 @@ describe('initToolsMenu', () => {
     // tooltip and screen-reader name agree.
     expect(fullscreenBtn.getAttribute('title')).toBe('Enter fullscreen')
     expect(fullscreenBtn.getAttribute('aria-label')).toBe('Enter fullscreen')
+  })
+
+  it('toggles through the window-chrome controller when one is wired', async () => {
+    const calls: string[] = []
+    const fullscreen = createFullscreenController({
+      host: {
+        setFullscreen: async next => {
+          calls.push(`fullscreen:${next}`)
+        },
+        setDecorations: async shown => {
+          calls.push(`decorations:${shown}`)
+        },
+        isFullscreen: () => null,
+      },
+      target: null,
+    })
+    const requestFullscreen = vi.fn(async () => {})
+    document.documentElement.requestFullscreen = requestFullscreen
+
+    initToolsMenu(makeViewports(1) as any, { fullscreen, getCurrentDataset: () => null })
+    document.getElementById('tools-menu-fullscreen')!.click()
+
+    await until(() => calls.length === 2, 'the chrome change')
+    // The controller pairs fullscreen with the decorations; the raw DOM
+    // path leaves a native title bar in the captured signal.
+    expect(calls).toEqual(['fullscreen:true', 'decorations:false'])
+    expect(requestFullscreen).not.toHaveBeenCalled()
+  })
+
+  it('reads the button label off the controller, not the document', async () => {
+    const fullscreen = createFullscreenController({
+      host: {
+        setFullscreen: async () => {},
+        setDecorations: async () => {},
+        isFullscreen: () => null,
+      },
+      target: null,
+    })
+    initToolsMenu(makeViewports(1) as any, { fullscreen, getCurrentDataset: () => null })
+
+    await fullscreen.set(true)
+
+    // The case that matters on desktop: a *native* fullscreen window
+    // leaves `document.fullscreenElement` null, so a button reading the
+    // DOM would still offer "Enter fullscreen" over a window already in
+    // it — and F11 changes the state without `fullscreenchange` firing
+    // at all.
+    const btn = document.getElementById('tools-menu-fullscreen')!
+    expect(btn.getAttribute('aria-pressed')).toBe('true')
+    expect(btn.getAttribute('title')).toBe('Exit fullscreen')
+  })
+
+  it('keeps the plain Fullscreen API path when no controller is wired', async () => {
+    const requestFullscreen = vi.fn(async () => {})
+    document.documentElement.requestFullscreen = requestFullscreen
+
+    initToolsMenu(makeViewports(1) as any)
+    document.getElementById('tools-menu-fullscreen')!.click()
+
+    // The web build has no Tauri window to decorate, and this is the
+    // path it keeps.
+    await until(() => requestFullscreen.mock.calls.length === 1, 'the fullscreen request')
   })
 
   it('updates the fullscreen button label on fullscreenchange', () => {
@@ -530,6 +597,34 @@ describe('Tools menu callbacks', () => {
     expect(onOpenCredits.mock.calls[0][0]).toBe(document.getElementById('tools-menu-toggle'))
     expect(isToolsMenuOpen()).toBe(false)
   })
+
+  it('renders no Outputs section without onOpenOutputs — the web build sees nothing', () => {
+    const vm = makeViewports(1)
+    initToolsMenu(vm as any, { getCurrentDataset: () => null })
+
+    // The callback's presence *is* the desktop gate, so its absence has
+    // to take the whole section with it, not just leave a dead item.
+    expect(document.getElementById('tools-menu-outputs')).toBeNull()
+    expect(document.body.textContent).not.toContain('Outputs')
+  })
+
+  it('renders the Outputs button and invokes onOpenOutputs with the Tools toggle as trigger', () => {
+    const vm = makeViewports(1)
+    const onOpenOutputs = vi.fn()
+    initToolsMenu(vm as any, { onOpenOutputs, getCurrentDataset: () => null })
+
+    const outputsBtn = document.getElementById('tools-menu-outputs') as HTMLButtonElement | null
+    expect(outputsBtn).not.toBeNull()
+
+    ;(document.getElementById('tools-menu-toggle') as HTMLButtonElement).click()
+    outputsBtn!.click()
+
+    expect(onOpenOutputs).toHaveBeenCalledTimes(1)
+    // The toggle, not the menu item: closePopover has already hidden the
+    // item, so it cannot receive focus back when the panel closes.
+    expect(onOpenOutputs.mock.calls[0][0]).toBe(document.getElementById('tools-menu-toggle'))
+    expect(isToolsMenuOpen()).toBe(false)
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -915,5 +1010,88 @@ describe('Tools menu specular preset radio', () => {
     const last = settings[0]
     if (last.event_type !== 'settings_changed') throw new Error('unreachable')
     expect(last.value_class).toBe('comfortable')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The four-globe button on a phone (terraviz#230)
+//
+// The pure cap in `deviceCapability` is tested there. What these cover
+// is the wiring: that the picker actually asks for the budget, and that
+// the resulting control is both unavailable *and* still reachable. Every
+// other test in this file runs at the default desktop size, where the
+// gate is invisible — so without these, disconnecting it would leave the
+// suite green while the crash path reopened.
+// ---------------------------------------------------------------------------
+
+describe('tools menu four-globe gate', () => {
+  const spies: Array<{ mockRestore(): void }> = []
+
+  function stubViewport(width: number, height: number): void {
+    spies.push(vi.spyOn(window, 'innerWidth', 'get').mockReturnValue(width))
+    spies.push(vi.spyOn(window, 'innerHeight', 'get').mockReturnValue(height))
+  }
+
+  afterEach(() => {
+    for (const s of spies.splice(0)) s.mockRestore()
+  })
+
+  it('marks the button unavailable on a portrait phone', () => {
+    stubViewport(393, 852)
+    const vm = makeViewports(1)
+    initToolsMenu(vm as any, { getCurrentDataset: () => null })
+
+    const btn = document.getElementById('tools-menu-layout-4')!
+    expect(btn.getAttribute('aria-disabled')).toBe('true')
+  })
+
+  it('marks it unavailable on that phone rotated', () => {
+    // Landscape is the case a width-only gate missed: 852px reads as a
+    // desktop, and the button would offer the layout that crashes it.
+    stubViewport(852, 393)
+    const vm = makeViewports(1)
+    initToolsMenu(vm as any, { getCurrentDataset: () => null })
+
+    expect(document.getElementById('tools-menu-layout-4')!.getAttribute('aria-disabled')).toBe('true')
+  })
+
+  it('keeps the unavailable button focusable and labelled with the reason', () => {
+    // `aria-disabled` rather than `disabled` precisely so this holds: a
+    // native disabled button leaves the tab order, taking the only
+    // explanation of why four globes are missing with it.
+    stubViewport(393, 852)
+    const vm = makeViewports(1)
+    initToolsMenu(vm as any, { getCurrentDataset: () => null })
+
+    const btn = document.getElementById('tools-menu-layout-4') as HTMLButtonElement
+    expect(btn.hasAttribute('disabled')).toBe(false)
+    const label = btn.getAttribute('aria-label')
+    expect(label).toBeTruthy()
+    expect(label).not.toBe(document.getElementById('tools-menu-layout-1')!.getAttribute('title'))
+  })
+
+  it('refuses the click instead of requesting four panels', () => {
+    stubViewport(393, 852)
+    const vm = makeViewports(1)
+    const onSetLayout = vi.fn()
+    initToolsMenu(vm as any, { onSetLayout, getCurrentDataset: () => null })
+
+    const btn = document.getElementById('tools-menu-layout-4') as HTMLButtonElement
+    btn.click()
+
+    expect(onSetLayout).not.toHaveBeenCalled()
+    expect(btn.classList.contains('active')).toBe(false)
+  })
+
+  it('leaves the button available on a desktop', () => {
+    stubViewport(1440, 900)
+    const vm = makeViewports(1)
+    const onSetLayout = vi.fn()
+    initToolsMenu(vm as any, { onSetLayout, getCurrentDataset: () => null })
+
+    const btn = document.getElementById('tools-menu-layout-4') as HTMLButtonElement
+    expect(btn.hasAttribute('aria-disabled')).toBe(false)
+    btn.click()
+    expect(onSetLayout).toHaveBeenCalledWith('4')
   })
 })

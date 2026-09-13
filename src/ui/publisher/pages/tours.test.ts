@@ -1,6 +1,22 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 import { describe, expect, it, vi } from 'vitest'
 import { renderToursPage } from './tours'
 import type { TourListItem } from '../../tourAuthoring/api'
+
+/** Minimal `/me` fetch stub returning the given role. */
+function meFetch(role: string) {
+  return vi.fn(async () => ({
+    ok: true,
+    status: 200,
+    type: 'basic',
+    json: async () => ({ role }),
+    text: async () => JSON.stringify({ role }),
+  }) as unknown as Response)
+}
+
+const flush = () => new Promise<void>(r => setTimeout(r, 0))
 
 function makeTour(overrides: Partial<TourListItem> = {}): TourListItem {
   return {
@@ -27,8 +43,32 @@ describe('renderToursPage (tour/A → /G)', () => {
       createDraft: vi.fn(),
       listFn: vi.fn(async () => ({ tours: [], next_cursor: null })),
     })
-    expect(content.querySelector('h2')?.textContent).toBe('Tours')
+    expect(content.querySelector('.publisher-page-title')?.textContent).toBe('Tours')
     expect(content.querySelector('.publisher-empty')?.textContent).toContain('No tours yet')
+  })
+
+  it('hides the New-tour button for a reviewer (no content.create)', async () => {
+    const content = document.createElement('div')
+    await renderToursPage(content, {
+      navigate: () => {},
+      createDraft: vi.fn(),
+      listFn: vi.fn(async () => ({ tours: [], next_cursor: null })),
+      fetchFn: meFetch('reviewer'),
+    })
+    await flush()
+    expect(content.querySelector('.publisher-tour-new-btn')).toBeNull()
+  })
+
+  it('keeps the New-tour button for an author (content.create)', async () => {
+    const content = document.createElement('div')
+    await renderToursPage(content, {
+      navigate: () => {},
+      createDraft: vi.fn(),
+      listFn: vi.fn(async () => ({ tours: [], next_cursor: null })),
+      fetchFn: meFetch('author'),
+    })
+    await flush()
+    expect(content.querySelector('.publisher-tour-new-btn')).not.toBeNull()
   })
 
   it('renders a table of tours when the list has rows', async () => {
@@ -54,6 +94,31 @@ describe('renderToursPage (tour/A → /G)', () => {
     expect(rows[0].textContent).toContain('Draft')
     expect(rows[1].textContent).toContain('Published one')
     expect(rows[1].textContent).toContain('Published')
+  })
+
+  it('shows per-status filter counts and filters rows in place', async () => {
+    const content = document.createElement('div')
+    await renderToursPage(content, {
+      navigate: () => {},
+      createDraft: vi.fn(),
+      listFn: vi.fn(async () => ({
+        tours: [
+          makeTour({ id: 'd1', title: 'Draft one' }),
+          makeTour({ id: 'p1', title: 'Pub one', published_at: '2026-05-21T13:00:00Z' }),
+          makeTour({ id: 'r1', title: 'Ret one', published_at: '2026-05-01T00:00:00Z', retracted_at: '2026-05-10T00:00:00Z' }),
+        ],
+        next_cursor: null,
+      })),
+    })
+    const counts = Array.from(content.querySelectorAll('.publisher-tours-filter .publisher-tab-count')).map(c => c.textContent)
+    expect(counts).toEqual(['3', '1', '1', '1'])
+
+    // Click "Draft" → only the draft row remains visible.
+    const draftTab = Array.from(content.querySelectorAll<HTMLButtonElement>('.publisher-tours-filter .publisher-tab')).find(b => b.textContent?.startsWith('Draft'))!
+    draftTab.click()
+    const visible = Array.from(content.querySelectorAll<HTMLElement>('tbody tr')).filter(r => !r.hidden)
+    expect(visible).toHaveLength(1)
+    expect(visible[0].textContent).toContain('Draft one')
   })
 
   it('Edit / title link navigates to /?tourEdit=<id>', async () => {

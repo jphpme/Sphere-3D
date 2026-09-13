@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * Main application entry point
  *
@@ -14,7 +17,7 @@ import './styles/index.css'
 
 import { HLSService } from './services/hlsService'
 import { dataService, PreviewFetchError } from './services/dataService'
-import { formatDate, videoTimeToDate, dateToVideoTime, isSubDailyPeriod, getSunPosition, inferDisplayInterval } from './utils/time'
+import { formatDate, videoTimeToDate, dateToVideoTime, computeSiblingSyncCorrection, SIBLING_MIN_READY_STATE, SIBLING_HARD_SEEK_THRESHOLD_S, SIBLING_SEEK_EPS_S, verifySiblingTime, shownFrameTime, isSubDailyPeriod, getSunPosition, inferDisplayInterval } from './utils/time'
 import { logger } from './utils/logger'
 import type { AppState, VideoTextureHandle, TourFile, Dataset } from './types'
 
@@ -33,9 +36,23 @@ import {
 import { updateMapControlsPosition } from './ui/mapControlsUI'
 import { initToolsMenu, syncToolsMenuState, syncToolsMenuLayout, pulseBrowseButton } from './ui/toolsMenuUI'
 import { initAccountUI } from './ui/accountUI'
+import { closeOutputUI, initOutputUI, openOutputUI } from './ui/outputUI'
 import { openCreditsPanel } from './ui/creditsPanel'
 import { initChatUI, openChat, openChatSettings, notifyDatasetChanged, showChatTrigger, hideChatTrigger, closeChat, flushPendingGlobeActions } from './ui/chatUI'
 import { loadViewPreferences, saveViewPreferences, type ViewPreferences } from './utils/viewPreferences'
+import { renderColorbar, openDisplayControls, closeDisplayControls } from './ui/colorbarUI'
+import {
+  initAnalyzeUI,
+  openAnalyzeUI,
+  closeAnalyzeUI,
+  notifyAnalyzeDatasetChanged,
+  notifyAnalyzePlaybackSettled,
+} from './ui/analyzeUI'
+import { createPlaybackSettleWatcher } from './services/playbackSettle'
+import { registerAnalysisSource } from './services/docentAnalysisTools'
+import { buildHistogram } from './services/datasetStats'
+import { DEFAULT_DISPLAY, type ColorScaleDisplay } from './services/colorScaleDisplay'
+import { RENDER_ENCODING_DATA_LUMA } from './types/color-scale'
 import { initHelpUI, setActiveDataset as setHelpActiveDataset } from './ui/helpUI'
 import { showDisclosureBannerIfNeeded } from './ui/disclosureBanner'
 import {
@@ -59,14 +76,25 @@ import {
 } from './ui/playbackController'
 import {
   loadImageDataset, loadVideoDataset, displayDatasetInfo,
+  type EventNavResult,
 } from './services/datasetLoader'
+import { resolveRegion } from './data/regions'
+import type { PublicEvent } from './services/eventsService'
 import { TourEngine, type TourTelemetryMeta } from './services/tourEngine'
 import { showTourControls, hideTourControls, hideAllTourTextBoxes, hideAllTourImages, hideAllTourVideos, hideAllTourPopups, hideAllTourQuestions } from './ui/tourUI'
-import { initLegendForDataset, clearLegendCache, loadConfig } from './services/docentService'
+import { initLegendForDataset, clearLegendCache, loadConfig, readCurrentTime } from './services/docentService'
 import { isMobile, IS_MOBILE_NATIVE, getCloudTextureUrl } from './utils/deviceCapability'
 import { initDeepLinks } from './services/deepLinkService'
+import {
+  buildDatasetPath,
+  buildNoDatasetPath,
+  isDatasetRef,
+  parseDatasetPathname,
+  previewDatasetRef,
+} from './utils/datasetUrl'
 import { recordVisit, writeLastSession } from './services/visitMemory'
 import { getCatalogMode, setCatalogMode } from './utils/catalogMode'
+import { applyEmbedMode } from './utils/embedMode'
 import {
   hideCatalogTabs,
   initCatalogTabs,
@@ -81,9 +109,33 @@ import { initVrButton } from './ui/vrButton'
 import { flyToOnGlobe, isVrActive } from './services/vrSession'
 import type { VrDatasetTexture } from './services/vrScene'
 import { overlayOptionsFromDataset } from './services/datasetOverlayOptions'
+import { publishGlobeState } from './services/multiOutput/globeStateEvents'
+import {
+  displayForMirror,
+  operatorCameraFrom,
+  panelMirrorState,
+  playbackFrom,
+  primaryFrom,
+  sharedViewFrom,
+  toMirroredDataset,
+} from './services/multiOutput/mirrorState'
+import {
+  startMultiOutput,
+  type MultiOutputBootHandle,
+} from './services/multiOutput/bootMultiOutput'
+import {
+  createFullscreenController,
+  createIdleCursor,
+  createQuitHotkey,
+  resolveChromeHost,
+  restoreOnLaunch,
+  type FullscreenController,
+  type IdleCursor,
+} from './services/windowChrome'
 import { resolveFrameQuery } from './utils/frames'
 import { initTourAuthoring } from './ui/tourAuthoring'
 import { bootstrapI18n } from './i18n/bootstrap'
+import { formatProbeReading } from './services/datasetProbe'
 import { initUiScale } from './services/uiScaleService'
 import { initShaderSettings } from './services/shaderSettingsService'
 import { maybeInitShaderTuner } from './ui/shaderTunerUI'
@@ -127,6 +179,16 @@ const LOADING_TEXTURE_RANGE = 70
 const LOADING_HIDE_DELAY_MS = 300
 
 /**
+ * How long to let a requested redraw land before a panel that is showing
+ * the wrong frame is reported as such.
+ *
+ * `needsUpdate` schedules a repaint, so the upload takes a frame or two.
+ * Generous next to that, and short enough to be imperceptible against
+ * the settle delay that precedes it.
+ */
+const SIBLING_REPAIR_CONFIRM_MS = 120
+
+/**
  * Root application class that boots the WebGL globe, loads datasets,
  * and orchestrates all UI subsystems (browse panel, chat, playback controls).
  *
@@ -150,10 +212,28 @@ interface PanelState {
    * loading into this panel. Used to compute `layer_unloaded.dwell_ms`.
    * Null when the panel is empty (default Earth). */
   loadedAt: number | null
+  /**
+   * Which dataset the panel's `image` / `hlsService` actually belongs to.
+   *
+   * Not the same question as `dataset`, which is assigned *before* the
+   * load is attempted and stays set when one fails, when one is still in
+   * flight, and for a `tour/json` row that never paints anything. The
+   * two disagreeing is what lets a mirrored frame carry one dataset's
+   * identity over another's pixels, so anything describing what is on
+   * screen must compare them rather than trusting `dataset` alone.
+   */
+  mediaDatasetId: string | null
 }
 
 function createPanelState(): PanelState {
-  return { dataset: null, hlsService: null, videoTexture: null, image: null, loadedAt: null }
+  return {
+    dataset: null,
+    hlsService: null,
+    videoTexture: null,
+    image: null,
+    loadedAt: null,
+    mediaDatasetId: null,
+  }
 }
 
 /** Map a dataset-load trigger to the analytics tour-source enum.
@@ -241,8 +321,60 @@ class InteractiveSphere {
   /** Listener attached to the primary video for sibling sync. */
   private primaryVideoSyncListeners: Array<{ event: string; handler: EventListener }> = []
   private primaryVideoSyncTarget: HTMLVideoElement | null = null
-  /** Interval ID for the periodic drift-correction timer. */
-  private driftCheckInterval: ReturnType<typeof setInterval> | null = null
+  /**
+   * True while sibling sync is wired to a primary video. Gates the
+   * per-frame drift correction driven off the playback rAF loop — see
+   * `correctSiblingDrift()`.
+   */
+  private primaryVideoSyncActive = false
+  /**
+   * Per-slot record of whether a sibling was frozen out-of-range on the
+   * previous drift-correction frame. Lets `correctSiblingDrift` resume a
+   * sibling with a single `play()` on the out→in transition instead of
+   * re-issuing `play()` (and allocating/catching a Promise) every frame
+   * when autoplay is blocked or a stream is briefly unplayable.
+   */
+  private siblingOutOfRange: boolean[] = []
+  /**
+   * The primary's true instant behind the shared time label, or `null`
+   * when the label is asserting nothing. Stashed by
+   * `updateVideoTimeLabel` as it formats, so `verifySiblingTimes` checks
+   * panels against the position actually on screen rather than
+   * re-deriving one that could differ. Unsnapped on purpose — see
+   * `verifySiblingTime`.
+   */
+  private assertedLabelDate: Date | null = null
+  /** Per-slot record of which siblings currently carry a time notice,
+   *  so clearing them while playing costs one array scan and no DOM. */
+  private siblingTimeNoticed: boolean[] = []
+  /**
+   * Per-slot abort handle for an armed `seeked`-driven texture upload.
+   *
+   * Non-null means one is already armed, so a second seek in the same
+   * frame does not stack another listener. Aborting both removes the
+   * listener and clears that state in one step, which matters because
+   * the two must never disagree: a slot left marked armed after its
+   * video is gone can never arm again, and would silently lose the
+   * upload-on-seek fix for the rest of the session.
+   */
+  private siblingSeekUploads: Array<AbortController | null> = []
+  /** Pending re-check after a repair attempt — see `verifySiblingTimes`. */
+  private siblingRepairTimer: ReturnType<typeof setTimeout> | null = null
+  /**
+   * The multi-monitor output link (`docs/MULTI_MONITOR_PLAN.md` §3).
+   *
+   * Desktop-only and inert on web — the gate is inside
+   * `startMultiOutput`, which returns a shared no-op handle there.
+   * Held as a field only so `dispose()` can detach it.
+   */
+  private multiOutput: MultiOutputBootHandle | null = null
+
+  /**
+   * Fullscreen + decorations for this window (§3.6). Held so the Tools
+   * menu can read the state and `dispose()` can detach the F11 handler.
+   */
+  private fullscreen: FullscreenController | null = null
+  private idleCursor: IdleCursor | null = null
 
   /**
    * Convenience getter returning the primary viewport's renderer.
@@ -272,6 +404,17 @@ class InteractiveSphere {
 
   /** Persisted view preferences: info panel + legend visibility. */
   private viewPrefs: ViewPreferences = loadViewPreferences()
+
+  /**
+   * The data-encoded viewing transform, shared by every panel.
+   *
+   * Session-scoped rather than persisted: a palette or threshold is
+   * chosen against the field in front of you, and silently re-applying
+   * last week's threshold to a different dataset would hide data with
+   * no visible cause. It does survive dataset and layout changes within
+   * a session, which is the span over which a viewer is comparing.
+   */
+  private colorScaleDisplay: ColorScaleDisplay = DEFAULT_DISPLAY
 
   /**
    * Which slot's dataset the info panel currently displays.
@@ -308,6 +451,13 @@ class InteractiveSphere {
       const catalogModeActive = getCatalogMode()
       if (catalogModeActive) document.body.classList.add('catalog-mode')
 
+      // Embed mode (`?embed=1`) strips app chrome for iframe hosting
+      // (WordPress blocks, kiosk, the poster). Apply before any UI
+      // renders — same first-paint reasoning as catalog mode — so the
+      // chrome never flashes in. Composes with `?dataset=`/`?tour=`/
+      // `?catalog=true`. See `docs/EMBED_URL_GRAMMAR.md`.
+      const embedModeActive = applyEmbedMode()
+
       if (!this.checkWebGLSupport()) return
 
       const container = document.getElementById('container')
@@ -326,15 +476,49 @@ class InteractiveSphere {
       this.panelStates = Array.from({ length: this.viewports.getPanelCount() }, createPanelState)
       const primary = this.viewports.getPrimary()
       if (!primary) throw new Error('Viewport manager failed to create a primary renderer')
+      // Mirror globe state to any multi-monitor outputs. Returns
+      // synchronously, so the subscription is installed before the
+      // first dataset load below can publish; opening the IPC link and
+      // spawning windows wait for the operator to add an output, so
+      // until then this costs a listener and nothing else.
+      //
+      // Ahead of `initToolsMenu` because the menu decides whether to
+      // render its Outputs entry while it builds its markup, and that
+      // decision reads `available` off this handle.
+      this.multiOutput = startMultiOutput({
+        // The control window's own contribution to the machine's
+        // decoder budget. Every panel is a window that can hold a
+        // video, and `maxVideoPanels()` — which the manager seeds from
+        // — answers per window, so nothing but this can tell it that
+        // four globes and an output are five decoders on one GPU.
+        controlPanels: () => this.viewports.getPanelCount(),
+      })
+      initOutputUI({ manager: () => this.multiOutput?.ready ?? Promise.resolve(null) })
+      // Outputs follow the primary globe's camera (§3, rung 7). After
+      // `startMultiOutput` so the subscription that forwards this is
+      // already installed, and before the first dataset load below.
+      this.bindOperatorCamera()
+      // Window chrome (§3.6). Built before the Tools menu because the
+      // menu reads the fullscreen state while it builds its markup —
+      // the same reason `startMultiOutput` runs first, and why the
+      // desktop host defers its Tauri import rather than being awaited.
+      this.initWindowChrome()
       initToolsMenu(this.viewports, {
         onSetLayout: (layout) => this.viewports.setLayout(layout),
         onOpenBrowse: () => this.openBrowsePanel(),
         onOpenOrbitSettings: () => openChatSettings(),
         onOpenCredits: (trigger) => openCreditsPanel(this.viewports, trigger),
+        // Desktop-only: on web `startMultiOutput` hands back the shared
+        // inert handle, this is `undefined`, and the menu renders no
+        // Outputs section at all.
+        onOpenOutputs: this.multiOutput.available
+          ? (trigger) => { openOutputUI(trigger) }
+          : undefined,
         onToggleDatasetInfo: (visible) => this.setDatasetInfoVisible(visible),
         onToggleLegend: (visible) => this.setLegendVisible(visible),
         announce: (msg) => this.announce(msg),
         getCurrentDataset: () => this.appState.currentDataset ?? null,
+        fullscreen: this.fullscreen ?? undefined,
       })
       void initAccountUI()
       // Catalog ↔ sphere tab control — only becomes visible when
@@ -359,6 +543,79 @@ class InteractiveSphere {
       // safe on desktop too; the opener affordances are the gate.
       initDownloadDialogUI({ announce: (msg) => this.announce(msg) })
       initHelpUI()
+      // Statistics over the frame on screen (§A3). Reads through the
+      // primary panel, which is the one the info panel, playback and
+      // the value readout all already follow — analysing a globe the
+      // user is not driving would be a different feature.
+      initAnalyzeUI({
+        frame: () => this.viewports.getPrimary()?.analysisFrame() ?? null,
+        visibleBounds: () => this.viewports.getPrimary()?.visibleBounds() ?? null,
+        display: () => this.colorScaleDisplay,
+        datasetTitle: () => this.appState.currentDataset?.title ?? null,
+        datasetId: () => this.appState.currentDataset?.id ?? null,
+        // Primary panel only, matching the probe readout: `probeValueAt`
+        // is a MapRenderer method rather than part of the GlobeRenderer
+        // interface, so a transect on a secondary panel would have
+        // nothing to sample. Named as a constraint in
+        // `docs/DATA_ANALYSIS_PLAN.md` rather than worked around here.
+        transect: () => {
+          const primary = this.viewports.getPrimary()
+          if (!primary) return null
+          return {
+            begin: (onChange) => primary.beginTransect(onChange),
+            progress: () => primary.transectProgress(),
+            clear: () => primary.clearTransect(),
+          }
+        },
+        regionOutline: () => {
+          const primary = this.viewports.getPrimary()
+          if (!primary) return null
+          return {
+            show: (bounds) => primary.showRegionOutline(bounds),
+            clear: () => primary.clearRegionOutline(),
+          }
+        },
+        contours: () => {
+          const primary = this.viewports.getPrimary()
+          if (!primary) return null
+          return {
+            show: (levels) => primary.showContours(levels),
+            clear: () => primary.clearContours(),
+          }
+        },
+        // The same label Orbit's tool results are stamped with, so the
+        // panel and an Orbit answer can never name different frames for
+        // the same measurement.
+        frameTime: () => readCurrentTime(),
+        // Identity, not display. `readCurrentTime` reads the *label*,
+        // which is snapped to the display interval and hidden outright
+        // for a dataset without start/end times — useless for telling
+        // whether the frame moved. This is the video playhead, the same
+        // value the luma sampler keys its snapshot cache on.
+        frameId: () => this.viewports.getPrimary()?.currentFrameId() ?? null,
+      })
+      // The same frame, reachable from Orbit's tool executors (§A6).
+      // Registered rather than passed down: `processMessage` already
+      // takes eight positional arguments, and the panel's own seam is
+      // established as a registration too. Reads the primary panel for
+      // the same reason the panel does.
+      registerAnalysisSource({
+        frame: () => this.viewports.getPrimary()?.analysisFrame() ?? null,
+        visibleBounds: () => this.viewports.getPrimary()?.visibleBounds() ?? null,
+        datasetTitle: () => this.appState.currentDataset?.title ?? null,
+        // Deliberately the renderer's own probe rather than a second
+        // read of `analysisFrame()`. The point is to ask a different
+        // path the same question: this is the call the hover readout
+        // makes, with the renderer's probe source and bounding box, so
+        // if it and the snapshot have drifted apart the cross-check
+        // sees it. Reading the frame again here would agree with
+        // itself and prove nothing.
+        probeAt: (lat, lon) => {
+          const reading = this.viewports.getPrimary()?.probeValueAt(lat, lon)
+          if (!reading) return null
+          return { value: reading.value, noData: reading.noData === true }
+        },
+      })
       // Playlists — mount the manager panel host and wire the
       // playback state machine to the regular loadDataset flow.
       // hasTourOnLoad probes dataset metadata so the playback
@@ -385,8 +642,11 @@ class InteractiveSphere {
       onPlaylistPlaybackChange(syncPlaylistNextBtn)
       syncPlaylistNextBtn()
       // First-session privacy disclosure. No-ops on every launch
-      // after the user dismisses it.
-      showDisclosureBannerIfNeeded()
+      // after the user dismisses it. Skipped inside an embed — the
+      // host page owns consent, and a privacy banner popping up in a
+      // third-party iframe is both wrong and intrusive (§J of
+      // `docs/WORDPRESS_INTEGRATION_PLAN.md`).
+      if (!embedModeActive) showDisclosureBannerIfNeeded()
       // Telemetry transport — skipped entirely when the compile-time
       // flag is off (telemetry-free builds) and when console mode
       // is on (dev convenience: events log locally, no POSTs).
@@ -403,7 +663,14 @@ class InteractiveSphere {
           (lat: number, lng: number) => {
             const ns = lat >= 0 ? 'N' : 'S'
             const ew = lng >= 0 ? 'E' : 'W'
-            latlngEl.textContent = `${Math.abs(lat).toFixed(1)}° ${ns}, ${Math.abs(lng).toFixed(1)}° ${ew}`
+            const coords = `${Math.abs(lat).toFixed(1)}° ${ns}, ${Math.abs(lng).toFixed(1)}° ${ew}`
+            // A data-encoded dataset can also say what the value
+            // *is* here. Everything else reports coordinates only,
+            // exactly as before.
+            const reading = primary.probeValueAt(lat, lng)
+            latlngEl.textContent = reading
+              ? `${coords} · ${formatProbeReading(reading)}`
+              : coords
             latlngEl.classList.remove('hidden')
           },
           () => {
@@ -476,6 +743,12 @@ class InteractiveSphere {
 
       const datasetId = previewFailed ? null : this.getDatasetIdFromUrl()
       if (datasetId) {
+        // Canonicalize whatever form the visitor arrived on \u2014 an old
+        // `?dataset=<ULID>` link, or `/dataset/<legacy_id>` \u2014 to
+        // `/dataset/<slug>`, so the address bar reads as something
+        // worth pasting into a message and anything copied from here
+        // spreads the human-friendly form.
+        this.writeDatasetUrl(datasetId, 'replace')
         this.setLoadingStatus('Loading dataset\u2026', 50)
         await this.loadDataset(datasetId, 'url')
         this.setLoading(false)
@@ -552,8 +825,20 @@ class InteractiveSphere {
             primary.loadDefaultEarthMaterials((f: number) => { earthFraction = f; updateProgress() }),
             primary.loadCloudOverlay(cloudUrl, (f: number) => { cloudFraction = f; updateProgress() })
           ])
-          const sun = getSunPosition(new Date())
-          primary.enableSunLighting(sun.lat, sun.lng)
+          // Only if the globe is still bare. `enableSunLighting` clears
+          // the dataset texture and the probe source by design — that
+          // is how unloading returns to the plain Earth — so firing it
+          // here after a dataset has already been loaded wipes that
+          // dataset off the globe and silently kills its value readout.
+          //
+          // The window is real whenever these two textures are slow or
+          // unreachable: they are large external assets, and the
+          // catalog can be ready long before them. The dataset is the
+          // thing the visitor asked for; the day/night look is not.
+          if (!this.panelStates.some(p => p?.dataset)) {
+            const sun = getSunPosition(new Date())
+            primary.enableSunLighting(sun.lat, sun.lng)
+          }
         } catch (err) {
           logger.warn('[App] Earth material loading failed — continuing without day/night overlay:', err)
         }
@@ -676,10 +961,69 @@ class InteractiveSphere {
     }
   }
 
-  /** Extract the `dataset` query parameter from the current URL. */
+  /** Extract the dataset to boot with from the current URL — the
+   *  canonical `/dataset/<slug>` path form, or the `?dataset=` query
+   *  param older links carry. Either may name the dataset by slug,
+   *  ULID, or legacy id; all three resolve through
+   *  `getDatasetById`. A well-formed reference that isn't in the
+   *  catalog is returned as-is, so the loader surfaces a "not found"
+   *  naming what the visitor actually asked for.
+   *
+   *  Both forms are validated against the same alphabet. The path
+   *  form gets that from `parseDatasetPathname`; applying it to the
+   *  query form too means a malformed `?dataset=` value (markup,
+   *  spaces) is ignored rather than laundered into a
+   *  `/dataset/<percent-encoded-junk>` path by the canonicalize step
+   *  — a URL that wouldn't parse back on reload. */
   private getDatasetIdFromUrl(): string | null {
     const params = new URLSearchParams(window.location.search)
-    return params.get('dataset')
+    const raw = params.get('dataset') ?? parseDatasetPathname(window.location.pathname)
+    if (!raw || !isDatasetRef(raw)) return null
+    return dataService.getDatasetById(raw)?.id ?? raw
+  }
+
+  /**
+   * Write the canonical `/dataset/<slug>` URL for a dataset into the
+   * address bar. A reference that isn't in the loaded catalog is
+   * written through as-is (`/dataset/<ref>`) rather than resolved —
+   * the resulting URL still boots to the same "not found", and it
+   * keeps naming what the visitor actually asked for.
+   *
+   * Leaves a token-gated draft preview's URL alone *while the draft
+   * is what's being written* — `?preview=` is only valid with its
+   * token attached, so canonicalizing it to the public path would
+   * 404 on reload. Switching to a different dataset from inside a
+   * preview session is a real navigation and gets a real URL:
+   * `buildDatasetPath` drops the spent token. Skipping that write
+   * would leave the address bar naming the draft while the globe
+   * showed something else, and a reload would snap back to the
+   * draft.
+   */
+  private writeDatasetUrl(id: string, mode: 'push' | 'replace'): void {
+    const search = window.location.search
+    const previewRef = previewDatasetRef(search)
+    if (previewRef !== null) {
+      const previewId = dataService.getDatasetById(previewRef)?.id ?? previewRef
+      if (previewId === id) return
+    }
+    const next = buildDatasetPath(dataService.getDatasetById(id) ?? { id }, search)
+    if (next === `${window.location.pathname}${search}`) return
+    if (mode === 'push') {
+      window.history.pushState({}, '', next)
+    } else {
+      window.history.replaceState({}, '', next)
+    }
+  }
+
+  /** Reset the address bar to the no-dataset form, keeping whatever
+   *  mode the visitor arrived in (`?catalog=true`, `?embed=1`). */
+  private clearDatasetUrl(mode: 'push' | 'replace'): void {
+    const next = buildNoDatasetPath(window.location.pathname, window.location.search)
+    if (mode === 'push') {
+      window.history.pushState({}, '', next)
+    } else {
+      window.history.replaceState({}, '', next)
+    }
   }
 
   /**
@@ -867,7 +1211,10 @@ class InteractiveSphere {
       } else if (dataService.isImageDataset(dataset)) {
         const img = await loadImageDataset(dataset, targetRenderer, this.appState, this.isMobile, loaderCallbacks)
         if (gen !== this.loadGeneration) return
-        if (this.panelStates[targetSlot]) this.panelStates[targetSlot].image = img
+        if (this.panelStates[targetSlot]) {
+          this.panelStates[targetSlot].image = img
+          this.panelStates[targetSlot].mediaDatasetId = dataset.id
+        }
         this.emitLayerLoaded(dataset, targetSlot, trigger, 'image', Date.now() - loadStartWall)
       } else if (dataService.isVideoDataset(dataset)) {
         // Clear any previously-cached image element for this slot —
@@ -885,7 +1232,7 @@ class InteractiveSphere {
           result.hlsService.destroy()
           return
         }
-        this.storePanelVideoResult(targetSlot, result)
+        this.storePanelVideoResult(targetSlot, result, dataset.id)
         this.attachPrimaryVideoSync()
         this.doStartPlaybackLoop()
         this.emitLayerLoaded(dataset, targetSlot, trigger, 'hls', Date.now() - loadStartWall)
@@ -941,6 +1288,35 @@ class InteractiveSphere {
     }
   }
 
+  /**
+   * Tells the Analyze panel when the globe has stopped on a frame.
+   *
+   * Reads the transport rather than subscribing to it, because the
+   * playback loop below already runs every frame and a second
+   * requestAnimationFrame on a page whose performance story is a WebGL
+   * globe would be a poor trade for a signal that only matters when
+   * nothing is moving. `playbackSettle` owns the decision about what
+   * counts as settled; this only supplies the sample.
+   *
+   * A missing video is reported as `paused` with no playhead — an image
+   * dataset has nothing to settle on, and the detector treats that as
+   * "forget where you were" rather than as a still frame.
+   */
+  private readonly playbackSettle = createPlaybackSettleWatcher(
+    () => {
+      const video = this.hlsService?.getVideo() ?? null
+      return video
+        ? { playhead: video.currentTime, paused: video.paused, seeking: video.seeking }
+        : { playhead: null, paused: true }
+    },
+    () => {
+      notifyAnalyzePlaybackSettled()
+      // The transport has stopped on a frame, so every sibling's
+      // position is finally stable enough to be worth reading back.
+      this.verifySiblingTimes()
+    },
+  )
+
   /** Start the requestAnimationFrame playback loop that syncs the scrubber, time label, and auto-loop. */
   private doStartPlaybackLoop(): void {
     startPlaybackLoop(
@@ -950,6 +1326,26 @@ class InteractiveSphere {
       this.appState,
       (time) => this.updateVideoTimeLabel(time),
       () => this.renderer?.getMap()?.triggerRepaint(),
+      // Per-frame sibling drift correction. The primary video is the
+      // master clock; siblings are kept in temporal lockstep here
+      // rather than free-running on a once-set playbackRate (which
+      // integrates duration-imprecision error into visible drift).
+      () => {
+        this.correctSiblingDrift()
+        // Beside the drift correction, never inside it: that method
+        // returns early while the primary is paused, and a paused
+        // primary is exactly the state an output must be told about.
+        this.publishPlaybackMirror()
+        // Any time notice describes a settled frame; once the playhead
+        // is moving again it describes nothing. correctSiblingDrift has
+        // already returned above unless the primary is playing.
+        if (this.primaryVideoSyncActive) this.clearSiblingTimeNoticesWhileMoving()
+        // Cheap on every frame — a comparison and a subtraction — and it
+        // has to be sampled at frame rate to know when the playhead
+        // stopped. The loop already treats a throw here as something to
+        // log and survive, and the watcher swallows its own.
+        this.playbackSettle.tick(performance.now())
+      },
     )
   }
 
@@ -1041,7 +1437,10 @@ class InteractiveSphere {
         dataset, targetRenderer, this.appState, this.isMobile, tourLoaderCallbacks,
         { isPrimary: isPrimarySlot },
       )
-      if (this.panelStates[targetSlot]) this.panelStates[targetSlot].image = img
+      if (this.panelStates[targetSlot]) {
+        this.panelStates[targetSlot].image = img
+        this.panelStates[targetSlot].mediaDatasetId = dataset.id
+      }
       this.emitLayerLoaded(dataset, targetSlot, 'tour', 'image', Date.now() - tourLoadStartWall)
     } else if (dataService.isVideoDataset(dataset)) {
       // Clear any previously-cached image element for this slot —
@@ -1053,7 +1452,7 @@ class InteractiveSphere {
         dataset, targetRenderer, this.appState, this.isMobile, this.playback, tourLoaderCallbacks,
         { isPrimary: isPrimarySlot },
       )
-      this.storePanelVideoResult(targetSlot, result)
+      this.storePanelVideoResult(targetSlot, result, dataset.id)
       if (isPrimarySlot) {
         this.attachPrimaryVideoSync()
         this.doStartPlaybackLoop()
@@ -1158,6 +1557,16 @@ class InteractiveSphere {
       setPlaybackRate: (rate) => {
         if (this.hlsService) this.hlsService.playbackRate = rate
       },
+      // What the loaded dataset advances at, so the `frameRate` task
+      // divides by the right thing. The rate is already baked into the
+      // file — this only tells the tour what it is.
+      getPlaybackFps: () => this.appState.currentDataset?.playbackFps,
+      // The `setTime` task — same seek the docent's set_time action and
+      // the In-the-news jump use. Best-effort: an unseekable dataset or
+      // out-of-range time is a quiet no-op mid-tour.
+      setTime: (isoTime) => {
+        seekToDate(isoTime, this.hlsService, this.appState, this.playback)
+      },
       onTourEnd: () => this.endTour(),
       onStop: () => {
         // User-initiated stop. Release a playlist that was waiting
@@ -1253,7 +1662,10 @@ class InteractiveSphere {
   /** Map the current video playback time to a real-world date and update the time label. */
   private updateVideoTimeLabel(videoTime: number): void {
     const dataset = this.appState.currentDataset
-    if (!dataset) return
+    if (!dataset) {
+      this.assertedLabelDate = null
+      return
+    }
 
     if (dataset.startTime && dataset.endTime) {
       const start = new Date(dataset.startTime)
@@ -1261,12 +1673,18 @@ class InteractiveSphere {
       const videoDuration = this.hlsService?.duration ?? 1
       const snapMs = this.playback.displayInterval?.intervalMs
       const currentDate = videoTimeToDate(videoTime, videoDuration, start, end, snapMs)
+      // The same playhead without the snap. `verifySiblingTimes` compares
+      // true instants across panels; snapping first would make a
+      // sub-frame difference at a bucket edge look like a full step.
+      const trueDate = videoTimeToDate(videoTime, videoDuration, start, end)
       const showTime = dataset.period
         ? isSubDailyPeriod(dataset.period)
         : (this.playback.displayInterval?.showTime ?? false)
       this.appState.timeLabel = formatDate(currentDate, showTime)
+      this.assertedLabelDate = trueDate
       this.showTimeLabel(true)
     } else {
+      this.assertedLabelDate = null
       this.showTimeLabel(false)
     }
   }
@@ -1361,6 +1779,59 @@ class InteractiveSphere {
   }
 
   /**
+   * Fly the primary globe to a related current event's place and seek the
+   * loaded dataset to its time — the "In the news" card's "View on globe"
+   * action (`docs/CURRENT_EVENTS_PLAN.md` §6). Reuses the same primitives
+   * Orbit's docent drives: `renderer.flyTo` / `fitBounds` for place,
+   * `seekToDate` for time. Point geometry flies in to a regional altitude;
+   * a bounding box or a named region fits its extent. The time seek only
+   * runs when the event's start falls inside the loaded dataset's coverage;
+   * outside it (common for rolling real-time windows) we still fly to the
+   * place and report `out-of-range` so the card can note it.
+   */
+  private navigateToEvent(ev: PublicEvent): EventNavResult {
+    // A point event flies to ~regional altitude (km → MapLibre zoom in
+    // `MapRenderer.flyTo`); box/region events fit their extent instead.
+    const EVENT_FLY_ALTITUDE_KM = 3000
+    let navigated = false
+    const g = ev.geometry
+    if (g.point) {
+      void this.renderer?.flyTo(g.point.lat, g.point.lon, EVENT_FLY_ALTITUDE_KM)
+      if (isVrActive()) void flyToOnGlobe(g.point.lat, g.point.lon)
+      navigated = true
+    } else if (g.boundingBox) {
+      const { n, s, w, e } = g.boundingBox
+      this.renderer?.fitBounds([w, s, e, n])
+      navigated = true
+    } else if (g.regionName) {
+      const region = resolveRegion(g.regionName)
+      if (region) {
+        this.renderer?.fitBounds(region.bounds)
+        navigated = true
+      }
+    }
+
+    let time: EventNavResult['time'] = 'none'
+    if (ev.occurredStart) {
+      const ds = this.appState.currentDataset
+      const start = ds?.startTime ? new Date(ds.startTime).getTime() : NaN
+      const end = ds?.endTime ? new Date(ds.endTime).getTime() : NaN
+      const target = new Date(ev.occurredStart).getTime()
+      // Only temporal datasets can be seeked or reported out-of-range; a
+      // static image has no time axis, so there is nothing to note.
+      if (!isNaN(start) && !isNaN(end) && end > start && !isNaN(target)) {
+        if (target >= start && target <= end) {
+          seekToDate(ev.occurredStart, this.hlsService, this.appState, this.playback)
+          time = 'seeked'
+        } else {
+          time = 'out-of-range'
+        }
+      }
+    }
+    return { navigated, time }
+  }
+
+  /**
    * Render the info panel for whichever slot `getInfoDisplayIndex`
    * points at, repopulate the picker dropdown with all loaded
    * datasets, and show/hide the picker based on how many are loaded.
@@ -1380,7 +1851,12 @@ class InteractiveSphere {
     }
 
     // Render the currently-selected dataset into the info panel body.
-    displayDatasetInfo(dataset, this.appState.datasets, (id) => this.loadDataset(id, 'browse'))
+    displayDatasetInfo(
+      dataset,
+      this.appState.datasets,
+      (id) => this.loadDataset(id, 'browse'),
+      (ev) => this.navigateToEvent(ev),
+    )
 
     // Repopulate the picker with every loaded dataset (in panel order)
     // and wire the change handler once.
@@ -1454,6 +1930,7 @@ class InteractiveSphere {
     const infoOn = this.viewPrefs.infoPanelVisible
     const isMultiView = this.viewports.getPanelCount() > 1
     const primaryIdx = this.viewports.getPrimaryIndex()
+    let anyColorbar = false
 
     for (let slot = 0; slot < this.panelStates.length; slot++) {
       const panel = this.panelStates[slot]
@@ -1466,10 +1943,31 @@ class InteractiveSphere {
       // - Off for the primary in single-view mode when the info
       //   panel is visible (the info panel holds the legend there)
       // - On otherwise
-      let showFloating = legendOn && !!legendLink
-      if (showFloating && !isMultiView && slot === primaryIdx && infoOn) {
+      // A data-encoded row carries its exact palette, range and units,
+      // so the rendered colorbar supersedes the uploaded legend image —
+      // which for these datasets describes at best the same thing and
+      // at worst a previous encode.
+      const scale = dataset?.renderEncoding === RENDER_ENCODING_DATA_LUMA
+        ? dataset.colorScale ?? null
+        : null
+
+      let showFloating = legendOn && (!!legendLink || !!scale)
+      if (showFloating && !isMultiView && slot === primaryIdx && infoOn && !scale) {
         showFloating = false
       }
+
+      if (showFloating && scale && dataset) {
+        this.viewports.setPanelLegend(slot, null)
+        this.viewports.setPanelColorbar(slot, renderColorbar({
+          scale,
+          display: this.colorScaleDisplay,
+          title: dataset.title,
+          onOpen: () => this.openColorbarControls(scale),
+        }))
+        anyColorbar = true
+        continue
+      }
+      this.viewports.setPanelColorbar(slot, null)
 
       if (showFloating && legendLink && dataset) {
         this.viewports.setPanelLegend(slot, legendLink, {
@@ -1480,6 +1978,59 @@ class InteractiveSphere {
         this.viewports.setPanelLegend(slot, null)
       }
     }
+
+    // Nothing on screen carries a palette any more — the dataset was
+    // unloaded or swapped for a picture — so an open controls popover
+    // is adjusting the colours of nothing, and an open Analyze panel is
+    // showing statistics for a frame that is no longer displayed.
+    if (!anyColorbar) {
+      closeDisplayControls()
+      closeAnalyzeUI()
+    } else {
+      // Still something to colour, but possibly a different dataset —
+      // the Analyze panel's numbers belong to the one it opened on.
+      notifyAnalyzeDatasetChanged(this.appState.currentDataset?.id ?? null)
+    }
+  }
+
+  /**
+   * Open the palette / range / threshold controls for a data-encoded
+   * dataset, and fan every change out to all panels.
+   *
+   * The transform goes to every globe rather than the one that was
+   * tapped: in a 2- or 4-globe layout the panels exist to be compared,
+   * and comparing two fields through two different palettes is worse
+   * than not comparing them.
+   */
+  private openColorbarControls(scale: NonNullable<Dataset['colorScale']>): void {
+    openDisplayControls({
+      scale,
+      display: this.colorScaleDisplay,
+      // Read the frame once, when the controls open, so the sliders
+      // are placed on the data's own distribution rather than on the
+      // palette's nominal range — see `DisplayControlsOptions`.
+      // Null whenever the frame isn't readable, which falls back to
+      // the linear placement rather than failing.
+      distribution: () => {
+        const frame = this.viewports.getPrimary()?.analysisFrame()
+        if (!frame) return null
+        return buildHistogram(frame.snapshot, frame.scale, frame.options).weights
+      },
+      onChange: (next) => {
+        this.colorScaleDisplay = next
+        this.viewports.setColorScaleDisplay(next)
+        // The one place this value changes, so the one place an output
+        // can learn about it. It is deliberately *not* republished on a
+        // dataset load: the transform is app-wide and outlives the
+        // dataset it was set on, exactly as it does on the control
+        // globes, and a picture dataset ignores it anyway because
+        // `paletteTexture` builds no LUT without a `colorScale`.
+        publishGlobeState({ display: displayForMirror(next) })
+        // Rebuild the floating bars so they track the globe. Cheap:
+        // this is DOM, and the LUT upload has already happened.
+        this.refreshPanelLegends()
+      },
+    })
   }
 
   /** Open the full-size legend modal for a dataset. Mirrors the
@@ -1757,6 +2308,77 @@ class InteractiveSphere {
     }
   }
 
+  /**
+   * Publish the primary panel's dataset to any multi-monitor outputs
+   * (`docs/MULTI_MONITOR_PLAN.md` §3).
+   *
+   * Reads current state rather than taking the changed slot, and is
+   * called from every path that can change *which dataset the primary
+   * is showing* — a load, an unload, and panel promotion, which changes
+   * it without either. Over-calling is free: the aggregator drops a
+   * patch whose value is structurally identical, so a load into a
+   * non-primary slot costs one comparison and sends nothing. Missing a
+   * call is the only failure with a cost, which is why this reads the
+   * world instead of being told about it.
+   *
+   * The URL is the one *this* window resolved — after offline-cache
+   * lookup and variant probing — because the protocol makes that the
+   * control window's job. It cannot be read back off the media element:
+   * on the hls.js path `video.src` is a `blob:` MediaSource handle.
+   *
+   * **`dataset` alone is not what the panel is showing.** It is assigned
+   * before the load is attempted, so it stays set when a load fails,
+   * while one is in flight, and for a `tour/json` row that paints
+   * nothing at all — in each case the panel still holds the *previous*
+   * dataset's pixels. Publishing from `dataset` and `image` together
+   * without checking they agree is how an output ends up rendering one
+   * dataset's texture under another's bbox, `lonOrigin`, flip and
+   * palette, labelled with the wrong title. `mediaDatasetId` records
+   * which dataset the media actually belongs to, and the three cases
+   * below are what that comparison yields.
+   */
+  private publishMirroredDataset(): void {
+    const panel = this.panelStates[this.viewports.getPrimaryIndex()]
+    const dataset = panel?.dataset ?? null
+    const settled = panelMirrorState(dataset?.id, panel?.mediaDatasetId ?? null)
+
+    // Genuinely empty — the panel is back to the default Earth, and an
+    // output should follow it there.
+    if (!panel || settled === 'empty') {
+      // The playhead goes with it. `publishPlaybackMirror` would
+      // eventually say the same thing, but only while the playback loop
+      // is running — it is stopped on unload, so without this an output
+      // keeps the departed dataset's instant and `outputSync` steers a
+      // clip that is no longer on screen.
+      publishGlobeState({ dataset: null, playback: null, primary: null })
+      return
+    }
+
+    // Row and pixels disagree: a load failed or is still in flight, a
+    // teardown is half-done, or the primary holds a tour row whose
+    // script has not loaded anything yet. Publish NOTHING rather than
+    // guessing. `null` would blank the sphere while the operator is
+    // still looking at the old dataset, and the row would mislabel the
+    // old pixels — so the honest move is to leave the output showing
+    // what it has until the panel settles, which fires this again.
+    if (settled === 'unsettled' || !dataset) return
+
+    const kind = dataService.isVideoDataset(dataset)
+      ? 'video'
+      : dataService.isImageDataset(dataset)
+        ? 'image'
+        : null
+    // Unreachable while `mediaDatasetId` is only set beside real pixels
+    // (a tour row never paints), but a format that mirrors as neither
+    // kind must not be guessed at either.
+    if (kind === null) return
+
+    const url = kind === 'video'
+      ? panel.hlsService?.getSourceUrl() ?? null
+      : panel.image?.src ?? null
+    publishGlobeState({ dataset: toMirroredDataset(dataset, kind, url) })
+  }
+
   /** Emit a `layer_loaded` event and remember when the slot filled so
    * the matching `layer_unloaded` can report dwell_ms. */
   private emitLayerLoaded(
@@ -1778,6 +2400,10 @@ class InteractiveSphere {
       trigger,
       load_ms: Math.max(0, Math.round(loadMs)),
     })
+    // Both load paths funnel through here, after the panel has been
+    // given its image / HLS service — so this is the first point at
+    // which the resolved URL an output needs actually exists.
+    this.publishMirroredDataset()
   }
 
   /** Emit `layer_unloaded` for whatever dataset currently occupies
@@ -2076,6 +2702,16 @@ class InteractiveSphere {
         for (const r of this.viewports.getAll()) { r.toggleLabels?.(visible); r.toggleBoundaries?.(visible) }
       },
       onHighlightRegion: (geojson, _label) => { this.renderer?.highlightRegion(geojson) },
+      onShowAnalysis: (scope, regionName) => {
+        openAnalyzeUI(
+          null,
+          scope === 'named' && regionName
+            ? { kind: 'named', name: regionName }
+            : scope === 'view'
+              ? { kind: 'view' }
+              : { kind: 'dataset' },
+        )
+      },
       getMapViewContext: () => this.renderer?.getViewContext() ?? null,
       getDatasets: () => this.appState.datasets,
       getCurrentDataset: () => this.appState.currentDataset,
@@ -2319,7 +2955,7 @@ class InteractiveSphere {
     this.dismissBrowseAfterLoad()
     this.announce('Loading dataset\u2026')
     this.showLoadingScreen('Loading dataset\u2026', 20)
-    window.history.pushState({}, '', `?dataset=${encodeURIComponent(id)}`)
+    this.writeDatasetUrl(id, 'push')
     await this.loadDataset(id, 'browse')
     if (gen !== this.loadGeneration) {
       logger.debug('[App] selectDatasetFromChat superseded:', id, 'gen:', gen, 'current:', this.loadGeneration)
@@ -2351,6 +2987,7 @@ class InteractiveSphere {
       for (let i = newCount; i < oldCount; i++) {
         const panel = this.panelStates[i]
         if (!panel) continue
+        this.cancelSiblingSeekUpload(i)
         if (panel.videoTexture) { panel.videoTexture.dispose() }
         if (panel.hlsService) { panel.hlsService.destroy() }
       }
@@ -2413,9 +3050,21 @@ class InteractiveSphere {
     const newPrimaryPanel = this.panelStates[newIndex]
     const newDataset = newPrimaryPanel?.dataset ?? null
 
+    // Analyze reads the primary and nothing else, and its transect is
+    // drawn on that panel's map. Promoting a different one would leave
+    // the line on the globe the panel is no longer describing, so it
+    // closes here rather than being rewired — the same reasoning as the
+    // dataset-swap teardown, which `notifyAnalyzeDatasetChanged` below
+    // would miss whenever both panels hold the same row.
+    closeAnalyzeUI()
+
     // Rewire video sync to the new primary's video (if any)
     this.detachPrimaryVideoSync()
     stopPlaybackLoop(this.playback)
+    // And the outputs' camera: a listener left on the demoted panel's
+    // map would keep driving them from a globe the operator is no
+    // longer using.
+    this.bindOperatorCamera()
 
     // Update the shared appState + info panel. Promoting a different
     // panel clears any picker override so the info panel follows the
@@ -2424,14 +3073,14 @@ class InteractiveSphere {
     this.infoDisplayOverride = null
     if (newDataset) {
       this.renderInfoPanel()
-      window.history.replaceState({}, '', `?dataset=${encodeURIComponent(newDataset.id)}`)
+      this.writeDatasetUrl(newDataset.id, 'replace')
       notifyDatasetChanged(newDataset)
       setHelpActiveDataset(newDataset.id)
       this.renderer?.setCanvasDescription(`3D globe showing ${newDataset.title}`)
     } else {
       const infoPanel = document.getElementById('info-panel')
       if (infoPanel) infoPanel.classList.add('hidden')
-      window.history.replaceState({}, '', window.location.pathname)
+      this.clearDatasetUrl('replace')
       notifyDatasetChanged(null)
       setHelpActiveDataset(null)
       this.renderer?.setCanvasDescription('Interactive 3D globe showing Earth')
@@ -2472,6 +3121,11 @@ class InteractiveSphere {
       }
     }
     this.announce(newDataset ? `Active panel: ${newDataset.title}` : `Panel ${newIndex + 1} active`)
+
+    // Promotion changes which dataset the primary is showing without
+    // any load or unload, so an output driven only by those two would
+    // keep showing the demoted panel's row indefinitely.
+    this.publishMirroredDataset()
   }
 
   /**
@@ -2481,44 +3135,61 @@ class InteractiveSphere {
   private storePanelVideoResult(
     slot: number,
     result: { hlsService: HLSService; videoTexture: VideoTextureHandle },
+    datasetId: string,
   ): void {
     const panel = this.panelStates[slot]
     if (!panel) return
     panel.hlsService = result.hlsService
     panel.videoTexture = result.videoTexture
+    // Recorded with the stream, not with the catalog row: this is the
+    // claim "the pixels on this panel are this dataset's".
+    panel.mediaDatasetId = datasetId
+
+    // A stream that dies after load used to say nothing at all, which
+    // left this panel holding a frame for good while the shared time
+    // label went on asserting a moment for it. Clear any stale mark
+    // first: this slot may be being reused by a new dataset.
+    this.viewports.setPanelStreamNotice(slot, false)
+    result.hlsService.onFatalError((error) => {
+      // Guard against a late callback for a dataset this slot no
+      // longer holds — the tour swaps sibling datasets repeatedly.
+      if (this.panelStates[slot]?.hlsService !== result.hlsService) return
+      logger.error(`[App] Panel ${slot} stream failed terminally: ${error.type}/${error.details}`)
+      this.viewports.setPanelStreamNotice(slot, true)
+    })
   }
 
   /**
-   * Sibling video sync — seek-once-then-free-run strategy.
+   * Sibling video sync — primary-as-master-clock, per-frame correction.
    *
-   * The previous implementation listened to every `timeupdate` event
-   * (~4 per second) and seeked every sibling's `currentTime` on each
-   * tick. That caused constant decoder interruption (16+ seeks/sec
-   * with 4 panels), manifesting as visible jitter and pauses.
+   * The primary panel's video is the single source of truth for the
+   * current real-world date; siblings are kept locked to it. Rather
+   * than set a once-off `playbackRate` and let siblings free-run (which
+   * integrates `video.duration` imprecision into visible drift — see
+   * terraviz#132), we re-derive each sibling's target position from the
+   * primary's date every frame and steer it back into alignment.
    *
-   * New approach:
+   *   - **On play / seeked** (`seekSiblingsToDate`): exact-align every
+   *     sibling to the primary's date and mirror its play/pause state.
+   *     Runs once on attach and on the primary's `play` / `seeked`.
    *
-   *   - **On play**: seek every sibling to match the primary's
-   *     real-world date, then call `play()` on all of them at once.
-   *     After that, the browser's internal media clock keeps them
-   *     naturally in sync without any seeking.
+   *   - **On pause** (`seekSiblingsToDate`): exact-align overlapping
+   *     siblings to the primary's date *then* freeze them, so the held
+   *     frame is frame-accurate for side-by-side study. Out-of-range
+   *     siblings stay frozen at their nearest boundary frame.
    *
-   *   - **On pause**: pause all siblings. No seek — they're already
-   *     at the right position from the play-sync.
+   *   - **Per-frame drift correction** (`correctSiblingDrift`, driven
+   *     from the playback rAF loop while the primary is playing): every
+   *     frame, re-derive each sibling's target/rate. Small drift is
+   *     eased out by gently trimming `playbackRate` (no seek — a
+   *     `currentTime` write on a playing video interrupts decode and
+   *     flickers the panel; terraviz#229). A hard seek fires only for a
+   *     large desync past {@link SIBLING_HARD_SEEK_THRESHOLD_S}, or to
+   *     pin an out-of-range sibling to its boundary frame.
    *
-   *   - **On seeked** (user scrubbed the transport): re-compute
-   *     target times, seek siblings, then resume play if the primary
-   *     is playing.
-   *
-   *   - **Periodic drift check** (every 5 seconds): if any sibling
-   *     has drifted more than 1.0s from the primary's date-mapped
-   *     position, seek just that sibling. This catches slow decoder
-   *     drift without the constant-seek jitter. The 1.0s threshold
-   *     is generous — 0.3s was too tight and triggered on normal
-   *     inter-decoder variance.
-   *
-   * This reduces seeking from ~16/sec to essentially 0 during normal
-   * playback, with a soft correction every 5s only when needed.
+   * Net: drift is bounded by the threshold (one frame to correct) rather
+   * than by an interval, and seeking stays near-zero in steady state
+   * because the smoothing rate keeps siblings inside the threshold.
    */
   private attachPrimaryVideoSync(): void {
     this.detachPrimaryVideoSync()
@@ -2558,7 +3229,11 @@ class InteractiveSphere {
         const sibPanel = this.panelStates[i]
         const sibHls = sibPanel?.hlsService
         const sibVideo = sibHls?.getVideo?.() ?? null
-        if (!sibVideo || sibVideo.readyState < 2) continue
+        // Metadata is enough to steer a sibling — see
+        // {@link SIBLING_MIN_READY_STATE}. This is the call that has to
+        // reach a sibling parked at its own end when the primary wraps,
+        // so it must not wait for frame data the seek itself will fetch.
+        if (!sibVideo || sibVideo.readyState < SIBLING_MIN_READY_STATE) continue
 
         const sibDataset = sibPanel?.dataset
         const sibHasRange = !!(sibDataset?.startTime && sibDataset.endTime && sibVideo.duration > 0)
@@ -2582,14 +3257,17 @@ class InteractiveSphere {
           if (primaryRangeMs > 0 && sibRangeMs > 0) {
             // rate = (sib video seconds per real-world ms) / (primary video seconds per real-world ms)
             // Simplifies to: (sibDuration / sibRangeMs) / (primaryDuration / primaryRangeMs)
-            const rate = (sibVideo.duration / sibRangeMs) / (primaryVideo.duration / primaryRangeMs)
+            // Scaled by the primary's actual playbackRate so the sibling
+            // tracks tour playback-rate changes (e.g. 5fps → 0.167×),
+            // not just the 1× case (terraviz#229).
+            const rate = (sibVideo.duration / sibRangeMs) / (primaryVideo.duration / primaryRangeMs) * primaryVideo.playbackRate
             // Clamp to browser limits (typically 0.0625–16×)
             sibVideo.playbackRate = Math.max(0.0625, Math.min(16, rate))
           }
 
           if (position === 'inside') {
             this.viewports.setOutOfRange(i, false)
-            sibVideo.currentTime = targetTime
+            this.alignSiblingTo(i, sibVideo, targetTime)
             if (mirrorPlayState) {
               if (primaryVideo.paused && !sibVideo.paused) {
                 sibVideo.pause()
@@ -2599,7 +3277,7 @@ class InteractiveSphere {
             }
           } else {
             this.viewports.setOutOfRange(i, true)
-            sibVideo.currentTime = targetTime
+            this.alignSiblingTo(i, sibVideo, targetTime)
             if (!sibVideo.paused) sibVideo.pause()
           }
         } else {
@@ -2613,70 +3291,21 @@ class InteractiveSphere {
           }
         }
 
-        const sibTex = sibPanel?.videoTexture
-        if (sibTex) sibTex.needsUpdate = true
-      }
-    }
-
-    /**
-     * Periodic drift correction — only seeks siblings that have
-     * drifted beyond the threshold. Much cheaper than constant-seek
-     * because most of the time no sibling needs correction.
-     */
-    const DRIFT_THRESHOLD_S = 1.0
-    const DRIFT_CHECK_MS = 5000
-
-    const driftCheck = () => {
-      if (primaryVideo.paused) return
-
-      const pIdx = this.viewports.getPrimaryIndex()
-      const pPanel = this.panelStates[pIdx]
-      const pDataset = pPanel?.dataset
-
-      let primaryDate: Date | null = null
-      if (pDataset?.startTime && pDataset.endTime && primaryVideo.duration > 0) {
-        primaryDate = videoTimeToDate(
-          primaryVideo.currentTime,
-          primaryVideo.duration,
-          new Date(pDataset.startTime),
-          new Date(pDataset.endTime),
-        )
-      }
-      if (!primaryDate) return
-
-      for (let i = 0; i < this.panelStates.length; i++) {
-        if (i === pIdx) continue
-        const sibPanel = this.panelStates[i]
-        const sibVideo = sibPanel?.hlsService?.getVideo?.() ?? null
-        if (!sibVideo || sibVideo.readyState < 2 || sibVideo.paused) continue
-
-        const sibDataset = sibPanel?.dataset
-        if (!sibDataset?.startTime || !sibDataset.endTime || sibVideo.duration <= 0) continue
-
-        const { videoTime: targetTime, position } = dateToVideoTime(
-          primaryDate,
-          sibVideo.duration,
-          new Date(sibDataset.startTime),
-          new Date(sibDataset.endTime),
-        )
-
-        if (position === 'inside' && Math.abs(sibVideo.currentTime - targetTime) > DRIFT_THRESHOLD_S) {
-          logger.debug(`[App] Drift correction: panel ${i} off by ${(sibVideo.currentTime - targetTime).toFixed(1)}s`)
-          sibVideo.currentTime = targetTime
-        }
+        this.uploadSiblingFrameOnSeek(i, sibVideo)
       }
     }
 
     // --- Wire event listeners ---
 
     const onPlay = () => seekSiblingsToDate(true)
-    const onPause = () => {
-      for (let i = 0; i < this.panelStates.length; i++) {
-        if (i === this.viewports.getPrimaryIndex()) continue
-        const sibVideo = this.panelStates[i]?.hlsService?.getVideo?.() ?? null
-        if (sibVideo && !sibVideo.paused) sibVideo.pause()
-      }
-    }
+    // On pause, exact-align every overlapping sibling to the primary's
+    // date *before* freezing, so the held frame is frame-accurate for
+    // side-by-side study — paused is exactly when a viewer scrutinises
+    // the comparison, and a one-shot seek can't thrash. seekSiblingsToDate
+    // both snaps in-range siblings to the exact date and (because the
+    // primary is already paused here) mirrors the pause to them; siblings
+    // whose window doesn't contain the date stay frozen at their boundary.
+    const onPause = () => seekSiblingsToDate(true)
     const onSeeked = () => seekSiblingsToDate(true)
 
     primaryVideo.addEventListener('play', onPlay)
@@ -2689,24 +3318,467 @@ class InteractiveSphere {
     )
     this.primaryVideoSyncTarget = primaryVideo
 
-    // Start the periodic drift checker
-    this.driftCheckInterval = setInterval(driftCheck, DRIFT_CHECK_MS)
-
-    // Run once immediately so siblings reflect the primary's current
-    // state without waiting for a user action.
+    // Arm per-frame drift correction (driven from the playback rAF
+    // loop via `correctSiblingDrift`) and run a full resync once now so
+    // siblings reflect the primary's current state immediately.
+    this.primaryVideoSyncActive = true
     seekSiblingsToDate(true)
   }
 
   /**
+   * Per-frame sibling drift correction, invoked from the playback rAF
+   * loop (`startPlaybackLoop`'s `onTick`). The primary video is the
+   * master clock: every frame we re-derive each sibling's target
+   * position from the primary's real-world date and snap it back if it
+   * has drifted past {@link SIBLING_DRIFT_THRESHOLD_S}.
+   *
+   * This replaces the old once-set-`playbackRate` + 5 s/1 s interval
+   * scheme (terraviz#132). The rate is kept only as a smoothing aid so
+   * we don't seek every frame — it's re-derived continuously here so it
+   * tracks `video.duration` as HLS segments buffer and the reported
+   * duration firms up (the original failure mode: an imprecise duration
+   * froze a slightly-wrong rate whose error integrated into visible
+   * drift — ~2.83 years per second of video on the Climate Futures
+   * tour). The threshold-gated seek is the closed loop that bounds it.
+   */
+  /**
+   * Detach the camera listener from whichever map it was on.
+   *
+   * Held as a field rather than re-derived, because the primary map is
+   * replaced on promotion and a listener left on the old one keeps
+   * publishing a camera nobody is driving — the outputs would follow a
+   * panel the operator demoted.
+   */
+  private unbindOperatorCamera: (() => void) | null = null
+
+  /**
+   * Publish the primary's camera to any outputs (§3, rung 7).
+   *
+   * MapLibre's `move` fires once per rendered frame during a drag,
+   * which is the rate step 15's "≤30 ms lag" asks for and the reason
+   * this is not additionally throttled. It costs nothing when the globe
+   * is still: `publishGlobeState` hands the patch to the aggregator,
+   * which drops a value structurally identical to the one it holds, so
+   * a parked camera puts nothing on the wire.
+   *
+   * Bound here rather than in `initialize` so promotion rebinds it —
+   * `onViewportPrimaryChange` calls this again with the new primary.
+   */
+  private bindOperatorCamera(): void {
+    this.unbindOperatorCamera?.()
+    this.unbindOperatorCamera = null
+
+    const map = this.viewports.getPrimary()?.getMap()
+    if (!map) return
+
+    const publish = () => {
+      const center = map.getCenter()
+      publishGlobeState({
+        view: sharedViewFrom(operatorCameraFrom(center.lat, center.lng, map.getZoom())),
+      })
+    }
+    map.on('move', publish)
+    this.unbindOperatorCamera = () => map.off('move', publish)
+    // Once immediately: a promotion changes the camera without moving
+    // it, and an output would otherwise keep the demoted panel's view
+    // until the operator next touched the globe.
+    publish()
+  }
+
+  /**
+   * Publish the primary's playhead to any outputs (§3, rung 7).
+   *
+   * Called from the same `onTick` as `correctSiblingDrift`, but
+   * deliberately *not* from inside it: that method returns early while
+   * the primary is paused, and a paused primary is exactly the state an
+   * output most needs told about — it has a position to hold, and
+   * without this it would sit wherever its own element happened to
+   * stop.
+   *
+   * `primary` is published alongside because `outputSync` gates on
+   * both. It changes only on a dataset load, and the aggregator drops
+   * the repeats, so sending it per frame costs one structural compare.
+   */
+  private publishPlaybackMirror(): void {
+    const panel = this.panelStates[this.viewports.getPrimaryIndex()]
+    const video = panel?.hlsService?.getVideo?.() ?? null
+    const dataset = panel?.dataset
+
+    if (!video || !dataset) {
+      publishGlobeState({ playback: null, primary: null })
+      return
+    }
+
+    publishGlobeState({
+      playback: playbackFrom({
+        currentTime: video.currentTime,
+        duration: video.duration,
+        paused: video.paused,
+        playbackRate: video.playbackRate,
+        startTime: dataset.startTime,
+        endTime: dataset.endTime,
+      }),
+      primary: primaryFrom(video.duration, dataset.startTime, dataset.endTime),
+    })
+  }
+
+  private correctSiblingDrift(): void {
+    if (!this.primaryVideoSyncActive) return
+
+    const pIdx = this.viewports.getPrimaryIndex()
+    const pPanel = this.panelStates[pIdx]
+    const pDataset = pPanel?.dataset
+    const primaryVideo = pPanel?.hlsService?.getVideo?.() ?? null
+    // Only correct while the primary is actively playing; paused state
+    // is handled by the `pause` event handler in attachPrimaryVideoSync.
+    if (!primaryVideo || primaryVideo.paused || primaryVideo.readyState < 2) return
+    if (!pDataset?.startTime || !pDataset.endTime || primaryVideo.duration <= 0) return
+
+    const primaryDate = videoTimeToDate(
+      primaryVideo.currentTime,
+      primaryVideo.duration,
+      new Date(pDataset.startTime),
+      new Date(pDataset.endTime),
+    )
+
+    const primaryRangeMs = new Date(pDataset.endTime).getTime() - new Date(pDataset.startTime).getTime()
+
+    for (let i = 0; i < this.panelStates.length; i++) {
+      if (i === pIdx) continue
+      const sibPanel = this.panelStates[i]
+      const sibVideo = sibPanel?.hlsService?.getVideo?.() ?? null
+      // See {@link SIBLING_MIN_READY_STATE}. A sibling below
+      // HAVE_CURRENT_DATA is exactly the one that needs correcting: the
+      // desync at a loop wrap is the whole video duration, far past the
+      // hard-seek threshold, and the corrective write is what restores it.
+      if (!sibVideo || sibVideo.readyState < SIBLING_MIN_READY_STATE) continue
+
+      const sibDataset = sibPanel?.dataset
+      if (!sibDataset?.startTime || !sibDataset.endTime || sibVideo.duration <= 0) continue
+
+      // Re-derive target/rate/drift every frame so the rate tracks
+      // `video.duration` as HLS firms it up. Small in-range drift is
+      // eased out via the returned (gently trimmed) rate; `shouldSeek`
+      // is true only for a large desync or to pin an out-of-range
+      // sibling to its boundary frame (terraviz#229 — per-frame seeking
+      // interrupted decode and flickered the sibling).
+      const { position, targetTime, rate, shouldSeek } = computeSiblingSyncCorrection({
+        date: primaryDate,
+        sibCurrentTime: sibVideo.currentTime,
+        sibDuration: sibVideo.duration,
+        sibStart: new Date(sibDataset.startTime),
+        sibEnd: new Date(sibDataset.endTime),
+        primaryDuration: primaryVideo.duration,
+        primaryRangeMs,
+        primaryPlaybackRate: primaryVideo.playbackRate,
+        hardSeekThresholdS: SIBLING_HARD_SEEK_THRESHOLD_S,
+      })
+
+      sibVideo.playbackRate = rate
+
+      // A seek already in flight is left alone. This runs every frame,
+      // and a lower hard-seek threshold means it fires during the
+      // ~2s a sibling spends re-buffering after a scrub — precisely
+      // when it is least able to absorb another one. Writing
+      // `currentTime` again there restarts the fetch hls.js is already
+      // running, so a stall could be extended indefinitely by the very
+      // correction meant to end it. The seek in flight is heading close
+      // to the right place; whatever it misses by, the next frame after
+      // it lands will still see and correct.
+      if (shouldSeek && !sibVideo.seeking) {
+        sibVideo.currentTime = targetTime
+        this.uploadSiblingFrameOnSeek(i, sibVideo)
+      }
+
+      if (position === 'inside') {
+        this.viewports.setOutOfRange(i, false)
+        const wasOutOfRange = this.siblingOutOfRange[i] === true
+        this.siblingOutOfRange[i] = false
+        // Resume a sibling that was frozen out-of-range and has now
+        // re-entered its window as the primary advanced. Only on the
+        // transition — re-issuing play() every frame would churn
+        // Promises (and log warnings) if autoplay is blocked.
+        if (wasOutOfRange && sibVideo.paused) {
+          sibVideo.play().catch(() => { /* autoplay blocked */ })
+        }
+      } else {
+        // Primary date is outside this sibling's range — it's been
+        // pinned to its boundary frame above; freeze + mark it.
+        this.viewports.setOutOfRange(i, true)
+        this.siblingOutOfRange[i] = true
+        if (!sibVideo.paused) sibVideo.pause()
+      }
+    }
+  }
+
+  /**
+   * Move a sibling to a target position — but only if it is not already
+   * there.
+   *
+   * A seek is expensive in a way the old unconditional write assumed it
+   * was not. Browser capture of a 4-globe session: four panels already
+   * aligned at 0.5820 of their duration, pressing play seeked the three
+   * siblings to 0.5822 — a fifth of one frame — and left all three at
+   * `HAVE_METADATA` for five seconds, frozen on their previous frame
+   * while the primary played on. Every play, pause and scrub was paying
+   * that, because `seekSiblingsToDate` wrote `currentTime` whether or
+   * not it changed anything.
+   *
+   * Within {@link SIBLING_SEEK_EPS_S} the panel is on the same frame it
+   * would seek to, so the seek is skipped — but the texture is still
+   * nudged, since being on the right frame and *showing* it are
+   * different claims, and the second is the one that keeps failing.
+   */
+  private alignSiblingTo(slot: number, video: HTMLVideoElement, targetTime: number): void {
+    if (Math.abs(video.currentTime - targetTime) <= SIBLING_SEEK_EPS_S) {
+      const tex = this.panelStates[slot]?.videoTexture
+      if (tex) tex.needsUpdate = true
+      return
+    }
+    video.currentTime = targetTime
+    this.uploadSiblingFrameOnSeek(slot, video)
+  }
+
+  /**
+   * Upload a sibling's frame once its seek has actually landed.
+   *
+   * Setting `needsUpdate` straight after writing `currentTime` schedules
+   * a repaint that arrives before the seek completes, so it uploads the
+   * frame the panel was *already* showing and clears the one-shot flag.
+   * The video is then paused, `!paused` is false, and the repaint
+   * heartbeat in `earthTileLayer` does not run — nothing re-uploads,
+   * ever. The panel keeps its pre-seek frame for good while its clock
+   * reads the right time, which is how a globe ends up two hours behind
+   * the label with no way back.
+   *
+   * Measured seeks complete in ~2 ms against locally buffered media,
+   * which is why this never showed up in instrumented tests; against
+   * real HLS a sibling can hold `HAVE_METADATA` for ~2 s, and the
+   * repaint wins every time.
+   *
+   * `seeked` only fires once the data is there, so the upload it arms
+   * cannot land early. The texture is looked up when the event fires
+   * rather than captured, so a dataset swap in between retargets it
+   * instead of writing through a stale handle.
+   */
+  private uploadSiblingFrameOnSeek(slot: number, video: HTMLVideoElement): void {
+    const tex = this.panelStates[slot]?.videoTexture
+    // Still worth the immediate hint: a seek that needs no data never
+    // fires `seeked`, and this is the only upload it will get.
+    if (tex) tex.needsUpdate = true
+    if (!video.seeking || this.siblingSeekUploads[slot]) return
+
+    const armed = new AbortController()
+    this.siblingSeekUploads[slot] = armed
+    video.addEventListener('seeked', () => {
+      this.siblingSeekUploads[slot] = null
+      // Looked up now rather than captured, so a dataset swap between
+      // arming and firing retargets this instead of writing through a
+      // handle that no longer belongs to the panel.
+      const current = this.panelStates[slot]?.videoTexture
+      if (current) current.needsUpdate = true
+    }, { once: true, signal: armed.signal })
+  }
+
+  /**
+   * Drop any armed upload for a slot, or for every slot.
+   *
+   * Called wherever a panel's video goes away. `seeked` never fires on a
+   * destroyed element, so without this the slot stays marked armed
+   * forever and refuses to arm again — the tour swaps sibling datasets a
+   * dozen times, so the fix would quietly stop working panel by panel.
+   */
+  private cancelSiblingSeekUpload(slot?: number): void {
+    if (slot === undefined) {
+      for (const armed of this.siblingSeekUploads) armed?.abort()
+      this.siblingSeekUploads = []
+      if (this.siblingRepairTimer !== null) {
+        clearTimeout(this.siblingRepairTimer)
+        this.siblingRepairTimer = null
+      }
+      return
+    }
+    this.siblingSeekUploads[slot]?.abort()
+    this.siblingSeekUploads[slot] = null
+  }
+
+  /**
+   * Read back whether every sibling actually shows the date the shared
+   * time label claims, and mark the ones that don't.
+   *
+   * The multi-globe layout asserts one label over every panel, derived
+   * from the primary alone. Siblings are commanded to that date by
+   * `seekSiblingsToDate` and never read back, so a write that fails to
+   * land leaves the label quietly speaking for a panel that is somewhere
+   * else. `correctSiblingDrift` would notice, but it returns early while
+   * the primary is paused — and paused is exactly when a viewer reads
+   * the label and compares panels.
+   *
+   * Runs on settle rather than per frame: the playback settle watcher
+   * fires once the transport is paused, not seeking, and still, which is
+   * both the only moment the answer is stable and the only moment it
+   * matters. Verification only — correcting here would fight the sync
+   * controller for the playhead, and a panel that cannot reach the
+   * labelled moment should say so rather than silently retry.
+   */
+  private verifySiblingTimes(afterRepair = false): void {
+    if (this.siblingRepairTimer !== null) {
+      clearTimeout(this.siblingRepairTimer)
+      this.siblingRepairTimer = null
+    }
+    // A re-check that arrives after the transport moved again describes
+    // nothing; the moving-clear path owns the notices from here.
+    const primaryVideo = this.panelStates[this.viewports.getPrimaryIndex()]?.hlsService?.getVideo?.() ?? null
+    if (afterRepair && (!primaryVideo || !primaryVideo.paused || primaryVideo.seeking)) return
+
+    let repairing = false
+    const labelDate = this.assertedLabelDate
+    // Nothing is being asserted (no dataset, or no temporal range), so
+    // there is no claim for a panel to contradict.
+    if (!labelDate) {
+      this.clearSiblingTimeNotices()
+      return
+    }
+
+    const pIdx = this.viewports.getPrimaryIndex()
+    const snapMs = this.playback.displayInterval?.intervalMs
+
+    for (let i = 0; i < this.panelStates.length; i++) {
+      if (i === pIdx) continue
+      const panel = this.panelStates[i]
+      const video = panel?.hlsService?.getVideo?.() ?? null
+      const renderer = this.viewports.getRendererAt(i)
+      const ds = panel?.dataset
+
+      // No video, no range, or a duration we cannot map through: there
+      // is nothing to compare, which is not the same as a mismatch.
+      if (!video || !ds?.startTime || !ds.endTime || !(video.duration > 0)) {
+        this.setSiblingTimeNotice(i, null)
+        continue
+      }
+
+      const verdict = verifySiblingTime({
+        labelDate,
+        // What the globe is showing, not what its video element says —
+        // see `shownFrameTime`. The renderer knows which frame actually
+        // reached the texture; the element only knows its own clock.
+        sibFrameTime: shownFrameTime(
+          renderer instanceof MapRenderer ? renderer.getUploadedFrameTime() : null,
+          video.currentTime,
+        ),
+        sibDuration: video.duration,
+        sibStart: new Date(ds.startTime),
+        sibEnd: new Date(ds.endTime),
+        snapIntervalMs: snapMs,
+      })
+
+      // `uncovered` is left alone deliberately — the out-of-range
+      // treatment already explains that panel, and saying it twice in
+      // two different vocabularies is worse than saying it once.
+      if (verdict.alignment !== 'off') {
+        this.setSiblingTimeNotice(i, null)
+        continue
+      }
+
+      // The panel is showing the wrong frame. Before saying so, ask for
+      // a redraw — the overwhelmingly common cause is a texture left
+      // behind a clock that is already correct, and one upload fixes
+      // that whatever produced it. This is not the correction
+      // `verifySiblingTime`'s contract rules out: that is about seeking,
+      // which would fight the sync controller for the playhead. Nothing
+      // here moves a playhead; it repaints what the video already holds.
+      const tex = this.panelStates[i]?.videoTexture
+      if (!afterRepair && tex) {
+        tex.needsUpdate = true
+        repairing = true
+        continue
+      }
+
+      const showTime = ds.period
+        ? isSubDailyPeriod(ds.period)
+        : (this.playback.displayInterval?.showTime ?? false)
+      this.setSiblingTimeNotice(i, formatDate(verdict.shownDate, showTime))
+      logger.debug(
+        `[App] Panel ${i} is ${Math.round(verdict.driftMs / 1000)}s of real time off the label`
+        + (afterRepair ? ' and did not repaint' : ''),
+      )
+    }
+
+    // Confirm the repair rather than assuming it. A notice is only
+    // earned by a panel that stayed wrong after being asked to redraw,
+    // which keeps the ribbon meaning "I could not fix this" instead of
+    // flashing up for every transient staleness.
+    if (repairing) {
+      this.siblingRepairTimer = setTimeout(() => {
+        this.siblingRepairTimer = null
+        this.verifySiblingTimes(true)
+      }, SIBLING_REPAIR_CONFIRM_MS)
+    }
+  }
+
+  /** Show or hide one panel's time notice, tracking it for cheap clearing. */
+  private setSiblingTimeNotice(slot: number, shownDate: string | null): void {
+    this.viewports.setPanelTimeNotice(slot, shownDate)
+    this.siblingTimeNoticed[slot] = shownDate !== null
+  }
+
+  /**
+   * Drop every time notice.
+   *
+   * A notice describes one settled position, so it goes stale the
+   * instant the transport moves again. The array scan short-circuits
+   * when nothing is marked, which is the overwhelmingly common case.
+   */
+  /**
+   * Drop stale time notices once the transport is moving again.
+   *
+   * "Moving" is playing *or* seeking. A scrub while paused leaves
+   * `paused` true and only raises `seeking`, so testing `paused` alone
+   * held the previous notice on screen for the whole drag — naming one
+   * date while the label and the panels moved through others, which is
+   * the opposite of what a notice about a settled frame should mean.
+   *
+   * Called from the playback loop, which ticks whether or not the
+   * primary is playing, so it makes its own check. Both guards are
+   * cheap and short-circuit before touching the DOM.
+   */
+  private clearSiblingTimeNoticesWhileMoving(): void {
+    if (!this.siblingTimeNoticed.some(Boolean)) return
+    const primary = this.panelStates[this.viewports.getPrimaryIndex()]?.hlsService?.getVideo?.() ?? null
+    if (!primary) return
+    if (primary.paused && !primary.seeking) return
+    this.clearSiblingTimeNotices()
+  }
+
+  private clearSiblingTimeNotices(): void {
+    if (!this.siblingTimeNoticed.some(Boolean)) return
+    for (let i = 0; i < this.siblingTimeNoticed.length; i++) {
+      if (this.siblingTimeNoticed[i]) this.setSiblingTimeNotice(i, null)
+    }
+  }
+
+  /**
    * Detach all sibling-sync listeners from the previous primary video,
-   * stop the drift-check timer, and clear any lingering out-of-range
-   * state from siblings.
+   * disarm per-frame drift correction, and clear any lingering
+   * out-of-range or time-notice state from siblings.
    */
   private detachPrimaryVideoSync(): void {
-    if (this.driftCheckInterval !== null) {
-      clearInterval(this.driftCheckInterval)
-      this.driftCheckInterval = null
-    }
+    this.primaryVideoSyncActive = false
+    this.siblingOutOfRange = []
+    // A time notice names a date for a specific panel showing a specific
+    // dataset. Both can change out from under it here — a layout change,
+    // a new primary — so it is cleared rather than left to be corrected
+    // on the next settle.
+    this.clearSiblingTimeNotices()
+    this.siblingTimeNoticed = []
+    this.cancelSiblingSeekUpload()
+    // And the settle detector has to forget where it was, for the reason
+    // its own docs give: it reports a position once, so a new primary
+    // paused at the same `currentTime` — the normal case for
+    // equal-duration videos held in lockstep — would be suppressed as
+    // already-reported and never verified. The playhead is the same
+    // number but a different panel's frame.
+    this.playbackSettle.reset()
     const target = this.primaryVideoSyncTarget
     if (target) {
       for (const { event, handler } of this.primaryVideoSyncListeners) {
@@ -2737,6 +3809,10 @@ class InteractiveSphere {
     const panel = this.panelStates[targetSlot]
     if (!panel) return
 
+    // Before anything else: this slot's video is about to be destroyed,
+    // and an armed listener on it would never fire.
+    this.cancelSiblingSeekUpload(targetSlot)
+
     const isPrimary = targetSlot === this.viewports.getPrimaryIndex()
     if (isPrimary) {
       this.detachPrimaryVideoSync()
@@ -2751,6 +3827,9 @@ class InteractiveSphere {
       panel.hlsService.destroy()
       panel.hlsService = null
     }
+    // The notice described a stream that no longer exists. `destroy()`
+    // above already dropped the handler, so nothing can re-raise it.
+    this.viewports.setPanelStreamNotice(targetSlot, false)
 
     if (isPrimary) {
       this.appState.isPlaying = false
@@ -2810,6 +3889,11 @@ class InteractiveSphere {
     // texture.
     panel.dataset = null
     panel.image = null
+    panel.mediaDatasetId = null
+    // After the clear, not before: `emitLayerUnloadedForSlot` runs while
+    // the panel still holds the outgoing row (it reports on it), so
+    // publishing there would restate the dataset being removed.
+    this.publishMirroredDataset()
     const renderer = this.viewports.getRendererAt(slot)
     if (renderer instanceof MapRenderer) {
       // Drop the panel's dataset-credits phantom source so Tools
@@ -2951,19 +4035,16 @@ class InteractiveSphere {
     closeChat()
     this.announce('Loading dataset\u2026')
     this.showLoadingScreen('Loading dataset\u2026', 20)
-    // Preserve `?catalog=true` across the dataset-load URL transition
-    // so the catalog↔sphere tab control (Phase 1 §3.2) can offer a
-    // "back to catalog" affordance. The body class stays set so CSS
-    // continues to recognise the catalog-mode surface; the regular
-    // load flow swaps the visible browse panel for the globe via
-    // `dismissBrowseAfterLoad()`. Read `getCatalogMode()` once so
-    // the URL state we observe and the tab state we update agree
-    // by construction.
+    // `writeDatasetUrl` carries the existing query across, which
+    // preserves `?catalog=true` so the catalog↔sphere tab control
+    // (Phase 1 §3.2) can offer a "back to catalog" affordance. The
+    // body class stays set so CSS continues to recognise the
+    // catalog-mode surface; the regular load flow swaps the visible
+    // browse panel for the globe via `dismissBrowseAfterLoad()`.
+    // Read `getCatalogMode()` before the write so the URL state we
+    // observe and the tab state we update agree by construction.
     const inCatalogMode = getCatalogMode()
-    const nextParams = new URLSearchParams()
-    if (inCatalogMode) nextParams.set('catalog', 'true')
-    nextParams.set('dataset', id)
-    window.history.pushState({}, '', `?${nextParams.toString()}`)
+    this.writeDatasetUrl(id, 'push')
     // The globe is now the active surface — drop the
     // `catalog-empty` flag so CSS reveals `#map-grid`. The
     // `catalog-mode` body class stays (sticky session marker).
@@ -3052,7 +4133,7 @@ class InteractiveSphere {
       r.toggleBoundaries?.(false)
     }
     syncToolsMenuState({ labels: false, borders: false, terrain: false, autoRotate: false })
-    window.history.pushState({}, '', window.location.pathname)
+    this.clearDatasetUrl('push')
 
     this.showLoadingScreen('Loading Earth\u2026', 20)
     if (this.renderer) {
@@ -3112,6 +4193,7 @@ class InteractiveSphere {
       if (panel.hlsService) { panel.hlsService.destroy(); panel.hlsService = null }
       panel.dataset = null
       panel.image = null
+      panel.mediaDatasetId = null
       const renderer = this.viewports.getRendererAt(i)
       if (renderer instanceof MapRenderer) {
         renderer.setDatasetCredits(null)
@@ -3120,7 +4202,54 @@ class InteractiveSphere {
   }
 
   /** Clean up all resources: video streams, textures, and every viewport renderer. */
+  /**
+   * Fullscreen, F11 and the idle cursor for the control window (§3.6).
+   *
+   * All of this exists because a title bar leaks into the signal: the
+   * common installation captures a monitor over HDMI, so the window's
+   * own chrome arrives on the sphere with the picture.
+   *
+   * The persisted state is restored **only on desktop**, and that is
+   * not a tidiness rule — `requestFullscreen` needs a user gesture, so
+   * restoring on the web throws on every launch and changes nothing.
+   * `restoreOnLaunch` holds both halves of that test.
+   */
+  private initWindowChrome(): void {
+    const host = resolveChromeHost()
+    const fullscreen = createFullscreenController({ host, persist: true })
+    // Ctrl+Q, the control window only. A kiosk launch leaves no close
+    // button, no title bar and no menu bar, so without this the only
+    // way out on Linux is a window-manager binding that may not exist.
+    // Inert on the web by construction: the DOM host implements no
+    // `quit`, which is what stops this swallowing Firefox's own Ctrl+Q.
+    createQuitHotkey({ host })
+    const idleCursor = createIdleCursor()
+    // Only while fullscreen: hiding the pointer of a windowed app the
+    // operator is still driving would be a bug, not a feature.
+    fullscreen.onChange(on => idleCursor.setActive(on))
+    this.fullscreen = fullscreen
+    this.idleCursor = idleCursor
+
+    if (restoreOnLaunch()) {
+      void fullscreen.set(true).catch(err => {
+        // Costs the restored state, never the boot that was applying it.
+        logger.warn('[Main] could not restore fullscreen:', err)
+      })
+    }
+  }
+
   dispose(): void {
+    // Before the handle goes: the panel holds a document-level keydown
+    // listener, and it reads through `this.multiOutput`.
+    closeOutputUI()
+    this.multiOutput?.stop()
+    this.multiOutput = null
+    this.unbindOperatorCamera?.()
+    this.unbindOperatorCamera = null
+    this.fullscreen?.dispose()
+    this.fullscreen = null
+    this.idleCursor?.dispose()
+    this.idleCursor = null
     this.teardownAllPanelResources()
     this.viewports.dispose()
     this.panelStates = []
@@ -3170,6 +4299,15 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (location.pathname.startsWith('/publish')) {
     const { bootPublisherPortal } = await import('./ui/publisher')
     await bootPublisherPortal()
+    return
+  }
+
+  // Public blog route gate — same lazy-chunk shape as the portal:
+  // `/blog` and `/blog/:slug` render static content pages and skip
+  // the globe boot entirely (docs/CURRENT_EVENTS_PLAN.md §7).
+  if (location.pathname === '/blog' || location.pathname.startsWith('/blog/')) {
+    const { bootBlogPage } = await import('./ui/blog')
+    await bootBlogPage()
     return
   }
 

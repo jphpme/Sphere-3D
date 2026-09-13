@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { renderDatasetDetailPage } from './dataset-detail'
 import type { PublisherDatasetDetail } from '../types'
@@ -247,6 +250,20 @@ describe('renderDatasetDetailPage', () => {
     expect(edit?.textContent).toBe('Edit')
   })
 
+  it('hides Edit / Preview / Retract when the caller cannot edit the row', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(detailResponse(dataset({ can_edit: false })))
+    await renderDatasetDetailPage(mount, '01ABC', {
+      fetchFn: fetchFn as unknown as typeof fetch,
+    })
+    // Read-only view: the row still renders, but none of the
+    // owner-scoped mutation affordances appear.
+    expect(mount.querySelector('.publisher-detail-edit')).toBeNull()
+    expect(mount.querySelector('.publisher-detail-preview')).toBeNull()
+    expect(mount.querySelector('.publisher-detail-title')?.textContent).toBe(
+      'Sea Surface Temperature Anomaly — April 2026',
+    )
+  })
+
   it('Edit button delegates to routerNavigate on a plain click', async () => {
     const fetchFn = vi.fn().mockResolvedValue(detailResponse(dataset()))
     const routerNavigate = vi.fn<(path: string) => void>()
@@ -301,6 +318,20 @@ describe('renderDatasetDetailPage', () => {
     expect(mount.querySelector('.publisher-detail-retract')?.textContent).toBe(
       'Retract',
     )
+    expect(mount.querySelector('.publisher-detail-publish')).toBeNull()
+  })
+
+  it('hides Publish for a contributor who can edit but not publish (can_publish=false)', async () => {
+    // A contributor's own draft: editable, but no publish rights.
+    const fetchFn = vi.fn().mockResolvedValue(
+      detailResponse(dataset({ published_at: null, can_edit: true, can_publish: false })),
+    )
+    await renderDatasetDetailPage(mount, '01ABC', {
+      fetchFn: fetchFn as unknown as typeof fetch,
+    })
+    // Edit is still offered (they can edit their draft)…
+    expect(mount.querySelector('.publisher-detail-edit')).not.toBeNull()
+    // …but the Publish control is hidden (server also 403s).
     expect(mount.querySelector('.publisher-detail-publish')).toBeNull()
   })
 

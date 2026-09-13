@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * Tests for the publisher-API dataset mutations layer.
  *
@@ -5,8 +8,11 @@
  *   - createDataset on a valid body inserts a draft (published_at NULL).
  *   - createDataset returns 400 + errors for invalid body.
  *   - Slug is derived from the title when missing, with collision suffix.
- *   - listDatasetsForPublisher honors the admin vs publisher filter.
+ *   - listDatasetsForPublisher returns the whole catalog to every role
+ *     (reads are open; writes stay owner-scoped).
  *   - listDatasetsForPublisher's status filter (draft/published/retracted).
+ *   - canMutateDataset / getDatasetById enforce the read-open,
+ *     write-owner-scoped split.
  *   - updateDataset patches fields, leaves others alone, invalidates KV
  *     when the row is currently public.
  *   - publishDataset stamps published_at + invalidates KV; rejects when
@@ -17,10 +23,12 @@
 import { describe, expect, it } from 'vitest'
 import type { PublisherRow } from './publisher-store'
 import {
+  canMutateDataset,
   createDataset,
   deleteDataset,
   DELETE_EMBEDDING_JOB_NAME,
   EMBED_JOB_NAME,
+  getDatasetById,
   getDatasetForPublisher,
   isEmbedConfigured,
   listDatasetsForPublisher,
@@ -181,12 +189,12 @@ describe('listDatasetsForPublisher', () => {
     expect(datasets).toHaveLength(3)
   })
 
-  it('filters to own rows for a publisher-role account', async () => {
+  it('returns the whole catalog to a publisher-role account (reads are open)', async () => {
     const { env } = setupEnv()
     await seed3(env)
     const { datasets } = await listDatasetsForPublisher(env.CATALOG_DB!, PUBLISHER)
-    expect(datasets).toHaveLength(2)
-    for (const d of datasets) expect(d.publisher_id).toBe(PUBLISHER.id)
+    // A community publisher now sees every row, not just its own two.
+    expect(datasets).toHaveLength(3)
   })
 
   it('honors ?status=draft|published|retracted', async () => {
@@ -205,6 +213,35 @@ describe('listDatasetsForPublisher', () => {
     expect(drafts.datasets.map(d => d.id).sort()).toEqual([b.dataset.id].concat(drafts.datasets.filter(d => d.id !== b.dataset.id).map(d => d.id)).sort())
     expect(published.datasets).toHaveLength(1)
     expect(published.datasets[0].id).toBe(a.dataset.id)
+  })
+})
+
+describe('canMutateDataset', () => {
+  it('lets a publisher mutate only its own rows', () => {
+    expect(canMutateDataset(PUBLISHER, { publisher_id: PUBLISHER.id })).toBe(true)
+    expect(canMutateDataset(PUBLISHER, { publisher_id: ADMIN.id })).toBe(false)
+    expect(canMutateDataset(PUBLISHER, { publisher_id: null })).toBe(false)
+  })
+
+  it('lets a privileged (admin) caller mutate any row', () => {
+    expect(canMutateDataset(ADMIN, { publisher_id: PUBLISHER.id })).toBe(true)
+    expect(canMutateDataset(ADMIN, { publisher_id: null })).toBe(true)
+  })
+})
+
+describe('getDatasetById', () => {
+  it('reads any row regardless of owner (reads are open)', async () => {
+    const { env } = setupEnv()
+    const created = await createDataset(env, ADMIN, {
+      title: 'Admin dataset',
+      format: 'video/mp4',
+    })
+    expect(created.ok).toBe(true)
+    if (!created.ok) return
+    // Owned by ADMIN, but a community publisher can still read it.
+    const row = await getDatasetById(env.CATALOG_DB!, created.dataset.id)
+    expect(row?.id).toBe(created.dataset.id)
+    expect(await getDatasetById(env.CATALOG_DB!, 'does-not-exist')).toBeNull()
   })
 })
 
@@ -235,6 +272,87 @@ describe('getDatasetForPublisher', () => {
       .prepare(`SELECT celestial_body FROM datasets WHERE id = ?`)
       .get(created.dataset.id) as { celestial_body: string | null }
     expect(row.celestial_body).toBeNull()
+  })
+})
+
+describe('updateDataset — slug lock', () => {
+  /** Create a dataset and flip it to published. */
+  async function publishedDataset(env: ReturnType<typeof setupEnv>['env']) {
+    const created = await createDataset(env, ADMIN, {
+      title: 'Hurricane Season 2024',
+      format: 'video/mp4',
+    })
+    if (!created.ok) throw new Error('seed failed')
+    await env.CATALOG_DB!.prepare(
+      `UPDATE datasets SET data_ref='vimeo:1', license_spdx='CC-BY-4.0' WHERE id = ?`,
+    )
+      .bind(created.dataset.id)
+      .run()
+    await publishDataset(env, created.dataset.id)
+    return created.dataset
+  }
+
+  async function storedSlug(
+    env: ReturnType<typeof setupEnv>['env'],
+    id: string,
+  ): Promise<string | undefined> {
+    const row = await env
+      .CATALOG_DB!.prepare('SELECT slug FROM datasets WHERE id = ?')
+      .bind(id)
+      .first<{ slug: string }>()
+    return row?.slug
+  }
+
+  it('refuses to rename a published dataset’s slug', async () => {
+    const { env } = setupEnv()
+    const ds = await publishedDataset(env)
+
+    const result = await updateDataset(env, ADMIN, ds.id, { slug: 'something-else' })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.status).toBe(409)
+    expect(result.errors[0].field).toBe('slug')
+    expect(result.errors[0].code).toBe('slug_locked')
+
+    // The stored slug is untouched — the public URL still resolves.
+    expect(await storedSlug(env, ds.id)).toBe(ds.slug)
+  })
+
+  it('accepts a published dataset’s unchanged slug', async () => {
+    // The dataset form re-serializes every field on save, so the
+    // current slug rides along in the body of every ordinary edit.
+    // Refusing on presence rather than on change would make a
+    // published dataset unsaveable at all.
+    const { env } = setupEnv()
+    const ds = await publishedDataset(env)
+
+    const result = await updateDataset(env, ADMIN, ds.id, {
+      slug: ds.slug,
+      abstract: 'Edited while published.',
+    })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.dataset.abstract).toBe('Edited while published.')
+    expect(await storedSlug(env, ds.id)).toBe(ds.slug)
+  })
+
+  it('still lets a draft rename its slug freely', async () => {
+    const { env } = setupEnv()
+    const created = await createDataset(env, ADMIN, {
+      title: 'Still A Draft',
+      format: 'video/mp4',
+    })
+    expect(created.ok).toBe(true)
+    if (!created.ok) return
+
+    const result = await updateDataset(env, ADMIN, created.dataset.id, {
+      slug: 'renamed-while-draft',
+    })
+
+    expect(result.ok).toBe(true)
+    expect(await storedSlug(env, created.dataset.id)).toBe('renamed-while-draft')
   })
 })
 

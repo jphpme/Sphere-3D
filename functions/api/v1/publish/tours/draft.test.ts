@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * Wire-level tests for POST /api/v1/publish/tours/draft.
  * Phase 3pt/E — the new draft-creation endpoint the publisher
@@ -74,7 +77,9 @@ function setupEnv() {
   }
 }
 
-function ctx(opts: { env: Record<string, unknown>; body?: unknown }) {
+const REVIEWER: PublisherRow = { ...ADMIN, id: 'PUB-REVIEWER', email: 'r@e', role: 'reviewer', is_admin: 0 }
+
+function ctx(opts: { env: Record<string, unknown>; body?: unknown; publisher?: PublisherRow }) {
   const url = 'https://localhost/api/v1/publish/tours/draft'
   const headers = new Headers()
   if (opts.body !== undefined) headers.set('Content-Type', 'application/json')
@@ -84,7 +89,7 @@ function ctx(opts: { env: Record<string, unknown>; body?: unknown }) {
     request: new Request(url, init),
     env: opts.env,
     params: {} as Record<string, never>,
-    data: { publisher: ADMIN },
+    data: { publisher: opts.publisher ?? ADMIN },
     waitUntil: () => {},
     passThroughOnException: () => {},
     next: async () => new Response(null),
@@ -97,6 +102,13 @@ async function readJson<T>(res: Response): Promise<T> {
 }
 
 describe('POST /api/v1/publish/tours/draft (tour/E)', () => {
+  it('403s for a read-only reviewer (needs content.create) — no tour authoring bypass', async () => {
+    const { env } = setupEnv()
+    const res = await onRequestPost(ctx({ env, body: { title: 'Nope' }, publisher: REVIEWER }))
+    expect(res.status).toBe(403)
+    expect((await readJson<{ error: string }>(res)).error).toBe('forbidden_role')
+  })
+
   it('mints a row + seeds an empty TourFile in R2', async () => {
     const { env, bucket, sqlite } = setupEnv()
     const res = await onRequestPost(ctx({ env }))

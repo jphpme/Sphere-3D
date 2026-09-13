@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * MapLibre GL JS globe renderer.
  *
@@ -19,11 +22,26 @@ import type {
   VideoTextureHandle,
 } from '../types'
 import { setDatasetCreditsSource } from '../ui/creditsPanel'
+import { getSharedLumaSampler, type LumaSnapshot } from './glLumaSampler'
+import { DEFAULT_DISPLAY, type ColorScaleDisplay } from './colorScaleDisplay'
+import { contourSetToGeoJson, type ContourLevel } from './datasetContours'
+import { boundsRing, greatCirclePath, type TransectEndpoints } from './datasetStats'
+import type { ColorScale } from '../types/color-scale'
+import {
+  probeDatasetValue,
+  type ProbeReading,
+  type ProbeSource,
+} from './datasetProbe'
 import { getSunPosition } from '../utils/time'
 import { logger } from '../utils/logger'
 import { isMobile } from '../utils/deviceCapability'
 import { preloadLowZoomTiles } from './tilePreloader'
 import { emitCameraSettled, emit, reportError } from '../analytics'
+
+/** Screen-space slack, in CSS pixels, for the "is the pointer on the
+ *  sphere?" round-trip test. Generous enough to survive projection
+ *  rounding at the limb, tight enough to exclude the empty corners. */
+const ON_GLOBE_TOLERANCE_PX = 2
 
 // --- Tauri desktop: route tiles through Rust cache via IPC ---
 const IS_TAURI = !!(window as any).__TAURI__
@@ -328,6 +346,19 @@ const SCREENSHOT_MAX_SIZE = 512
 /** MapLibre-based globe renderer. */
 export class MapRenderer implements GlobeRenderer {
   private map: MaplibreMap | null = null
+  /** Detaches the lat/lng pointer handlers, so a second
+   *  `setLatLngCallbacks` replaces rather than stacks them. */
+  private latLngUnsubscribe: (() => void) | null = null
+  /** The currently displayed dataset frame source, kept so the hover
+   *  probe can read one texel out of it. */
+  /** Viewing state for data-encoded datasets, re-applied whenever the
+   *  earth layer is (re)created so a display chosen before the first
+   *  dataset loaded is not lost. */
+  private colorScaleDisplay: ColorScaleDisplay = DEFAULT_DISPLAY
+  private probeSource: ProbeSource | null = null
+  private probeOptions: DatasetOverlayOptions | null = null
+  /** 1x1 scratch canvas the probe draws into. Created once; a fresh
+   *  canvas per pointer event would allocate on every mouse move. */
   private container: HTMLElement | null = null
   private canvasId: string = 'globe-canvas'
   /** Projection requested at init time. Stays `'globe'` for the
@@ -521,79 +552,169 @@ export class MapRenderer implements GlobeRenderer {
     // Add earth tile layer (2d — renders below labels), then skybox layer
     // (3d — renders after everything, uses depth test for stars behind globe).
     // Move label layers above the earth tile layer so they aren't darkened.
-    this.map.on('load', () => {
-      logger.info(`[MapRenderer] Map loaded with ${this.projection} projection`)
+    //
+    // `load` is the right signal and stays the primary one, but it is
+    // not a *guaranteed* one: see `buildGlobeLayers` for why there is a
+    // deadline behind it.
+    this.map.on('load', () => this.buildGlobeLayers(container, 'load'))
+    this.styleDeadline = setTimeout(
+      () => this.buildGlobeLayers(container, 'deadline'),
+      MapRenderer.STYLE_READY_DEADLINE_MS,
+    )
+  }
 
-      // Collapse the compact attribution control so it doesn't cover the auto-rotate button
-      const attrib = container.querySelector('.maplibregl-ctrl-attrib.maplibregl-compact')
-      attrib?.classList.remove('maplibregl-compact-show')
+  /**
+   * Longest we wait for MapLibre's `load` before building the globe's
+   * own layers anyway.
+   *
+   * Generous, because the happy path must never take this branch on a
+   * merely-slow connection — `load` firing at eight seconds is fine and
+   * common, and building early would only add a redundant code path to
+   * every session.
+   */
+  private static readonly STYLE_READY_DEADLINE_MS = 8_000
 
-      // The earth tile layer (day/night sphere shader, atmospheric
-      // glow) and the skybox are 3D effects designed for globe
-      // projection — they paint a textured Earth sphere + a
-      // starfield over the basemap. In mercator they'd draw the
-      // sphere on top of the flat raster tiles and obliterate the
-      // basemap; the §6.9 catalog Map view explicitly wants the
-      // raw flat GIBS composite as its basemap. Skipping the
-      // custom layers entirely in mercator keeps the surface a
-      // clean Blue/Black Marble raster — which is what the Map
-      // view's bbox overlays need to read against.
-      if (this.projection === 'mercator') {
-        // Preload still runs so the GIBS HTTP cache warms for the
-        // main globe even when the Map view mounts first.
-        if (isMobile()) {
-          this.map!.once('idle', () => preloadLowZoomTiles())
-        } else {
-          preloadLowZoomTiles()
-        }
-        return
-      }
+  private globeLayersBuilt = false
+  private styleDeadline: ReturnType<typeof setTimeout> | null = null
 
-      this.earthLayer = createEarthTileLayer()
-
-      // Layer order: black-marble → [capture] → blue-marble → [earth-tile] → labels → [skybox]
-      // Insert capture layer between Black Marble and Blue Marble
-      this.map!.addLayer(
-        this.earthLayer.captureLayer as unknown as maplibregl.LayerSpecification,
-        'blue-marble-layer',
+  /**
+   * Build the earth tile layer, the capture layer and the skybox, and
+   * flush any dataset texture buffered before they existed.
+   *
+   * **Why this is not simply the `load` handler.** MapLibre fires `load`
+   * only once *every source in the style* reports loaded, and the style
+   * declares `openmaptiles` by TileJSON `url` — a network fetch to
+   * OpenFreeMap that must resolve before the map is considered loaded.
+   * That source exists for the labels and boundaries overlays, which are
+   * **off by default** and live behind a Tools toggle. So a slow or
+   * unreachable third-party basemap host could hold the globe's own
+   * layers hostage indefinitely: no earth layer, so a dataset already
+   * fetched and decoded sat in `pendingTexture` forever, and the globe
+   * showed bare raster tiles with no day/night, no atmosphere, and — for
+   * a data-encoded row — no probe source and therefore no value readout
+   * and no Analyze panel. An optional decoration must not be able to
+   * cost the visitor the thing they actually asked for.
+   *
+   * Observed in the visual-report harness, where OpenFreeMap is
+   * unreachable: `load` never fired, and a data-encoded scene reported
+   * "no dataset carrying values" against a globe that had one.
+   *
+   * The deadline path is safe because `addLayer` needs only the style
+   * *parsed*, not every source *loaded*. This renderer hands MapLibre a
+   * style **object** in the `Map` constructor (`style:
+   * createGlobeStyle(...)`), so there is no style-document fetch to wait
+   * on — construction applies it and MapLibre's internal loaded flag,
+   * the one `addLayer` checks, is set from there. `Map#loaded()` is the
+   * separate question of whether every *source* has finished, and that
+   * is exactly the wait being bypassed.
+   *
+   * Runs once; whichever trigger arrives first wins.
+   */
+  private buildGlobeLayers(container: HTMLElement, trigger: 'load' | 'deadline'): void {
+    if (this.globeLayersBuilt || !this.map) return
+    this.globeLayersBuilt = true
+    if (this.styleDeadline) {
+      clearTimeout(this.styleDeadline)
+      this.styleDeadline = null
+    }
+    if (trigger === 'deadline') {
+      logger.warn(
+        '[MapRenderer] Map `load` did not fire within ' +
+          `${MapRenderer.STYLE_READY_DEADLINE_MS}ms — a style source is still ` +
+          'pending. Building the globe layers anyway so the dataset is not ' +
+          'held up by the basemap.',
       )
-      // Insert main earth effects layer after Blue Marble (at end of 2d layers)
-      this.map!.addLayer(this.earthLayer.layer as unknown as maplibregl.LayerSpecification)
+    }
+    logger.info(`[MapRenderer] Map loaded with ${this.projection} projection`)
 
-      // Move label/boundary layers above the earth tile layer
-      for (const id of this.allOverlayLayerIds) {
-        try { this.map!.moveLayer(id) } catch { /* layer may not exist */ }
-      }
+    // Collapse the compact attribution control so it doesn't cover the auto-rotate button
+    const attrib = container.querySelector('.maplibregl-ctrl-attrib.maplibregl-compact')
+    attrib?.classList.remove('maplibregl-compact-show')
 
-      // Add skybox as a separate 3d layer (renders after all 2d layers)
-      this.map!.addLayer(this.earthLayer.skyboxLayer as unknown as maplibregl.LayerSpecification)
-
-      // Apply any dataset texture/video that was buffered before the layer was ready
-      if (this.pendingTexture) {
-        const opts = this.pendingDatasetOptions ?? undefined
-        this.earthLayer.setDatasetTexture(this.pendingTexture, opts)
-        this.pendingTexture = null
-        this.pendingDatasetOptions = null
-        this.applyBaseLayerVisibility(opts)
-      } else if (this.pendingVideo) {
-        const opts = this.pendingDatasetOptions ?? undefined
-        this.earthLayer.setDatasetVideo(this.pendingVideo, opts)
-        this.pendingVideo = null
-        this.pendingDatasetOptions = null
-        this.applyBaseLayerVisibility(opts)
-      }
-
-      logger.info('[MapRenderer] Earth tile + capture + skybox layers added, labels moved above')
-
-      // Preload low-zoom tiles into browser/SW cache.
-      // Mobile: wait for 'idle' (initial viewport tiles rendered) to avoid bandwidth contention.
-      // Desktop: start immediately after layer setup.
+    // The earth tile layer (day/night sphere shader, atmospheric
+    // glow) and the skybox are 3D effects designed for globe
+    // projection — they paint a textured Earth sphere + a
+    // starfield over the basemap. In mercator they'd draw the
+    // sphere on top of the flat raster tiles and obliterate the
+    // basemap; the §6.9 catalog Map view explicitly wants the
+    // raw flat GIBS composite as its basemap. Skipping the
+    // custom layers entirely in mercator keeps the surface a
+    // clean Blue/Black Marble raster — which is what the Map
+    // view's bbox overlays need to read against.
+    if (this.projection === 'mercator') {
+      // Preload still runs so the GIBS HTTP cache warms for the
+      // main globe even when the Map view mounts first.
       if (isMobile()) {
         this.map!.once('idle', () => preloadLowZoomTiles())
       } else {
         preloadLowZoomTiles()
       }
-    })
+      return
+    }
+
+    this.earthLayer = createEarthTileLayer()
+
+    // Layer order: black-marble → [capture] → blue-marble → [earth-tile] → labels → [skybox]
+    // Insert capture layer between Black Marble and Blue Marble
+    this.map!.addLayer(
+      this.earthLayer.captureLayer as unknown as maplibregl.LayerSpecification,
+      'blue-marble-layer',
+    )
+    // Insert main earth effects layer after Blue Marble (at end of 2d layers)
+    this.map!.addLayer(this.earthLayer.layer as unknown as maplibregl.LayerSpecification)
+
+    // Move label/boundary layers above the earth tile layer
+    for (const id of this.allOverlayLayerIds) {
+      try { this.map!.moveLayer(id) } catch { /* layer may not exist */ }
+    }
+
+    // Add skybox as a separate 3d layer (renders after all 2d layers)
+    this.map!.addLayer(this.earthLayer.skyboxLayer as unknown as maplibregl.LayerSpecification)
+
+    // Re-apply the viewing transform before the buffered dataset, so
+    // the LUT is already correct on the layer's first build rather
+    // than being rebuilt a frame later — otherwise a globe restored
+    // with a non-default palette flashes the publisher's ramp first.
+    this.earthLayer.setColorScaleDisplay(this.colorScaleDisplay)
+
+    // Apply any dataset texture/video that was buffered before the
+    // layer was ready.
+    //
+    // The probe source is assigned here as well as on the direct
+    // path. It used to be set only on the direct path, so a dataset
+    // that finished loading *before* the layers were built — a fast
+    // local asset, a warm cache, a fixtured scene — reached the globe
+    // with no probe source at all. The value readout then reported
+    // nothing for that dataset and looked exactly like a dataset with
+    // nothing to report, for the rest of its life on screen.
+    if (this.pendingTexture) {
+      const opts = this.pendingDatasetOptions ?? undefined
+      this.earthLayer.setDatasetTexture(this.pendingTexture, opts)
+      this.probeSource = this.pendingTexture
+      this.probeOptions = opts ?? null
+      this.pendingTexture = null
+      this.pendingDatasetOptions = null
+      this.applyBaseLayerVisibility(opts)
+    } else if (this.pendingVideo) {
+      const opts = this.pendingDatasetOptions ?? undefined
+      this.earthLayer.setDatasetVideo(this.pendingVideo, opts)
+      this.probeSource = this.pendingVideo
+      this.probeOptions = opts ?? null
+      this.pendingVideo = null
+      this.pendingDatasetOptions = null
+      this.applyBaseLayerVisibility(opts)
+    }
+
+    logger.info('[MapRenderer] Earth tile + capture + skybox layers added, labels moved above')
+
+    // Preload low-zoom tiles into browser/SW cache.
+    // Mobile: wait for 'idle' (initial viewport tiles rendered) to avoid bandwidth contention.
+    // Desktop: start immediately after layer setup.
+    if (isMobile()) {
+      this.map!.once('idle', () => preloadLowZoomTiles())
+    } else {
+      preloadLowZoomTiles()
+    }
   }
 
   /** Return the underlying MapLibre map instance. */
@@ -904,17 +1025,396 @@ export class MapRenderer implements GlobeRenderer {
 
   // --- Lat/lng tracking ---
 
-  /** Register callbacks for cursor lat/lng display. */
+  /**
+   * Register callbacks for the cursor lat/lng display (and, for a
+   * data-encoded dataset, the value readout that hangs off it).
+   *
+   * Three fixes over the original, all of which the data-encoded
+   * readout made visible by giving the callback something more
+   * consequential to say than a coordinate:
+   *
+   *   - Previous handlers are removed first. This used to stack a
+   *     new pair on every call, so a second invocation drove the
+   *     display twice per pointer event.
+   *   - `touchmove` alongside `mousemove`, so a touch drag reports
+   *     too. These are the events MapLibre actually fires; it has no
+   *     `pointermove`/`pointerout`, and `Evented.on` accepts an
+   *     unknown name without complaint, so registering those bound a
+   *     handler that could never run. There is no touch equivalent of
+   *     `mouseout` in play deliberately: a finger has no hover state,
+   *     and clearing on lift would erase the reading at the moment it
+   *     became readable.
+   *   - Off-globe returns nothing. MapLibre's `e.lngLat` unprojects
+   *     even where the sphere isn't, so the corners of the viewport
+   *     used to report a coordinate for empty space.
+   */
   setLatLngCallbacks(
     onUpdate: (lat: number, lng: number) => void,
     onClear: () => void
   ): void {
-    this.map?.on('mousemove', (e) => {
+    const map = this.map
+    if (!map) return
+    this.clearLatLngCallbacks()
+
+    const move = (e: maplibregl.MapMouseEvent | maplibregl.MapTouchEvent) => {
+      if (!this.isPointerOnGlobe(e)) {
+        onClear()
+        return
+      }
       onUpdate(e.lngLat.lat, e.lngLat.lng)
+    }
+    const out = () => onClear()
+    map.on('mousemove', move)
+    map.on('touchmove', move)
+    map.on('mouseout', out)
+    this.latLngUnsubscribe = () => {
+      map.off('mousemove', move)
+      map.off('touchmove', move)
+      map.off('mouseout', out)
+    }
+  }
+
+  /**
+   * Apply a palette / stretch / threshold transform to a data-encoded
+   * dataset on this globe.
+   *
+   * A viewing decision, not a data one: the LUT the shader samples is
+   * rebuilt and nothing else moves. `probeValueAt` keeps reporting the
+   * same physical value under the same pixel, which is the invariant
+   * `colorScaleDisplay` exists to protect — see its docstring.
+   *
+   * Buffered when the earth layer has not been created yet, the same
+   * way `updateTexture` buffers, so a display chosen before the first
+   * dataset finishes loading is not silently dropped.
+   */
+  setColorScaleDisplay(display: ColorScaleDisplay): void {
+    this.colorScaleDisplay = display
+    this.earthLayer?.setColorScaleDisplay(display)
+  }
+
+  /** The transform currently applied to this globe. */
+  getColorScaleDisplay(): ColorScaleDisplay {
+    return this.colorScaleDisplay
+  }
+
+  /**
+   * Everything the statistics reducers need for the currently displayed
+   * frame, or `null` when there is nothing to compute over.
+   *
+   * All-or-nothing on purpose: a snapshot without its scale is a grid of
+   * meaningless bytes, and a scale without the bbox would put every
+   * texel at the wrong latitude. Handing back one object means a caller
+   * cannot pair a frame with the previous dataset's metadata.
+   *
+   * **Not for pointer handlers.** This reads the whole frame — see
+   * `GlLumaSampler.snapshot`. Call it from an explicit user action.
+   */
+  analysisFrame(): {
+    snapshot: LumaSnapshot
+    scale: ColorScale
+    options: DatasetOverlayOptions
+  } | null {
+    const options = this.probeOptions
+    if (!this.probeSource || !options?.colorScale) return null
+    const sampler = getSharedLumaSampler()
+    if (!sampler) return null
+    const snapshot = sampler.snapshot(this.probeSource)
+    if (!snapshot) return null
+    return { snapshot, scale: options.colorScale, options }
+  }
+
+  /**
+   * Identity of the frame currently on the globe.
+   *
+   * The *same* expression `glLumaSampler` keys its snapshot cache on, so
+   * "this string changed" and "the sampler would read a different frame"
+   * are the same statement by construction rather than by coincidence.
+   *
+   * Deliberately not the `#time-label` text: that is snapped to the
+   * dataset's display interval, so several video frames can share one
+   * label, and it is hidden entirely for a dataset without start/end
+   * times — a watch built on it goes silently inert exactly when it is
+   * most needed. Costs a property read; no readback, no upload.
+   */
+  currentFrameId(): string | null {
+    const source = this.probeSource
+    if (!source) return null
+    return source instanceof HTMLVideoElement ? `${source.currentTime}` : 'static'
+  }
+
+  // --- Analysed-region outline (Analyze §A3) ---
+
+  private regionOutlineId: string | null = null
+
+  /**
+   * Outline the box the Analyze panel is measuring.
+   *
+   * Outline only, with no fill. A wash over the region would tint the
+   * very values being measured, and the whole discipline of the
+   * data-encoded path is that nothing decorative changes what a colour
+   * means. The box says *where*; the globe still says *what*.
+   */
+  showRegionOutline(bounds: { n: number; s: number; w: number; e: number }): void {
+    this.clearRegionOutline()
+    if (!this.map) return
+    const ring = boundsRing(bounds).map((p): [number, number] => [p.lon, p.lat])
+    this.regionOutlineId = this.highlightRegion(
+      {
+        type: 'Feature',
+        properties: {},
+        geometry: { type: 'Polygon', coordinates: [ring] },
+      } as GeoJSON.Feature,
+      { color: '#4da6ff', opacity: 0 },
+    )
+  }
+
+  clearRegionOutline(): void {
+    if (!this.regionOutlineId) return
+    this.removeHighlight(this.regionOutlineId)
+    this.regionOutlineId = null
+  }
+
+  // --- Isolines (Analyze §A5) ---
+
+  private contourId: string | null = null
+
+  /**
+   * Draw the contour set the Analyze panel extracted.
+   *
+   * Its own source and layer rather than `highlightRegion`, for two
+   * reasons. `highlightRegion` paints one fixed colour, and a contour map
+   * needs each line drawn at its own level's colour — which is a
+   * data-driven `['get', 'color']` over one FeatureCollection, not a
+   * source per level. And it always adds a `fill` layer, which over a
+   * MultiLineString draws nothing and is pure weight.
+   *
+   * Line only, no fill, for the same reason `showRegionOutline` refuses
+   * one: a wash over the enclosed region would tint the values being
+   * measured, and on this path nothing decorative is allowed to change
+   * what a colour means. A dark halo underneath keeps a pale line legible
+   * over a pale part of the ramp — without it the lightest levels vanish
+   * into exactly the region they are describing.
+   *
+   * The geometry arrives already split at the antimeridian; see
+   * `datasetContours.splitAtSeam` for why drawing it unsplit puts a
+   * stripe across the globe.
+   */
+  showContours(levels: ContourLevel[]): void {
+    this.clearContours()
+    if (!this.map || !this.map.isStyleLoaded() || !levels.length) return
+    const data = contourSetToGeoJson(levels)
+    if (!data.features.length) return
+
+    const id = `contours-${++this.highlightCounter}`
+    const sourceId = `${id}-source`
+    this.map.addSource(sourceId, { type: 'geojson', data })
+    this.map.addLayer({
+      id: `${id}-halo`,
+      type: 'line',
+      source: sourceId,
+      paint: {
+        'line-color': 'rgba(0, 0, 0, 0.55)',
+        'line-width': 3.5,
+      },
     })
-    this.map?.on('mouseout', () => {
-      onClear()
+    this.map.addLayer({
+      id: `${id}-line`,
+      type: 'line',
+      source: sourceId,
+      paint: {
+        'line-color': ['get', 'color'],
+        'line-width': 1.5,
+      },
     })
+    this.contourId = id
+  }
+
+  clearContours(): void {
+    if (!this.contourId || !this.map) {
+      this.contourId = null
+      return
+    }
+    const id = this.contourId
+    try { this.map.removeLayer(`${id}-line`) } catch { /* noop */ }
+    try { this.map.removeLayer(`${id}-halo`) } catch { /* noop */ }
+    try { this.map.removeSource(`${id}-source`) } catch { /* noop */ }
+    this.contourId = null
+  }
+
+  // --- Transect picking (Analyze §A4) ---
+
+  /** Vertices in the drawn line. Enough that the curve reads as smooth
+   *  at any zoom without putting a meaningful number of points into a
+   *  source that is redrawn on every drag frame. */
+  private static readonly TRANSECT_LINE_VERTICES = 64
+
+  private transectPoints: { lat: number; lon: number }[] = []
+  private transectMarkers: maplibregl.Marker[] = []
+  private transectLineId: string | null = null
+  private transectUnsubscribe: (() => void) | null = null
+  private transectOnChange: ((ends: TransectEndpoints | null) => void) | null = null
+
+  /**
+   * Arm two-point picking on the globe.
+   *
+   * `onChange` fires with the pair once the second point lands, again on
+   * every drag of either endpoint, and with `null` when the transect is
+   * cleared. Re-arming replaces any transect already on screen — one
+   * line at a time, because two would need a legend to tell apart and
+   * the panel only charts one.
+   *
+   * Dragging recomputes from a snapshot the caller already holds, so a
+   * live drag costs a pure re-sample and no readback. That is why this
+   * fires on `drag` rather than `dragend`.
+   */
+  beginTransect(onChange: (ends: TransectEndpoints | null) => void): void {
+    if (!this.map) return
+    this.clearTransect()
+    this.transectOnChange = onChange
+    const map = this.map
+    const onClick = (e: maplibregl.MapMouseEvent): void => {
+      this.transectPoints.push({ lat: e.lngLat.lat, lon: e.lngLat.lng })
+      if (this.transectPoints.length === 1) {
+        this.addTransectMarker(0)
+        return
+      }
+      this.disarmTransectPicking()
+      this.addTransectMarker(1)
+      this.redrawTransectLine()
+      this.emitTransect()
+    }
+    map.on('click', onClick)
+    this.transectUnsubscribe = () => map.off('click', onClick)
+  }
+
+  /** How many points of the pair have been placed. Drives the panel's
+   *  "click two points" instruction. */
+  transectProgress(): number {
+    return this.transectPoints.length
+  }
+
+  /** Remove the line, its endpoints, and any pending pick. */
+  clearTransect(): void {
+    this.disarmTransectPicking()
+    for (const m of this.transectMarkers) m.remove()
+    this.transectMarkers = []
+    this.transectPoints = []
+    if (this.transectLineId) {
+      this.removeHighlight(this.transectLineId)
+      this.transectLineId = null
+    }
+    const notify = this.transectOnChange
+    this.transectOnChange = null
+    notify?.(null)
+  }
+
+  private disarmTransectPicking(): void {
+    this.transectUnsubscribe?.()
+    this.transectUnsubscribe = null
+  }
+
+  private addTransectMarker(index: number): void {
+    if (!this.map) return
+    const p = this.transectPoints[index]
+    const marker = new maplibregl.Marker({ color: '#ffd166', draggable: true })
+      .setLngLat([p.lon, p.lat])
+      .addTo(this.map)
+    marker.on('drag', () => {
+      const at = marker.getLngLat()
+      this.transectPoints[index] = { lat: at.lat, lon: at.lng }
+      this.redrawTransectLine()
+      this.emitTransect()
+    })
+    this.transectMarkers[index] = marker
+  }
+
+  private emitTransect(): void {
+    if (this.transectPoints.length < 2) return
+    this.transectOnChange?.({ from: this.transectPoints[0], to: this.transectPoints[1] })
+  }
+
+  /**
+   * Draw the line the samples are taken along.
+   *
+   * Densified rather than drawn as a two-point LineString: MapLibre
+   * renders a segment as a straight line in projected space, which on a
+   * globe is not the great circle the samples follow. A viewer
+   * comparing the chart against the line has to be looking at the same
+   * path, so the geometry is subdivided along the same spherical
+   * interpolation `sampleTransect` uses.
+   */
+  private redrawTransectLine(): void {
+    if (!this.map || this.transectPoints.length < 2) return
+    if (this.transectLineId) {
+      this.removeHighlight(this.transectLineId)
+      this.transectLineId = null
+    }
+    const [from, to] = this.transectPoints
+    const coords = greatCirclePath(from, to, MapRenderer.TRANSECT_LINE_VERTICES)
+      .map((p): [number, number] => [p.lon, p.lat])
+    this.transectLineId = this.highlightRegion(
+      {
+        type: 'Feature',
+        properties: {},
+        geometry: { type: 'LineString', coordinates: coords },
+      } as GeoJSON.Feature,
+      { color: '#ffd166' },
+    )
+  }
+
+  /** The geographic box currently in view, for "analyse what I can
+   *  see". Null when the map is not up yet. */
+  visibleBounds(): { n: number; s: number; w: number; e: number } | null {
+    if (!this.map) return null
+    const b = this.map.getBounds()
+    return { n: b.getNorth(), s: b.getSouth(), w: b.getWest(), e: b.getEast() }
+  }
+
+  /**
+   * Read the dataset value under a geographic point, or `null` when
+   * there is nothing meaningful to report — a picture dataset, a
+   * point outside a regional dataset's box, or no decoded frame yet.
+   *
+   * Deliberately independent of `setColorScaleDisplay`: recolouring the
+   * globe must never move this number.
+   */
+  probeValueAt(lat: number, lon: number): ProbeReading | null {
+    if (!this.probeSource || !this.probeOptions?.colorScale) return null
+    // Shared across every renderer on the page: one WebGL2 context
+    // total rather than one per panel. `null` means no WebGL2, in
+    // which case there is no globe either, so no readout is right.
+    const sampler = getSharedLumaSampler()
+    if (!sampler) return null
+    return probeDatasetValue(
+      lat, lon, this.probeSource, (s, uv) => sampler.sample(s, uv), this.probeOptions)
+  }
+
+  /** Detach the lat/lng handlers registered by `setLatLngCallbacks`. */
+  clearLatLngCallbacks(): void {
+    this.latLngUnsubscribe?.()
+    this.latLngUnsubscribe = null
+  }
+
+  /**
+   * Whether the pointer is actually over the globe.
+   *
+   * On a globe projection MapLibre still unprojects points in the
+   * empty space around the sphere, so `e.lngLat` alone is not a test.
+   * Re-projecting the returned coordinate and comparing against the
+   * original screen point is: for a point off the sphere the round
+   * trip does not come back where it started.
+   */
+  private isPointerOnGlobe(e: maplibregl.MapMouseEvent | maplibregl.MapTouchEvent): boolean {
+    const map = this.map
+    if (!map) return false
+    try {
+      const back = map.project(e.lngLat)
+      const dx = back.x - e.point.x
+      const dy = back.y - e.point.y
+      return dx * dx + dy * dy < ON_GLOBE_TOLERANCE_PX * ON_GLOBE_TOLERANCE_PX
+    } catch {
+      return false
+    }
   }
 
   // --- Custom layers (for Phase 1+) ---
@@ -974,6 +1474,8 @@ export class MapRenderer implements GlobeRenderer {
       return
     }
     this.earthLayer.setDatasetTexture(texture, options)
+    this.probeSource = texture
+    this.probeOptions = options ?? null
     this.applyBaseLayerVisibility(options)
     logger.info('[MapRenderer] Dataset overlay set via custom layer sphere')
   }
@@ -986,6 +1488,8 @@ export class MapRenderer implements GlobeRenderer {
   setVideoTexture(video: HTMLVideoElement, options?: DatasetOverlayOptions): VideoTextureHandle {
     if (this.earthLayer) {
       this.earthLayer.setDatasetVideo(video, options)
+      this.probeSource = video
+      this.probeOptions = options ?? null
       this.applyBaseLayerVisibility(options)
       logger.info('[MapRenderer] Video dataset set via custom layer sphere')
     } else {
@@ -1004,6 +1508,18 @@ export class MapRenderer implements GlobeRenderer {
       },
       dispose() {},
     }
+  }
+
+  /**
+   * Playhead of the frame currently in this panel's dataset texture, or
+   * `null` when none has been uploaded.
+   *
+   * What the globe is *showing*, as opposed to what its video element
+   * reports. The two diverge whenever an upload is skipped, which is
+   * precisely the case a sibling-alignment check has to catch.
+   */
+  getUploadedFrameTime(): number | null {
+    return this.earthLayer?.getUploadedFrameTime() ?? null
   }
 
   // --- Earth materials ---
@@ -1047,6 +1563,8 @@ export class MapRenderer implements GlobeRenderer {
   /** Update sun direction and re-show the earth tile layer + atmosphere. */
   enableSunLighting(lat: number, lng: number): void {
     this.earthLayer?.clearDatasetTexture()
+    this.probeSource = null
+    this.probeOptions = null
     this.earthLayer?.setVisible(true)
     this.earthLayer?.setSunPosition(lat, lng)
     // Restore tile bases (may have been hidden for dataset overlay)
@@ -1199,6 +1717,25 @@ export class MapRenderer implements GlobeRenderer {
    */
   dispose(): void {
     this.stopAutoRotate()
+    // A panel can be torn down (a 4→1 layout change) before the style
+    // ever settles, and a pending deadline would then build layers on a
+    // removed map.
+    if (this.styleDeadline) {
+      clearTimeout(this.styleDeadline)
+      this.styleDeadline = null
+    }
+    // Before map.remove(): the unsubscribe closures capture `map`, so
+    // dropping the reference first would strand the handlers.
+    this.clearLatLngCallbacks()
+    this.clearTransect()
+    this.clearRegionOutline()
+    this.clearContours()
+    // The probe sampler is page-shared and deliberately NOT disposed
+    // here — other panels may still be using it, and tearing down its
+    // context would take their readouts with it. Dropping the source
+    // is enough: probeValueAt returns early without it.
+    this.probeSource = null
+    this.probeOptions = null
     if (this.map) {
       this.map.remove()
       this.map = null

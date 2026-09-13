@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * GET /api/v1/datasets/{id}/preview/{token}
  *
@@ -38,10 +41,11 @@ import {
   type DatasetRow,
   getDecorations,
   getNodeIdentity,
+  IDENTITY_MISSING_MESSAGE,
 } from '../../../_lib/catalog-store'
 import { serializeDataset } from '../../../_lib/dataset-serializer'
 import { makeDataRefResolver } from '../../../_lib/data-ref-resolver'
-import { buildFramesUrlTemplate, resolveAssetRefStrict } from '../../../_lib/r2-public-url'
+import { buildFramesRedirectTemplate, resolveAssetRefStrict } from '../../../_lib/r2-public-url'
 
 const CONTENT_TYPE = 'application/json; charset=utf-8'
 // Errors are explicitly non-cacheable: RFC 9111 lets intermediaries
@@ -112,7 +116,7 @@ export const onRequestGet: PagesFunction<CatalogEnv, Params> = async context => 
     return jsonError(
       503,
       'identity_missing',
-      'Node identity has not been provisioned. Run `npm run gen:node-key`.',
+      IDENTITY_MISSING_MESSAGE,
     )
   }
   if (!row) return jsonError(404, 'not_found', `Dataset ${id} not found.`)
@@ -121,8 +125,8 @@ export const onRequestGet: PagesFunction<CatalogEnv, Params> = async context => 
   const resolveDataRef = makeDataRefResolver(context.env)
   const assetResolver = (ref: string | null | undefined) =>
     resolveAssetRefStrict(context.env, ref)
-  const framesResolver = (ref: string, ext: string) =>
-    buildFramesUrlTemplate(context.env, ref, ext)
+  const framesResolver = (datasetId: string, baseUrl: string) =>
+    buildFramesRedirectTemplate(context.env, baseUrl, datasetId)
   const dataset = serializeDataset(
     row,
     decorations.get(id)!,

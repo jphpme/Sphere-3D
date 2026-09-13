@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * ViewportManager — orchestrates one or more synchronised MapRenderer
  * instances inside a CSS grid container.
@@ -32,8 +35,11 @@
  */
 
 import { MapRenderer, setActiveMapRenderer } from './mapRenderer'
+import type { ColorScaleDisplay } from './colorScaleDisplay'
 import { logger } from '../utils/logger'
 import { emit } from '../analytics'
+import { t } from '../i18n'
+import { maxVideoPanels } from '../utils/deviceCapability'
 
 /** Map the internal ViewLayout string into the bucket the analytics
  * schema understands ('1globe' / '2globes' / '4globes'). */
@@ -52,6 +58,32 @@ const PANEL_COUNT: Record<ViewLayout, number> = {
   '2h': 2,
   '2v': 2,
   '4': 4,
+}
+
+/**
+ * Reduce a requested layout to one the device can actually hold.
+ *
+ * A phone cannot keep more than {@link MAX_VIDEO_PANELS_PHONE} video
+ * decoders alive; the third one crashes the tab while it is still
+ * loading (terraviz#230). Nothing downstream can recover from that, and
+ * a tour asks for four panels without knowing what device it is on, so
+ * the request is reduced here rather than honoured and then survived.
+ *
+ * Orientation picks the two-panel variant, because it decides whether
+ * the result is usable: stacked on a portrait phone gives each globe
+ * the full width, where side-by-side would give it under 200px.
+ *
+ * Pure and exported for tests. `maxPanels` is the caller's cap so the
+ * policy stays in `deviceCapability`.
+ */
+export function clampLayoutToPanelBudget(
+  layout: ViewLayout,
+  maxPanels: number,
+  portrait: boolean,
+): ViewLayout {
+  if (PANEL_COUNT[layout] <= maxPanels) return layout
+  if (maxPanels <= 1) return '1'
+  return portrait ? '2v' : '2h'
 }
 
 /**
@@ -101,6 +133,17 @@ interface Viewport {
   /** Floating per-panel legend element — lazily created the first
    *  time the panel needs one, and toggled via classList thereafter. */
   legend: HTMLButtonElement | null
+  /** Floating "this panel is not on the labelled date" notice —
+   *  lazily created the first time a panel needs one. */
+  timeNotice: HTMLDivElement | null
+  /** Date this panel is actually showing, when it contradicts the label. */
+  noticeDate: string | null
+  /** True once this panel's stream has failed terminally. */
+  streamFailed: boolean
+  /** Floating per-panel colorbar for data-encoded datasets. Replaced
+   *  wholesale rather than mutated, because a display change alters the
+   *  gradient, the ticks and the accessible name together. */
+  colorbar: HTMLElement | null
   onMove: () => void
 }
 
@@ -124,6 +167,14 @@ export class ViewportManager {
   ): void {
     this.grid = grid
     this.callbacks = callbacks
+    // Boot into what the device can hold. A deep link can name a layout
+    // (`?layout=4`) as directly as a tour can, and `setLayout`'s clamp
+    // is downstream of here.
+    initialLayout = clampLayoutToPanelBudget(
+      initialLayout,
+      maxVideoPanels(),
+      typeof window !== 'undefined' && window.innerHeight >= window.innerWidth,
+    )
     this.applyGridTemplate(initialLayout)
     this.layout = initialLayout
 
@@ -151,6 +202,20 @@ export class ViewportManager {
       logger.warn('[ViewportManager] setLayout called before init')
       return
     }
+    // What the device can hold, not what was asked for. A tour asks for
+    // four panels without knowing what it is running on, and on a phone
+    // the third video decoder crashes the tab mid-load — see
+    // `clampLayoutToPanelBudget`.
+    const requested = layout
+    layout = clampLayoutToPanelBudget(
+      layout,
+      maxVideoPanels(),
+      typeof window !== 'undefined' && window.innerHeight >= window.innerWidth,
+    )
+    if (layout !== requested) {
+      logger.info(`[ViewportManager] Layout ${requested} reduced to ${layout} for this device`)
+    }
+
     if (layout === this.layout) return
 
     const targetCount = PANEL_COUNT[layout]
@@ -207,6 +272,18 @@ export class ViewportManager {
   /** Get all current renderers in panel order. */
   getAll(): MapRenderer[] {
     return this.viewports.map(v => v.renderer)
+  }
+
+  /**
+   * Apply a data-encoded viewing transform to every panel.
+   *
+   * Fanned out rather than applied to the primary alone: in a 2- or
+   * 4-globe layout the panels are meant to be compared, and comparing
+   * two fields through two different palettes is worse than useless.
+   * Panels showing picture datasets ignore it.
+   */
+  setColorScaleDisplay(display: ColorScaleDisplay): void {
+    for (const vp of this.viewports) vp.renderer.setColorScaleDisplay(display)
   }
 
   /** Current layout. */
@@ -268,6 +345,80 @@ export class ViewportManager {
   }
 
   /**
+   * Mount, update, or clear the "not on the labelled date" notice.
+   *
+   * The multi-globe layout shows one time label for every panel, derived
+   * from the primary. When a sibling is verifiably somewhere else, this
+   * is how the panel stops the label from speaking for it — it names the
+   * date the panel is actually on rather than just marking it wrong.
+   *
+   * Mutually exclusive with the out-of-range treatment by construction:
+   * a panel whose range does not cover the labelled date is reported as
+   * `uncovered` and never reaches here, so the two never stack.
+   *
+   * Takes the already-formatted date the panel is actually showing —
+   * the caller owns date formatting, this owns the sentence around it.
+   * `null` hides the notice.
+   */
+  setPanelTimeNotice(slot: number, shownDate: string | null): void {
+    const vp = this.viewports[slot]
+    if (!vp) return
+    vp.noticeDate = shownDate
+    this.renderPanelNotice(slot)
+  }
+
+  /**
+   * Mark a panel whose stream has failed terminally.
+   *
+   * Distinct from the time notice because the cause is knowable and
+   * permanent: the panel is not merely behind the label, it has stopped
+   * and will not catch up on its own.
+   */
+  setPanelStreamNotice(slot: number, failed: boolean): void {
+    const vp = this.viewports[slot]
+    if (!vp) return
+    vp.streamFailed = failed
+    this.renderPanelNotice(slot)
+  }
+
+  /**
+   * Paint whichever notice this panel has earned.
+   *
+   * A failed stream outranks a time mismatch. Both describe the same
+   * observable — this panel is not showing the moment the shared label
+   * claims — but the failure says *why*, and unlike a mismatch it will
+   * not resolve on the next frame. Showing the weaker one on top of it
+   * would replace an explanation with a symptom.
+   */
+  private renderPanelNotice(slot: number): void {
+    const vp = this.viewports[slot]
+    if (!vp) return
+
+    const text = vp.streamFailed
+      ? t('viewport.panel.streamFailed')
+      : vp.noticeDate
+        ? t('viewport.panel.timeMismatch', { date: vp.noticeDate })
+        : null
+
+    if (!text) {
+      if (vp.timeNotice) vp.timeNotice.classList.add('hidden')
+      return
+    }
+
+    if (!vp.timeNotice) {
+      const el = document.createElement('div')
+      el.className = 'panel-time-notice'
+      // Assertive would interrupt; this is a correction to something
+      // already on screen, not an alert.
+      el.setAttribute('role', 'status')
+      vp.container.appendChild(el)
+      vp.timeNotice = el
+    }
+    if (vp.timeNotice.textContent !== text) vp.timeNotice.textContent = text
+    vp.timeNotice.classList.remove('hidden')
+  }
+
+  /**
    * Mount, update, or clear the floating legend inside a panel.
    *
    * - `legendLink` non-null → render an <img> button showing the
@@ -324,6 +475,29 @@ export class ViewportManager {
     // stable click listener above can dispatch to the latest one.
     ;(vp.legend as HTMLButtonElement & { _onClick?: () => void })._onClick = options.onClick
     vp.legend.classList.remove('hidden')
+  }
+
+  /**
+   * Mount (or clear) a rendered colorbar on a panel.
+   *
+   * A sibling of `setPanelLegend` rather than a mode inside it. The
+   * legend path takes a URL and owns an `<img>`; a colorbar is built
+   * from the row's `ColorScale` and rebuilt whenever the display
+   * transform changes, so folding the two together would mean one
+   * method with two disjoint halves. Callers show at most one — see
+   * `refreshPanelLegends` in `main.ts`, which prefers the colorbar
+   * whenever the dataset carries a scale, because for a data-encoded
+   * row the uploaded legend image describes at best the same thing and
+   * at worst an older encode.
+   */
+  setPanelColorbar(slot: number, element: HTMLElement | null): void {
+    const vp = this.viewports[slot]
+    if (!vp) return
+    vp.colorbar?.remove()
+    vp.colorbar = null
+    if (!element) return
+    vp.container.appendChild(element)
+    vp.colorbar = element
   }
 
   /**
@@ -449,7 +623,7 @@ export class ViewportManager {
     const onMove = () => this.syncCameras(index)
     renderer.getMap()?.on('move', onMove)
 
-    this.viewports.push({ index, container, renderer, indicator, legend: null, onMove })
+    this.viewports.push({ index, container, renderer, indicator, legend: null, colorbar: null, timeNotice: null, noticeDate: null, streamFailed: false, onMove })
   }
 
   private destroyViewport(vp: Viewport): void {

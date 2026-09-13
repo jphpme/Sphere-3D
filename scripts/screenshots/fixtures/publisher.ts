@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * Publisher / admin portal API fixtures.
  *
@@ -14,7 +17,11 @@
 import type { FixtureRule } from '../core/fixtures'
 // Type-only imports — erased at runtime, so this pulls no SPA runtime
 // code (i18n, logger) into the node capture scripts.
-import type { PublisherWorkflow } from '../../../src/ui/publisher/workflows-api'
+import type {
+  PublisherWorkflow,
+  PublisherWorkflowRun,
+} from '../../../src/ui/publisher/workflows-api'
+import type { TourListItem } from '../../../src/ui/tourAuthoring/api'
 import type {
   DatasetDetailResponse,
   ListDatasetsResponse,
@@ -180,6 +187,90 @@ const workflows: { workflows: PublisherWorkflow[] } = {
 
 const workflowsEmpty: { workflows: PublisherWorkflow[] } = { workflows: [] }
 
+/**
+ * The per-workflow last-run probe.
+ *
+ * The workflows list page fires one of these per row to badge its last
+ * run. Without a rule of its own the request falls through to the
+ * `/publish/workflows` list rule — the URL contains it as a substring —
+ * and the page is handed `{ workflows: [...] }`, where `data.runs` is
+ * `undefined`. That threw `res.data.runs is not iterable` on every
+ * capture. Same ordering trap as the dataset detail/list pair below.
+ */
+const workflowRuns: { runs: PublisherWorkflowRun[] } = {
+  runs: [
+    {
+      id: '01HEXAMPLERUN00000000001',
+      workflow_id: '01HEXAMPLEWORKFLOW0000001',
+      status: 'succeeded',
+      trigger: 'schedule',
+      created_at: '2026-04-20T06:00:00.000Z',
+      started_at: '2026-04-20T06:00:05.000Z',
+      finished_at: '2026-04-20T06:05:00.000Z',
+      gha_run_id: '9900112233',
+      upload_id: null,
+      error_summary: null,
+    },
+    {
+      id: '01HEXAMPLERUN00000000002',
+      workflow_id: '01HEXAMPLEWORKFLOW0000001',
+      status: 'failed',
+      trigger: 'manual',
+      created_at: '2026-04-19T06:00:00.000Z',
+      started_at: '2026-04-19T06:00:04.000Z',
+      finished_at: '2026-04-19T06:02:11.000Z',
+      gha_run_id: '9900112200',
+      upload_id: null,
+      error_summary: 'Upstream fetch returned 503',
+    },
+  ],
+}
+
+/** `/publish/tours` — the tour-creator landing list. */
+const tours: { tours: TourListItem[]; next_cursor: string | null } = {
+  next_cursor: null,
+  tours: [
+    {
+      id: '01HEXAMPLETOUR0000000001',
+      slug: 'hurricane-season-2026',
+      title: 'Hurricane season 2026',
+      tour_json_ref: 'tours/01HEXAMPLETOUR0000000001.json',
+      updated_at: '2026-04-18T15:20:00.000Z',
+      description: 'A guided pass through the season\u2019s named storms.',
+      thumbnail_ref: null,
+      visibility: 'published',
+      published_at: '2026-04-18T16:00:00.000Z',
+      retracted_at: null,
+      publisher_id: 'PUB_DEMO',
+    },
+    {
+      id: '01HEXAMPLETOUR0000000002',
+      slug: 'sea-ice-decline',
+      title: 'Sea-ice decline, 1979 to today',
+      tour_json_ref: 'tours/01HEXAMPLETOUR0000000002.json',
+      updated_at: '2026-04-11T09:05:00.000Z',
+      description: null,
+      thumbnail_ref: null,
+      visibility: 'draft',
+      published_at: null,
+      retracted_at: null,
+      publisher_id: 'PUB_DEMO',
+    },
+  ],
+}
+
+/** The **public** hero read (`/api/v1/featured-hero`), which the page
+ *  loads to show the current pin. Distinct from the authed write
+ *  endpoint at `/api/v1/publish/featured-hero`, which a capture never
+ *  hits — and not a substring of it either, so ordering is free. */
+const featuredHero = {
+  hero: {
+    datasetId: '01HEXAMPLEDATASET00000001',
+    window: { start: '2026-04-20T00:00:00.000Z', end: '2026-04-27T00:00:00.000Z' },
+    headline: 'Sea-surface temperature, this week',
+  },
+}
+
 const publisher = (over: Partial<PublisherSummary> = {}): PublisherSummary => ({
   id: 'PUB_DEMO',
   email: 'demo@example.org',
@@ -214,6 +305,210 @@ const publishers: ListPublishersResponse = {
 
 const publishersEmpty: ListPublishersResponse = { publishers: [], next_cursor: null }
 
+/** The `/api/v1/publish/events` review-queue shape (mirrors the
+ *  page-local ReviewEvent in `pages/events.ts`). */
+const events = {
+  events: [
+    {
+      id: '01HEXAMPLEEVENT000000001',
+      title: 'Hurricane Lena makes landfall on the Gulf Coast',
+      summary: 'A category 4 hurricane reached the coast overnight, with sustained winds near 140 mph.',
+      source: { name: 'NOAA / National Hurricane Center', url: 'https://www.nhc.noaa.gov/', publishedAt: '2026-06-25T02:00:00.000Z' },
+      occurredStart: '2026-06-25T00:00:00.000Z',
+      occurredEnd: '2026-06-26T00:00:00.000Z',
+      status: 'proposed',
+      geometry: { point: { lat: 29.3, lon: -90.0 } },
+      categories: { 'Severe Storms': ['Hurricane'] },
+      links: [
+        // A graded spread so the Match Badge shows all four tones
+        // (green ≥85, amber 60–84, red <60, neutral "—" for null geo).
+        { datasetId: '01HEXAMPLEDATASET00000001', datasetTitle: 'Global Sea Surface Temperature', score: 0.98, signals: { lexical: 1, temporal: 1, geo: 0.83 }, status: 'proposed' },
+        { datasetId: '01HEXAMPLEDATASET00000003', datasetTitle: 'Global Precipitation (IMERG)', score: 0.71, signals: { lexical: 0.9, temporal: 1, geo: 0.4 }, status: 'proposed' },
+        { datasetId: '01HEXAMPLEDATASET00000005', datasetTitle: 'Climate Model — Air Temperature: SSP2', score: 0.61, signals: { lexical: 0.64, temporal: 1, geo: null }, status: 'proposed' },
+      ],
+    },
+    {
+      id: '01HEXAMPLEEVENT000000002',
+      title: 'Record wildfire smoke blankets the Pacific Northwest',
+      summary: 'Dense smoke pushed air-quality indices into hazardous ranges across the region.',
+      source: { name: 'USGS', url: 'https://www.usgs.gov/', publishedAt: '2026-06-24T18:00:00.000Z' },
+      occurredStart: '2026-06-24T12:00:00.000Z',
+      // Slice C: this plain-news item arrived without date/location; the
+      // ingest AI filled both — the detail pane badges them.
+      geometry: { boundingBox: { n: 52, s: 40, w: -130, e: -110 }, regionName: 'Pacific Northwest' },
+      inferredFields: ['occurredStart', 'geometry'],
+      status: 'proposed',
+      links: [
+        { datasetId: '01HEXAMPLEDATASET00000004', datasetTitle: 'Global Vegetation Index (NDVI)', score: 0.64, signals: { geo: null, temporal: 0.64 }, status: 'proposed' },
+      ],
+    },
+  ],
+}
+
+const eventsEmpty = { events: [] }
+
+/** The `/api/v1/publish/blog` authoring list — one draft + one
+ *  published post so both status badges render. */
+const blogAuthoring = {
+  posts: [
+    {
+      id: '01HXBLOGDRAFT0000000000000',
+      slug: 'gulf-warming-draft',
+      title: 'Watching the Gulf warm (draft)',
+      summary: 'Three decades of SST in one loop.',
+      bodyMd: '## The data',
+      datasetIds: ['01HXDS0000000000000000000A'],
+      eventId: null,
+      status: 'draft',
+      updatedAt: '2026-07-02T00:00:00.000Z',
+      publishedAt: null,
+    },
+    {
+      id: '01HXBLOGPUB00000000000000B',
+      slug: 'city-lights-spread',
+      title: 'How city lights map human growth',
+      summary: 'Night-lights data as a census.',
+      bodyMd: '## Lights',
+      datasetIds: [],
+      eventId: null,
+      status: 'published',
+      updatedAt: '2026-07-01T00:00:00.000Z',
+      publishedAt: '2026-07-01T00:00:00.000Z',
+    },
+  ],
+}
+
+/** The NHC media proxy — quiet season, no cone cards in captures. */
+const NHC_STORMS_RULE: FixtureRule = {
+  url: '/api/v1/publish/media/nhc-storms',
+  json: { activeStorms: [] },
+}
+
+/** The agency-YouTube search proxy — no key in captures, no video cards. */
+const YOUTUBE_SEARCH_RULE: FixtureRule = {
+  url: '/api/v1/publish/media/youtube-search',
+  json: { videos: [] },
+}
+
+/** The YouTube channel allowlist — built-in defaults + one custom
+ *  channel so the Feeds console's channels card renders populated. */
+const YOUTUBE_CHANNELS_RULE: FixtureRule = {
+  url: '/api/v1/publish/media/youtube-channels',
+  json: {
+    channels: [
+      { channelId: 'UCLA_DiR1FfKNvjuUpBHmylQ', channelName: 'NASA', builtin: true, disabled: false },
+      // One built-in switched off so the card renders both the Disable
+      // and Enable (dimmed-row) states.
+      { channelId: 'UCeXH8GZyV3sVqAr45AvupOA', channelName: 'USGS', builtin: true, disabled: true },
+      { channelId: 'UCcustom0000000000000000', channelName: 'Coastal Science Center', builtin: false, disabled: false },
+    ],
+  },
+}
+
+/** Public blog fixtures — the `/blog` list + one full `/blog/:slug`
+ *  post, used by the public-surface scenes/smoke. */
+export function blogPublicFixtures(): FixtureRule[] {
+  const post = {
+    post: {
+      slug: 'city-lights-spread',
+      title: 'How city lights map human growth',
+      summary: 'Night-lights data as a census.',
+      bodyMd: '## Lights as a census\n\nWe looked at the loop and the spread of light tells the story.\n\n- Cities brighten\n- Coastlines fill in',
+      publishedAt: '2026-07-01T00:00:00.000Z',
+      datasets: [{ id: '01HXDS0000000000000000000A', title: 'Earth at Night' }],
+      event: { id: 'EVT1', title: 'Global urbanization report released', sourceName: 'UN Habitat', sourceUrl: 'https://example.org/report' },
+      // A playable companion tour → the scene shows the Play button.
+      tour: { id: 'TR000AAAAAAAAAAAAAAAAAAAAA' },
+    },
+  }
+  const list = {
+    posts: [
+      { slug: 'city-lights-spread', title: 'How city lights map human growth', summary: 'Night-lights data as a census.', publishedAt: '2026-07-01T00:00:00.000Z', datasetCount: 1 },
+    ],
+  }
+  return [
+    { url: '/api/v1/blog/', json: post },
+    { url: '/api/v1/blog', json: list },
+    // The header identity read (org name + logo). No logo in the
+    // fixture — external image bytes would flake the capture.
+    { url: '/api/v1/node-profile', json: { profile: { orgName: 'Coastal Science Center', logoUrl: null } } },
+  ]
+}
+
+/** The `/api/v1/publish/node-profile` singleton — filled in so the
+ *  profile form renders populated. */
+const nodeProfile = {
+  profile: {
+    orgName: 'Coastal Science Center',
+    mission: 'We connect visitors with live ocean and atmosphere data.',
+    aboutMd: '## About us\nA science museum on the gulf coast.',
+    regionFocus: 'Gulf of Mexico coast',
+    defaultTone: 'educational, general public',
+    links: [{ label: 'Website', url: 'https://coastal.example.org' }],
+    logoUrl: null,
+    updatedBy: 'PUB-ADMIN',
+    updatedAt: '2026-07-01T00:00:00.000Z',
+  },
+}
+
+/** The `/api/v1/publish/feeds` connector registry — the seeded EONET
+ *  row plus one bring-your-own RSS feed so the console shows both an
+ *  enabled and a paused connector with run bookkeeping. */
+const feeds = {
+  feeds: [
+    {
+      id: 'FEED_EONET_DEFAULT',
+      kind: 'eonet',
+      label: 'NASA EONET',
+      url: 'https://eonet.gsfc.nasa.gov/api/v3/events?status=open&days=14',
+      category: 'hazards',
+      enabled: true,
+      createdAt: '2026-07-01T00:00:00.000Z',
+      updatedAt: '2026-07-01T00:00:00.000Z',
+      lastRunAt: '2026-07-02T06:00:00.000Z',
+      lastRunStatus: 'ok',
+      lastRunError: null,
+    },
+    {
+      id: '01HFEEDRSSAAAAAAAAAAAAAAAA',
+      kind: 'rss',
+      label: 'Example Environment Desk',
+      url: 'https://news.example.org/environment/rss',
+      category: 'news',
+      enabled: false,
+      createdAt: '2026-07-01T12:00:00.000Z',
+      updatedAt: '2026-07-02T08:00:00.000Z',
+      lastRunAt: '2026-07-02T06:00:00.000Z',
+      lastRunStatus: 'error',
+      lastRunError: 'feed responded 502',
+    },
+  ],
+}
+
+/** The `/api/v1/publish/feeds/preview` dry-run — the latest-items list
+ *  the console shows under a feed row's Preview toggle. */
+const feedPreview = {
+  fetched: 3,
+  mappable: 3,
+  items: [
+    {
+      title: 'Hurricane advisory 12 issued for the central Atlantic',
+      publishedAt: '2026-07-01T15:00:00.000Z',
+      url: 'https://news.example.org/hurricane-advisory-12',
+    },
+    {
+      title: 'Wildfire smoke reaches the coastal cities',
+      publishedAt: '2026-06-30T09:00:00.000Z',
+      url: 'https://news.example.org/wildfire-smoke',
+    },
+    {
+      title: 'Monsoon flooding displaces thousands',
+      publishedAt: null,
+      url: 'https://news.example.org/monsoon-flooding',
+    },
+  ],
+}
+
 /** A forced server error (HTTP 500) so a list page renders the shared
  *  error card — the `publisher.me.error.*` / `publisher.error.*` strings
  *  that a successful response never surfaces for translators. */
@@ -237,6 +532,7 @@ export function publisherFixtures(
     datasets?: ListState
     workflows?: ListState
     publishers?: ListState
+    events?: ListState
   } = {},
 ): FixtureRule[] {
   const datasetsState = opts.datasets ?? 'populated'
@@ -256,7 +552,28 @@ export function publisherFixtures(
     // route is only hit by the detail scene, which stays populated.
     { url: /\/publish\/datasets\/[^/?]+(\?|$)/, json: datasetDetail },
     list(datasetsState, '/api/v1/publish/datasets', datasets, datasetsEmpty),
+    // Runs before the list, for the substring reason above.
+    { url: /\/publish\/workflows\/[^/?]+\/runs(\?|$)/, json: workflowRuns },
     list(opts.workflows ?? 'populated', '/api/v1/publish/workflows', workflows, workflowsEmpty),
+    { url: '/api/v1/publish/tours', json: tours },
+    { url: '/api/v1/featured-hero', json: featuredHero },
     list(opts.publishers ?? 'populated', '/api/v1/publish/publishers', publishers, publishersEmpty),
+    list(opts.events ?? 'populated', '/api/v1/publish/events', events, eventsEmpty),
+    // Preview before the registry list — rules substring-match in order.
+    { url: '/api/v1/publish/feeds/preview', json: feedPreview },
+    { url: '/api/v1/publish/feeds', json: feeds },
+    NHC_STORMS_RULE,
+    YOUTUBE_SEARCH_RULE,
+    YOUTUBE_CHANNELS_RULE,
+    { url: '/api/v1/publish/node-profile', json: nodeProfile },
+    // Feature toggles: all-on so every portal surface stays visible in
+    // captures. The authed node-settings rule backs the Features card
+    // AND the gated pages' fetchFeatures(); the public node-profile
+    // rule backs the chrome's org-name read (the `/api/v1/node-profile`
+    // path is NOT a substring of the publish one, so both rules are
+    // needed).
+    { url: '/api/v1/publish/node-settings', json: { features: {}, updatedBy: null, updatedAt: null } },
+    { url: '/api/v1/node-profile', json: { profile: { orgName: 'Coastal Science Center', logoUrl: null }, features: {} } },
+    { url: '/api/v1/publish/blog', json: blogAuthoring },
   ]
 }

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * POST /api/v1/publish/datasets/{id}/publish
  *
@@ -17,6 +20,7 @@ import {
   getDatasetForPublisher,
   publishDataset,
 } from '../../../_lib/dataset-mutations'
+import { canOwnOrAny } from '../../../_lib/capabilities'
 import { type JobQueue, WaitUntilJobQueue } from '../../../_lib/job-queue'
 
 /** Test injection point — middleware/tests can pre-populate `context.data.jobQueue`. */
@@ -41,6 +45,12 @@ export const onRequestPost: PagesFunction<CatalogEnv, 'id'> = async context => {
 
   const existing = await getDatasetForPublisher(context.env.CATALOG_DB!, publisher, id)
   if (!existing) return jsonError(404, 'not_found', `Dataset ${id} not found.`)
+  // Publishing is a privilege above editing: a contributor can draft +
+  // edit its own rows but cannot make them public — an author (own) or
+  // an editor/admin (any) publishes.
+  if (!canOwnOrAny(publisher, existing.publisher_id, 'content.publish.own', 'content.publish.any')) {
+    return jsonError(403, 'forbidden_role', 'Publishing requires a publishing role.')
+  }
 
   const jobQueue =
     (context.data as unknown as PublishContextData).jobQueue ??

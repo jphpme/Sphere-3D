@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * Tools Menu UI — single wrench-icon button plus a collapsible popover
  * that hosts every map-related toggle, the viewport layout picker,
@@ -39,9 +42,12 @@
 import type { ViewportManager, ViewLayout } from '../services/viewportManager'
 import { updateMapControlsPosition } from './mapControlsUI'
 import { openPrivacyUI } from './privacyUI'
+import { openAnalyzeUI } from './analyzeUI'
 import { openPlaylistManager } from './playlistUI'
 import { emit } from '../analytics'
 import { setBordersVisible } from '../utils/viewPreferences'
+import { maxVideoPanels } from '../utils/deviceCapability'
+import type { FullscreenController } from '../services/windowChrome'
 import {
   loadUiScale,
   nearestPreset,
@@ -82,8 +88,23 @@ function emitSetting(key: string, valueClass: string): void {
  *  test environments leave as `undefined` rather than `null`) so
  *  the rest of the file doesn't have to repeat the falsy check. */
 function isFullscreen(): boolean {
-  return Boolean(document.fullscreenElement)
+  // The controller first, because on desktop it is the only one that
+  // knows: a *native* fullscreen window leaves `document.fullscreenElement`
+  // null, so reading the DOM alone would leave the button showing
+  // "enter fullscreen" over an already-fullscreen window.
+  return controller ? controller.isFullscreen() : Boolean(document.fullscreenElement)
 }
+
+/**
+ * The window-chrome controller, once a host has wired one.
+ *
+ * Module-scoped rather than threaded through, because
+ * `syncFullscreenButton` is called from a `fullscreenchange` listener
+ * registered once for the life of the document — it has no closure to
+ * read from, and giving it one would mean re-registering that listener
+ * on every re-init.
+ */
+let controller: FullscreenController | null = null
 
 /** Toggle the document into / out of fullscreen via the standard
  *  Fullscreen API. Errors (autoplay-policy denial, browser
@@ -91,6 +112,12 @@ function isFullscreen(): boolean {
  *  its current state and the `fullscreenchange` event never fires,
  *  so `syncFullscreenButton` doesn't have anything to do. */
 async function toggleFullscreen(): Promise<void> {
+  // The controller already absorbs a refusal and reports what the
+  // window actually is, so there is nothing to catch around it.
+  if (controller) {
+    await controller.toggle()
+    return
+  }
   try {
     if (isFullscreen()) {
       await document.exitFullscreen()
@@ -147,6 +174,20 @@ export interface ToolsMenuCallbacks {
   onToggleDatasetInfo?: (visible: boolean) => void
   /** User toggled legend visibility. */
   onToggleLegend?: (visible: boolean) => void
+  /**
+   * The window's fullscreen state (`docs/MULTI_MONITOR_PLAN.md` §3.6).
+   *
+   * The toolbar button below predates this and drove
+   * `document.requestFullscreen` directly. That covers a browser and is
+   * half the answer in a packaged app: it makes the *webview*
+   * fullscreen while leaving the native title bar and border in place,
+   * both of which land in the signal when an operator captures the
+   * control display. When a controller is supplied it owns the toggle
+   * instead, pairing fullscreen with `setDecorations` and persisting
+   * the choice; without one the old path stands, which is what the web
+   * build still uses.
+   */
+  fullscreen?: FullscreenController
   /** User clicked Credits — open the credits / attribution
    *  dialog. The Tools menu hands its always-visible toggle
    *  button as `trigger` so the credits panel can restore focus
@@ -154,10 +195,23 @@ export interface ToolsMenuCallbacks {
    *  closePopover() before the dialog opens, so it isn't a
    *  reliable focus target). */
   onOpenCredits?: (trigger: HTMLElement) => void
+  /**
+   * User clicked Outputs — open the multi-monitor Outputs panel
+   * (`docs/MULTI_MONITOR_PLAN.md` rung 9).
+   *
+   * Absent renders no entry at all, which is how the web build stays
+   * unchanged: outputs are desktop-only, and `main.ts` supplies this
+   * only when the boot handle reports itself available. Same shape as
+   * `onOpenCredits` — the callback's presence *is* the feature gate, so
+   * there is no second place for the two to disagree.
+   */
+  onOpenOutputs?: (trigger: HTMLElement) => void
   /** Announce something for screen readers. */
   announce?: (message: string) => void
-  /** Get the currently loaded dataset (used by the Share action). */
-  getCurrentDataset: () => { id: string; title: string } | null
+  /** Get the currently loaded dataset (used by the Share action).
+   *  `slug` is what makes the copied link read as
+   *  `/dataset/north-america-smoke` rather than a bare ULID. */
+  getCurrentDataset: () => { id: string; title: string; slug?: string } | null
 }
 
 /** Open/close state for the popover. Tracked here because DOM tests
@@ -182,8 +236,12 @@ export function initToolsMenu(
 
   const gateMeetOrbit = isTauri()
 
-  const { onSetLayout, onOpenBrowse, onOpenOrbitSettings, onToggleDatasetInfo, onToggleLegend, onOpenCredits, announce } = callbacks
+  const { onSetLayout, onOpenBrowse, onOpenOrbitSettings, onToggleDatasetInfo, onToggleLegend, onOpenCredits, onOpenOutputs, announce } = callbacks
   const currentLayout = viewports.getLayout()
+  // A phone cannot hold four video decoders — the third crashes the tab
+  // while still loading (terraviz#230) — so the option is turned off
+  // rather than offered and then quietly reduced under the user.
+  const fourGlobeAllowed = maxVideoPanels() >= 4
 
   // Resolve the current UI scale (precedence: localStorage → env →
   // 1.0) so the radio's initial active button matches what's
@@ -246,6 +304,7 @@ export function initToolsMenu(
         <span class="tools-menu-popover-title">${tHtml('tools.popover.title')}</span>
         <button type="button" class="tools-menu-close" id="tools-menu-close" aria-label="${tAttr('tools.close.aria')}">&#x2715;</button>
       </div>
+      <div class="tools-menu-popover-body">
       <section class="tools-menu-section" aria-label="${tAttr('tools.section.view.aria')}">
         <h4 class="tools-menu-section-title">${tHtml('tools.section.view')}</h4>
         <button type="button" class="tools-menu-item" id="tools-menu-labels" aria-pressed="false">
@@ -305,7 +364,7 @@ export function initToolsMenu(
           <button type="button" class="tools-menu-layout-btn${currentLayout === '1' ? ' active' : ''}" id="tools-menu-layout-1" aria-pressed="${currentLayout === '1'}" title="${tAttr('tools.layout.single')}">1</button>
           <button type="button" class="tools-menu-layout-btn${currentLayout === '2h' ? ' active' : ''}" id="tools-menu-layout-2h" aria-pressed="${currentLayout === '2h'}" title="${tAttr('tools.layout.twoHorizontal')}">2&#x2194;</button>
           <button type="button" class="tools-menu-layout-btn${currentLayout === '2v' ? ' active' : ''}" id="tools-menu-layout-2v" aria-pressed="${currentLayout === '2v'}" title="${tAttr('tools.layout.twoVertical')}">2&#x2195;</button>
-          <button type="button" class="tools-menu-layout-btn${currentLayout === '4' ? ' active' : ''}" id="tools-menu-layout-4" aria-pressed="${currentLayout === '4'}" title="${tAttr('tools.layout.four')}">4</button>
+          <button type="button" class="tools-menu-layout-btn${currentLayout === '4' ? ' active' : ''}" id="tools-menu-layout-4" aria-pressed="${currentLayout === '4'}"${fourGlobeAllowed ? '' : ' aria-disabled="true"'} title="${tAttr(fourGlobeAllowed ? 'tools.layout.four' : 'tools.layout.four.unavailable')}" aria-label="${tAttr(fourGlobeAllowed ? 'tools.layout.four' : 'tools.layout.four.unavailable')}">4</button>
         </div>
       </section>
       <section class="tools-menu-section" aria-label="${tAttr('tools.section.actions.aria')}">
@@ -326,6 +385,14 @@ export function initToolsMenu(
           <span class="tools-menu-item-label">${tHtml('tools.actions.playlists')}</span>
         </button>
       </section>
+      ${onOpenOutputs ? `
+      <section class="tools-menu-section" aria-label="${tAttr('tools.section.outputs.aria')}">
+        <h4 class="tools-menu-section-title">${tHtml('tools.section.outputs')}</h4>
+        <button type="button" class="tools-menu-item" id="tools-menu-outputs">
+          <span class="tools-menu-item-check" aria-hidden="true"></span>
+          <span class="tools-menu-item-label">${tHtml('tools.actions.outputs')}</span>
+        </button>
+      </section>` : ''}
       <section class="tools-menu-section" aria-label="${tAttr('tools.section.orbit.aria')}">
         <h4 class="tools-menu-section-title">${tHtml('tools.section.orbit')}</h4>
         <button type="button" class="tools-menu-item" id="tools-menu-orbit-settings">
@@ -345,11 +412,16 @@ export function initToolsMenu(
           <span class="tools-menu-item-check" aria-hidden="true"></span>
           <span class="tools-menu-item-label">${tHtml('tools.actions.credits')}</span>
         </button>` : ''}
+        <button type="button" class="tools-menu-item" id="tools-menu-analyze">
+          <span class="tools-menu-item-check" aria-hidden="true"></span>
+          <span class="tools-menu-item-label">${tHtml('tools.actions.analyze')}</span>
+        </button>
         <button type="button" class="tools-menu-item" id="tools-menu-privacy">
           <span class="tools-menu-item-check" aria-hidden="true"></span>
           <span class="tools-menu-item-label">${tHtml('tools.actions.privacy')}</span>
         </button>
       </section>
+      </div>
     </div>
   `
 
@@ -390,6 +462,14 @@ export function initToolsMenu(
     closePopover()
     void toggleFullscreen()
   })
+  // Adopted before the first sync, so the button's initial label
+  // reflects a window the kiosk flag or a restored preference may
+  // already have made fullscreen.
+  controller = callbacks.fullscreen ?? null
+  // Through the controller when there is one: F11 and the kiosk flag
+  // change the *native* window without firing `fullscreenchange`, so
+  // the DOM event alone would leave the button stale after either.
+  controller?.onChange(syncFullscreenButton)
   if (!document.body.dataset.toolsMenuFullscreenWired) {
     document.body.dataset.toolsMenuFullscreenWired = 'true'
     document.addEventListener('fullscreenchange', syncFullscreenButton)
@@ -588,7 +668,7 @@ export function initToolsMenu(
     const shared = await shareDataset({
       title: dataset.title,
       text: t('tools.share.text', { title: dataset.title }),
-      url: buildDatasetShareUrl(dataset.id),
+      url: buildDatasetShareUrl(dataset),
     })
     if (shared) announce?.(t('tools.announce.shared'))
   })
@@ -621,6 +701,25 @@ export function initToolsMenu(
     })
   }
 
+  if (onOpenOutputs) {
+    const outputsBtn = document.getElementById('tools-menu-outputs') as HTMLButtonElement | null
+    outputsBtn?.addEventListener('click', () => {
+      closePopover()
+      // The always-visible toggle button, not the menu item: closePopover
+      // has just hidden the item, so it cannot take focus back when the
+      // panel closes. Same reasoning as Credits above.
+      onOpenOutputs(toggleBtn)
+      announce?.(t('tools.announce.outputsOpened'))
+    })
+  }
+
+  const analyzeBtn = document.getElementById('tools-menu-analyze') as HTMLButtonElement | null
+  analyzeBtn?.addEventListener('click', () => {
+    closePopover()
+    openAnalyzeUI(analyzeBtn)
+    announce?.(t('tools.announce.analyzeOpened'))
+  })
+
   const privacyBtn = document.getElementById('tools-menu-privacy') as HTMLButtonElement | null
   privacyBtn?.addEventListener('click', () => {
     closePopover()
@@ -639,6 +738,11 @@ export function initToolsMenu(
     }
     for (const [layout, btn] of layoutBtns) {
       btn.addEventListener('click', () => {
+        // `aria-disabled` keeps the control focusable so its reason is
+        // reachable, which means the click still arrives and has to be
+        // refused here. Silently: the label already says why, and
+        // announcing a refusal on every press would nag.
+        if (btn.getAttribute('aria-disabled') === 'true') return
         onSetLayout(layout)
         for (const [l, b] of layoutBtns) {
           const active = l === layout

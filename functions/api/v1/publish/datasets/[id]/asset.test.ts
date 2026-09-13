@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Zyra Project
+
 /**
  * Wire-level tests for `POST /api/v1/publish/datasets/{id}/asset`.
  *
@@ -101,6 +104,89 @@ function ctx(opts: {
 async function readJson<T>(res: Response): Promise<T> {
   return JSON.parse(await res.text()) as T
 }
+
+describe('POST /api/v1/publish/datasets/{id}/asset — transcode: false', () => {
+  /** Mark the seeded row data-encoded, which is what gates the opt-out. */
+  function makeDataEncoded(sqlite: ReturnType<typeof setupEnv>['sqlite'], datasetId: string) {
+    sqlite
+      .prepare(`UPDATE datasets SET render_encoding = ?, format = ? WHERE id = ?`)
+      .run('data-luma', 'video/mp4', datasetId)
+  }
+
+  it('mints a content-addressed key so /complete takes the direct path', async () => {
+    const { env, sqlite, datasetId } = setupEnv()
+    makeDataEncoded(sqlite, datasetId)
+    const res = await assetInit(
+      ctx({
+        env,
+        datasetId,
+        body: {
+          kind: 'data',
+          mime: 'video/mp4',
+          size: 50 * 1024 * 1024,
+          content_digest: HAPPY_DIGEST,
+          transcode: false,
+        },
+      }),
+    )
+    expect(res.status).toBe(201)
+    const body = await readJson<{ r2?: { key: string } }>(res)
+    // The whole mechanism: `/complete` branches on `isVideoSourceKey`,
+    // so a key outside the `uploads/{ds}/{up}/source.mp4` shape takes
+    // the direct path — data_ref written from the upload's own ref, no
+    // dispatch, no transcoding=1. Asserting the key shape asserts the
+    // behaviour, because the two are the same decision.
+    expect(body.r2?.key).not.toMatch(/^uploads\//)
+    expect(body.r2?.key).toContain('by-digest')
+  })
+
+  it('still mints the source key when the flag is absent', async () => {
+    const { env, sqlite, datasetId } = setupEnv()
+    makeDataEncoded(sqlite, datasetId)
+    const res = await assetInit(
+      ctx({
+        env,
+        datasetId,
+        body: {
+          kind: 'data',
+          mime: 'video/mp4',
+          size: 50 * 1024 * 1024,
+          content_digest: HAPPY_DIGEST,
+        },
+      }),
+    )
+    expect(res.status).toBe(201)
+    const body = await readJson<{ r2?: { key: string } }>(res)
+    expect(body.r2?.key).toMatch(/^uploads\/.*\/source\.mp4$/)
+  })
+
+  it('refuses the opt-out on a dataset that is not data-encoded', async () => {
+    // The transcode is only destructive when luma is the measurement.
+    // For an ordinary video it normalises to 30 fps, which the tour
+    // engine's playback-rate maths assumes.
+    const { env, sqlite, datasetId } = setupEnv()
+    sqlite.prepare(`UPDATE datasets SET format = ? WHERE id = ?`).run('video/mp4', datasetId)
+    const res = await assetInit(
+      ctx({
+        env,
+        datasetId,
+        body: {
+          kind: 'data',
+          mime: 'video/mp4',
+          size: 50 * 1024 * 1024,
+          content_digest: HAPPY_DIGEST,
+          transcode: false,
+        },
+      }),
+    )
+    expect(res.status).toBe(422)
+    const body = await readJson<{ error?: string; message?: string }>(res)
+    expect(body.error).toBe('transcode_required')
+    // The message has to say what to do next, since the publisher's
+    // options are "set render_encoding" or "let it transcode".
+    expect(body.message).toContain('render_encoding')
+  })
+})
 
 describe('POST /api/v1/publish/datasets/{id}/asset — happy paths', () => {
   it('routes a video data upload to R2 at the dispatch-discoverable source key (3pd)', async () => {
@@ -612,11 +698,15 @@ describe('POST /api/v1/publish/datasets/{id}/asset — image-sequence (3pf)', ()
     }>(res)
     expect(body.target).toBe('r2')
     expect(body.frames).toHaveLength(3)
-    // Indexes are zero-padded to 5 digits in the R2 key, matching
-    // the `%05d` glob ffmpeg's image-sequence input reads.
-    expect(body.frames[0].key).toMatch(/\/frames\/00000\.png$/)
-    expect(body.frames[1].key).toMatch(/\/frames\/00001\.png$/)
-    expect(body.frames[2].key).toMatch(/\/frames\/00002\.png$/)
+    // Frames are content-addressed: each key is
+    // `videos/{dataset}/frames/sha256/{hex}.{ext}` derived from the
+    // frame's own digest (shared across uploads so re-publishes
+    // dedupe), not the legacy per-upload `{index}.{ext}` path.
+    expect(body.frames[0].key).toBe(`videos/${datasetId}/frames/sha256/${'0'.repeat(64)}.png`)
+    expect(body.frames[1].key).toBe(`videos/${datasetId}/frames/sha256/${'0'.repeat(63)}1.png`)
+    expect(body.frames[2].key).toBe(`videos/${datasetId}/frames/sha256/${'0'.repeat(63)}2.png`)
+    // No upload_id in the frame path.
+    expect(body.frames[0].key).not.toContain(body.upload_id)
     // The source-filenames blob lives one level up from frames/.
     expect(body.source_filenames.key).toMatch(/\/source_filenames\.json$/)
     expect(body.source_filenames.key).not.toContain('/frames/')
