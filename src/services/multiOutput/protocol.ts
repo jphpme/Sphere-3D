@@ -488,6 +488,23 @@ export interface OutputRenderConfig {
   framebufferWidth: number
   /** Whether to draw the debug HUD over the projection. */
   debugOverlay: boolean
+  /**
+   * Show the calibration test pattern **instead of** whatever this
+   * output is mirroring (rung 14b).
+   *
+   * It rides this channel rather than `GlobeState` for the reason the
+   * channel exists: it is a property of one *window*, and calibration
+   * is done one sphere at a time — a rig with four outputs is four
+   * differently-mounted spheres, and putting a pattern on all of them
+   * to align one is the opposite of what the operator asked for.
+   * Routing it through the mirrored `dataset` would do exactly that,
+   * and would also replace the control window's own globe, which is
+   * where the operator is reading the rotation they are turning.
+   *
+   * Instead-of rather than over: a pattern is for checking *geometry*,
+   * and a graticule composited over a dataset leaves neither legible.
+   */
+  calibration: boolean
 }
 
 /**
@@ -509,7 +526,7 @@ export interface OutputRenderConfig {
  * indistinguishable from a real failure.
  */
 export function defaultRenderConfig(): OutputRenderConfig {
-  return { framebufferWidth: DEFAULT_FRAMEBUFFER_WIDTH, debugOverlay: false }
+  return { framebufferWidth: DEFAULT_FRAMEBUFFER_WIDTH, debugOverlay: false, calibration: false }
 }
 
 // --- Manager → output ---

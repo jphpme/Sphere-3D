@@ -1002,7 +1002,8 @@ two-way binding.
 | `src/ui/outputUI.ts` | Tools → Outputs panel — list current outputs, "Add output" button, per-output config menu (monitor, mode, "Track operator camera" toggle, "Split sphere" toggle, "Rotation offset (°)" numeric + slider, "Calibration" submenu with test-pattern selector, debug overlay), per-output health badge (healthy / stale / stalled / monitor-missing — see "Failure recovery") |
 | `src/output/main.ts` | Output window entry. Creates Three.js renderer, builds `photorealEarth` scene + dataset overlay + layer stack, runs equirect RTT each frame, displays to a full-bleed canvas. Wires `webglcontextlost` / `webglcontextrestored` listeners and an IPC-silence watchdog (5 s tolerance, stale state thereafter — see "Failure recovery") |
 | `src/output/equirectRtt.ts` | Equirectangular render-to-texture pass — single fragment shader. Applies the per-output `uRotationOffsetRad` longitude rotation first (see "Calibration tooling"), then raycasts from a configurable camera offset (`uCameraOffset`, derived from the operator's MapLibre camera by default; see §3.5) at every (lon, lat) of the output framebuffer. Supports split mode (`uSplit`) that mirrors the area of focus to the antipodal hemisphere of the LED sphere. |
-| `src/output/datasetMirror.ts` | Output-side companion to control-window `datasetLoader` — given a `dataset.url` + `dataset.kind` + `dataset.bbox`, builds a Three.js texture (image or HLS-driven VideoTexture) and a UV transform. Owns the playback sync seam (feeds `computeSiblingSyncCorrection` and the read-back verification layer — see "Playback sync algorithm") and the single stream rebuild on a `loadStream()` rejection, freezing the last good frame throughout (see "Failure recovery"; there is deliberately no retry ladder here — `hlsService` owns that). Recognises the `__terraviz_calibration__` sentinel dataset id and renders a procedural test pattern (~80 lines of GLSL) instead of fetching content (see "Calibration tooling") |
+| `src/output/datasetMirror.ts` | Output-side companion to control-window `datasetLoader` — given a `dataset.url` + `dataset.kind` + `dataset.bbox`, builds a Three.js texture (image or HLS-driven VideoTexture) and a UV transform. Owns the playback sync seam (feeds `computeSiblingSyncCorrection` and the read-back verification layer — see "Playback sync algorithm") and the single stream rebuild on a `loadStream()` rejection, freezing the last good frame throughout (see "Failure recovery"; there is deliberately no retry ladder here — `hlsService` owns that). ~~Recognises the `__terraviz_calibration__` sentinel dataset id and renders a procedural test pattern (~80 lines of GLSL) instead of fetching content~~ — superseded: the test pattern is `src/output/calibrationPattern.ts`, a canvas on the render-config channel, and this module knows nothing about it (see "Calibration tooling") |
+| `src/output/calibrationPattern.ts` | The calibration test pattern (rung 14b) — a 2:1 canvas of graticule, colour bars, grayscale ramp, anchor crosshairs, longitude scale, pole letters and a live framebuffer readout, installed in an ordinary overlay slot so it travels the same sampling path a dataset does. Pure geometry in normalised image-space UV plus a thin painter; pinned against `datasetProbe.latLonToTexelUv` (see "Calibration tooling") |
 | `src/output/layerStack.ts` | Builds the dataset overlay and layer stack the equirect pass composites — bbox clipping, the `lonOrigin` shift, `isFlippedInY`, and the data-encoded palette LUT, folded into `equirectRtt`'s fragment shader by `buildOutputFragmentShader`. Layers composite in array order inside that one shader, so there is no shell stack and no depth buffer. Slots are unrolled at build time (GLSL ES 1.00 has no dynamic sampler indexing) and capped at `MAX_OUTPUT_LAYERS` |
 | `src/output/output.html` + `src/output/output.css` | Output window markup and styling — black body, no cursor, full-bleed canvas |
 | `src-tauri/capabilities/output.json` | Narrow capability scoped to `output-*` window labels. Allows: event listen / unlisten / emit / emit-to (IPC with manager); window current-monitor / is-decorated / is-fullscreen / set-fullscreen / set-decorations / close; HTTP fetch on `https://*` only with localhost explicitly denied. Excludes: `core:default`, `core:window:default`, window creation, updater, filesystem, asset protocol, shell, dialog, clipboard, all Tauri command `invoke`. Full enumeration + rationale in §3 "Output capability spec". |
@@ -2617,11 +2618,96 @@ Commissioning an LED-sphere installation requires more than
 "point output at monitor and hope." Two calibration
 primitives ship in v1.
 
-#### 1. Test pattern pseudo-dataset
+#### 1. Test pattern pseudo-dataset — **landed, and built differently**
 
-Selectable from the per-output config menu under a
-"Calibration" submenu, alongside the regular dataset list.
-**Not a fetched asset** — rendered shader-side so it works
+**Two things below are superseded and struck through where
+they appear: the shader implementation, and the sentinel
+dataset id.** Both are recorded here rather than rewritten
+away, so the reasoning is not re-derived from a summary.
+What shipped is `src/output/calibrationPattern.ts`.
+
+**It is a 2:1 canvas, not GLSL,** and the reason is what is
+being calibrated rather than convenience. A pattern drawn
+inside the fragment shader bypasses `layerStack`'s sampling
+entirely — the bbox clipping, the `lonOrigin` shift,
+`isFlippedInY`, the whole path a real dataset's pixels
+travel — so it could land perfectly while the dataset path
+was wrong, which is the one failure a calibration pattern
+exists to rule out. Installed in an ordinary overlay slot
+it travels that path exactly, so a pattern that lands right
+proves a dataset will. Its geometry is pinned in tests
+against `datasetProbe.latLonToTexelUv`, the canonical TS
+mirror of the shader maths. The convenience is real too,
+and the "~80 LOC GLSL" estimate below half-predicted it:
+the pole letters, anchor names, longitude scale and
+resolution readout are **glyphs**.
+
+**It is a per-output switch on the render-config channel,
+not a dataset,** which is the second correction. Calibration
+is done one sphere at a time — a rig with four outputs is
+four differently-mounted spheres — and `dataset` is *shared*
+state, so a sentinel id would have put the pattern on every
+output at once and replaced the control window's own globe,
+which is where the operator is reading the rotation they are
+turning. `OutputRenderConfig.calibration` is per-output and
+last-write-wins, exactly like `debugOverlay` beside it.
+
+It **replaces** the mirrored dataset rather than compositing
+over it: a graticule on top of data leaves neither legible,
+and what is being checked is geometry. The mirror is
+untouched underneath — the decoder keeps running and keeps
+being steered — so turning calibration off puts the dataset
+back *in step* rather than reloading it.
+
+Three details the section below does not cover, each of
+which is a wrong answer avoided:
+
+- **The southern colour bars are reversed.** Two identical
+  bands are invariant under a vertical flip, which is the
+  one orientation error this pattern most needs to expose.
+  The N/S letters say it too; two independent statements of
+  the same fact are cheap here.
+- **The antimeridian is drawn at both edges** and gets its
+  own third colour. An equirectangular image cuts that
+  meridian in half and on a sphere the halves are the same
+  mark — the join an operator is checking for a seam — and
+  a seam artefact and a mis-set rotation look identical if
+  both edges are painted like the grid.
+- **The canvas is capped at 4096 whatever the framebuffer.**
+  8192 is 134 MB of backing store plus as much again once
+  uploaded, on hardware §3 already found can land silently
+  on an iGPU, and it buys nothing: what is calibrated is
+  *where* a line falls, and a bilinear-sampled 4096 pattern
+  places every line within half a framebuffer pixel of its
+  true position at 8192. The readout still names the
+  framebuffer, which is the number the operator is
+  confirming.
+
+**The rotation value is deliberately not in the readout.**
+It would make the pattern a function of a value that changes
+continuously — the panel's slider commits on `input`, so one
+drag is dozens of 4096×2048 redraws — and it is redundant
+and worse than what is already there: the longitude scale
+turns *with* the sphere, so the operator reads the rotation
+off whichever label has reached the physical mark they are
+aligning to.
+
+**And it does not persist**, unlike every other operator
+choice in the panel. The rule is that what you calibrate
+persists and the act of calibrating does not:
+`rotationOffsetDeg` is a property of the room,
+`calibration` is a property of the afternoon. It is worth
+separating from `debugOverlay`, which does persist — that is
+an overlay *on* the content, so an installation restoring
+with it on still shows its data, while this replaces the
+content, and an installation restoring with it on shows
+none.
+
+The original design follows.
+
+~~Selectable from the per-output config menu under a
+"Calibration" submenu, alongside the regular dataset list.~~
+**Not a fetched asset** — built locally so it works
 identically on every output regardless of network state.
 
 The pattern is a single multi-purpose target rendered into
@@ -2654,13 +2740,17 @@ so the operator can verify those primitives by zooming in
 on the control globe and watching how the pattern
 distributes across the LED sphere.
 
-Implementation: `src/output/datasetMirror.ts` recognises a
+~~Implementation: `src/output/datasetMirror.ts` recognises a
 sentinel dataset id (`__terraviz_calibration__`). When that
 id arrives in a state diff, the mirror builds a procedural
 texture in a Three.js `WebGLRenderTarget` driven by a single
-fragment shader (~80 lines of GLSL). No `<video>`, no HLS,
-no network. The pattern recomputes only when
-`framebufferSize` changes.
+fragment shader (~80 lines of GLSL).~~ **Superseded — see
+the correction at the top of this section.** The sentinel id
+survives as `CALIBRATION_OVERLAY.datasetId`, which is what
+the debug HUD reports when the pattern is what is on the
+glass; nothing routes on it. No `<video>`, no HLS, no
+network, and the pattern still recomputes only when the
+framebuffer rung changes.
 
 #### 2. Per-output rotation offset — **landed**
 
@@ -2921,7 +3011,7 @@ without rolling the whole feature back.
 | 12b | `multi-output: kiosk launch flag` | **Landed.** `--kiosk` and `TERRAVIZ_KIOSK=1` parsed in `src-tauri/src/lib.rs` (`main.rs` was already the 12-line shim this section predicted), applied in `setup()` behind `#[cfg(desktop)]`. "Before first paint" is **best-effort**, not guaranteed: `setup()` is the earliest point an `AppHandle` exists, and the static alternative in `tauri.conf.json` cannot be conditional on a flag. `TERRAVIZ_KIOSK=0` and an empty value mean *off* — a deployment templating one unit file across several machines sets the variable explicitly to disable kiosk, so the value is matched against an allowlist rather than tested for presence. The flag beats a falsy environment, since an operator adding it to one launch is deciding now while the environment is the installation's default. Decorations drop only after fullscreen succeeds, and every failure is logged and swallowed. One thing this rung had to add on the **TypeScript** side: the kiosk flag makes the native window fullscreen without the JS controller knowing, so `WindowChromeHost` gained an async `queryFullscreen()` seeded once at construction — without it the Tools button offers "Enter fullscreen" over a kiosk window and the first press is a no-op. That needs `core:window:allow-is-fullscreen`, added to `default.json` (`output.json` already had it). | Yes (additive) |
 | 12c | `multi-output: the Earth decoration the equirect path can carry` | The three effects §"What the equirect path does to the Earth decoration" says **cross** — day/night terminator, night lights, clouds — wired into `layerStack`'s fragment shader. **Landed.** Specified here first, then built exactly as specified, which is why the first hardware session's flat diffuse Earth is now day/night-shaded with city lights and cloud cover. Not a research question: the terminator is `dot(hit, uSunDir)` (the ray-march's hit point on the unit sphere *is* the normal), night lights are a second sampler gated by it, clouds are one more layer in a composite that already unrolls slots. The sun direction comes from `getSunPosition` in `src/utils/time.ts`, which the control globe already uses, so the two cannot disagree about where the sun is. **The four that do not cross stay out** — specular, atmosphere *shells*, ground shadow, sun sprite are not deferred, they are incoherent on this surface, and baking one in paints a fixed glare spot or limb ring onto a physical sphere in a place correct from exactly one vantage point. That is a rendering artifact that reads as a data feature, which is worse than its absence. So "as realistic as possible" on a sphere **is** diffuse + night lights + clouds + terminator; this rung is the whole of it. **Amended after this rung shipped:** the atmosphere's *shell* stays out for the reason above, but its **disc tint** was later found to cross — pinned to nadir the scattering integral is a function of sun angle alone, with no silhouette to be wrong about. That is what made the output's ocean black beside a blue one. It is not a fifth effect sneaking back in; it is the sharper test (what does this become at nadir?) applied to a row this table got half right. | Yes (additive) |
 | 13 | `multi-output: failure recovery — crashes, stalls, GPU loss, monitor unplug` | Manager gains crash detection (no-graceful-close window destroy → toast + record removal), 3-strikes-per-monitor crash storm guard, 2 s `availableMonitors()` poll for unplug detection, `getAll()` boot scan to reattach orphaned `output-*` windows after a control-window **page reload or webview failure** — not a crash of the process, which takes every window with it; see case 6, which corrects this. Output gains `webglcontextlost` / `webglcontextrestored` listeners with full scene rebuild, IPC-silence watchdog (5 s → stale state, 60 s → orphan), one HLS stream rebuild on a `loadStream()` rejection with frozen last-good-frame (no retry ladder — `hlsService` already spends a 3× budget before rejecting). Outputs panel renders per-output health badges (healthy / stale / stalled / monitor-missing). New Tier A `output_failure` event fired from manager via `analytics/emitter.ts` with `{ kind, retries, recovered }` (Open Question 3 decided). See §3 "Failure recovery". **Landed so far: 13a** (crash-vs-hand-close classification, the storm guard, record removal, `onOutputsChanged` for the panel), **13b** (all three Tier A events, `outputTelemetry.ts`), **case 3** (the output's `linkWatchdog`, the manager's `output_health_check` resync, the panel's stale badge and its announcement) and **case 6** (`adoptOrphanedOutputs`, `OUTPUT_REATTACH_EVENT`, chained ahead of the restore at boot) and **case 5's detection and reporting** (`outputScene.gpuState()`, `output_gpu_lost` / `output_gpu_recovered`, the `gpu-lost` badge and the `gpu-loss` Tier A failure — much smaller than this row implied, because Three's `WebGLRenderer` already does the `preventDefault()` and the GL rebuild; see case 5). Still open: the unplug poll, the single HLS rebuild, case 5's 30 s no-restore timeout and its `gpu-loss-timeout` removal, the toast (no toast primitive exists), and the `perf_sample` extension (needs an `OutputEvent` arm carrying drift — see Open Question 3). | Yes (additive) |
-| 14 | `multi-output: calibration tooling — test pattern + rotation offset` | `src/output/datasetMirror.ts` recognises the `__terraviz_calibration__` sentinel id and renders a procedural test pattern (8-step grayscale ramp at the equator, RGB color bars at lat ±30°, lat/lon graticule with color-coded equator + prime meridian, named anchor crosshairs, N/S pole labels, live resolution counter — ~80 LOC GLSL). `src/output/equirectRtt.ts` adds the `uRotationOffsetRad` longitude rotation applied before the camera-offset ray-march. `outputUI.ts` adds the per-output "Rotation offset (°)" numeric + slider and a "Calibration" submenu. Persisted config gains `rotationOffsetDeg`. See §3 "Calibration tooling". **Partially landed — 14a only.** The rotation offset is built end to end: `uRotationOffsetRad` and its TS mirror, `rotationOffsetDeg` through `OutputViewSettings` and the persisted config, the degrees→radians conversion in `projectView`, and the panel's slider-plus-number. **The test pattern is not built** — there is no `__terraviz_calibration__` path in `datasetMirror.ts` and no Calibration submenu, so an operator has nothing to align *against* yet and the rotation control is usable only over a loaded dataset. 14b is the remaining half, and it carries a design fork the plan's own "~80 LOC GLSL" pre-empts: glyphs (the N/S pole labels and the live resolution counter) are miserable in GLSL, so the geometry may want to stay procedural while the text arrives as a small canvas texture. Decide that before building. | Yes (additive) |
+| 14 | `multi-output: calibration tooling — test pattern + rotation offset` | `src/output/datasetMirror.ts` recognises the `__terraviz_calibration__` sentinel id and renders a procedural test pattern (8-step grayscale ramp at the equator, RGB color bars at lat ±30°, lat/lon graticule with color-coded equator + prime meridian, named anchor crosshairs, N/S pole labels, live resolution counter — ~80 LOC GLSL). `src/output/equirectRtt.ts` adds the `uRotationOffsetRad` longitude rotation applied before the camera-offset ray-march. `outputUI.ts` adds the per-output "Rotation offset (°)" numeric + slider and a "Calibration" submenu. Persisted config gains `rotationOffsetDeg`. See §3 "Calibration tooling". **Landed, in two slices, and the second is built differently from this row.** **14a** is the rotation offset end to end: `uRotationOffsetRad` and its TS mirror, `rotationOffsetDeg` through `OutputViewSettings` and the persisted config, the degrees→radians conversion in `projectView`, and the panel's slider-plus-number. **14b** is the test pattern, as `src/output/calibrationPattern.ts` — a **2:1 canvas installed in an ordinary overlay slot**, not the ~80 LOC of GLSL this row specifies, and a **per-output switch on the render-config channel**, not the `__terraviz_calibration__` sentinel dataset. Both departures are argued at the top of §3 "Calibration tooling": a shader pattern would bypass the very sampling path it is meant to prove, and a sentinel dataset would put the pattern on every output at once — plus on the control window's own globe, which is where the operator is reading the rotation they are turning. There is no "Calibration submenu"; it is one toggle sitting directly above the rotation control it is used with. The pattern is the one operator choice in the panel that deliberately does **not** persist. | Yes (additive) |
 | 15 | `multi-output: operator runbook` | `docs/MULTI_MONITOR_OPERATIONS.md` — the deployment half this plan has so far deferred, and which a spike showed is not optional. Covers: **checking which GPU the webview actually got** (the renderer string surfaced by commit 11's debug overlay) and the per-OS override for a hybrid-graphics machine, since the app's own `powerPreference` is inert and a silent landing on the iGPU is undiagnosable from logs; **measuring this machine's decoder budget** rather than trusting a constant, and entering it in the Outputs panel's budget field (commit 11); disabling screen savers and display sleep (Open Question 5's documented half); the kiosk autostart entry from §3.6; and what each Outputs-panel health badge means in front of an audience. No code. | **Yes** (docs) |
 
 **Backout plan.** Reverting commit 9 leaves all the plumbing in

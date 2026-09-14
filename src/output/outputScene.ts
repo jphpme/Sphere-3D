@@ -233,7 +233,17 @@ export interface OutputSceneOptions {
  */
 export interface OutputLayerInput {
   kind: 'image' | 'video'
-  element: HTMLImageElement | HTMLVideoElement
+  /**
+   * A canvas is accepted alongside the two media elements because rung
+   * 14b's calibration pattern is one, and the point of that pattern is
+   * that it rides the *same* slot a dataset does — through the bbox
+   * clipping, the `lonOrigin` shift and the flip — so that a pattern
+   * which lands right proves a dataset will. Three's `Texture` takes
+   * any of the three unchanged, so this costs the type and nothing
+   * else; `kind: 'image'` is what a canvas carries, since what the
+   * distinction selects is `Texture` versus a per-frame `VideoTexture`.
+   */
+  element: HTMLImageElement | HTMLVideoElement | HTMLCanvasElement
   overlay: DatasetOverlayOptions
   /**
    * The operator's palette / stretch / threshold, for a data-encoded

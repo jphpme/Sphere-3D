@@ -1018,6 +1018,16 @@ function buildRow(
     ),
   )
   item.appendChild(buildFramebufferPicker(mgr, record))
+  item.appendChild(
+    // Directly above the rotation offset, not beside the debug toggle
+    // it shares a channel with, because these two are used together:
+    // the pattern is what an operator turns the rotation *against*, so
+    // the switch that reveals the graticule sits over the control that
+    // moves it, in the order the job is done.
+    buildToggle(t('outputs.item.calibration'), record.render.calibration, next =>
+      mgr.setOutputRenderConfig(record.label, { calibration: next }),
+    ),
+  )
   item.appendChild(buildRotationOffset(mgr, record))
   return item
 }
@@ -1033,14 +1043,17 @@ function buildRow(
  * why it is persisted per output rather than being a session control,
  * and why two outputs on two spheres each carry their own.
  *
- * **What they align against is rung 14b and is not built yet.** The
- * plan pairs this control with a procedural calibration test pattern
- * behind a `__terraviz_calibration__` sentinel, which is what makes the
- * prime meridian visible on a sphere showing no dataset. Until that
- * lands this control is usable only over loaded content, so do not
- * write a docstring — or a label — that tells an operator to load a
- * pattern that does not exist. Caught in review, having done exactly
- * that.
+ * **What they align against is the toggle directly above** — rung 14b's
+ * calibration pattern, whose longitude scale turns with the sphere, so
+ * the operator reads the rotation off whichever label has reached the
+ * physical mark rather than off this field. That is the pairing, and it
+ * is why the two controls are adjacent.
+ *
+ * The pattern is a *per-output* switch on the render-config channel and
+ * this is a *per-output* view setting that persists, and the difference
+ * is the rule: what you calibrate persists, the act of calibrating does
+ * not. A rig that relaunches keeps its rotation and comes back showing
+ * data.
  *
  * **A slider and a number, both live**, because the two halves of the
  * job want different controls: finding the right rotation is a drag

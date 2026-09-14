@@ -27,6 +27,7 @@
  */
 
 import './output.css'
+import { CALIBRATION_OVERLAY, createCalibrationCache } from './calibrationPattern'
 import { createDatasetMirror } from './datasetMirror'
 import { OVERLAY_REFRESH_MS, createDebugOverlay, createFpsMeter } from './debugOverlay'
 import {
@@ -97,6 +98,23 @@ async function boot(): Promise<void> {
    */
   let readLinkHealth: () => LinkHealth = () => 'live'
 
+  /**
+   * Whether the calibration pattern is what is on the glass.
+   *
+   * Hoisted and defaulted for `readLinkHealth`'s reason — the HUD is
+   * mounted before the link exists and outlives a failed attach — and
+   * `false` is honest there, since a window with no manager has nobody
+   * to have turned it on.
+   *
+   * The HUD needs it because its `dataset` field answers *what is on
+   * the glass*, not what was mirrored, and calibration is the one state
+   * where the mirror still holds a dataset that is not being shown.
+   * Without this the HUD names a dataset over a test pattern, which is
+   * the precise thing its "mirror, not link" rule exists to prevent,
+   * arriving from the other side.
+   */
+  let readCalibration: () => boolean = () => false
+
   let gpu: string | null | undefined
   const gpuName = (): string | null => {
     if (gpu === undefined) gpu = scene.rendererName()
@@ -110,8 +128,11 @@ async function boot(): Promise<void> {
   const overlay = createDebugOverlay(() => ({
     // The mirror, not the link: what this window decoded, not what the
     // control window last said. During a load those differ, and the
-    // useful answer is what is on the glass.
-    datasetId: mirror.currentDataset()?.id ?? null,
+    // useful answer is what is on the glass — which is also why
+    // calibration wins over both.
+    datasetId: readCalibration()
+      ? (CALIBRATION_OVERLAY.datasetId ?? null)
+      : (mirror.currentDataset()?.id ?? null),
     driftS: lastSync?.driftS ?? null,
     syncKind: lastSync?.kind ?? null,
     fps,
@@ -149,6 +170,7 @@ async function boot(): Promise<void> {
     try {
       const link = await connectOutputLink(await createTauriLinkHost())
       readLinkHealth = () => link.linkHealth()
+      readCalibration = () => link.renderConfig().calibration
 
       // The manager cannot find this out any other way (rung 13, case
       // 5). Its other detectors all read an *absence* — a destroy with
@@ -203,12 +225,32 @@ async function boot(): Promise<void> {
        * an incoming dataset's bbox and palette over the outgoing
        * dataset's pixels for the length of a load.
        */
+      // The pattern's whole lifecycle — when it is rebuilt, when a
+      // failure is retried, why it is not thrown away when calibration
+      // goes off — lives in `calibrationPattern.ts`, where it is
+      // testable. What is left here is the substitution.
+      const calibrationCache = createCalibrationCache()
+      const calibrationLayer = (): OutputLayerInput | null => {
+        const canvas = calibrationCache.canvasFor(link.renderConfig().framebufferWidth)
+        return canvas ? { kind: 'image', element: canvas, overlay: CALIBRATION_OVERLAY } : null
+      }
+
       const recomposite = (): void => {
         const state = link.state()
         const media = mirror.current()
         const primary = mirror.currentDataset()
         const layers: OutputLayerInput[] = []
-        if (media && primary) {
+        // Instead of the mirrored dataset, never over it. A graticule
+        // composited on top of data leaves neither legible, and what is
+        // being checked here is geometry — so the pattern wants the
+        // sphere to itself. The mirror is untouched underneath: the
+        // decoder keeps running and keeps being steered, so turning
+        // calibration off puts the dataset back in step rather than
+        // reloading it.
+        const pattern = link.renderConfig().calibration ? calibrationLayer() : null
+        if (pattern) {
+          layers.push(pattern)
+        } else if (media && primary) {
           layers.push({
             kind: media.kind,
             element: media.element,
@@ -279,6 +321,15 @@ async function boot(): Promise<void> {
       const applyConfig = (config: OutputRenderConfig): void => {
         scene.setFramebufferWidth(config.framebufferWidth)
         overlay.setVisible(config.debugOverlay)
+        // After the width is applied, not before: `calibrationLayer()`
+        // reads the config's width to decide whether its cached canvas
+        // is still the right size, and a pattern rebuilt against the
+        // old rung would be replaced again on the very next
+        // recomposite. Unconditional because this runs only on an
+        // operator action, and `setLayers` no-ops on an identical
+        // element — so a config change that touched neither the width
+        // nor the toggle costs one array build.
+        recomposite()
         dirty = true
       }
       link.onRenderConfig(applyConfig)

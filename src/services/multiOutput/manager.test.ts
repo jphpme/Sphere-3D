@@ -578,7 +578,14 @@ describe('broadcast', () => {
     // do nothing until someone happens to pan — the same reason
     // `setOutputView` pushes.
     expect(configEmits(fake.emitted)).toEqual([
-      { label: 'output-1', config: { framebufferWidth: DEFAULT_FRAMEBUFFER_WIDTH, debugOverlay: true } },
+      {
+        label: 'output-1',
+        config: {
+          framebufferWidth: DEFAULT_FRAMEBUFFER_WIDTH,
+          debugOverlay: true,
+          calibration: false,
+        },
+      },
     ])
     // And nothing on the state channel: a window setting is not a globe
     // change, so it must not consume a sequence number.

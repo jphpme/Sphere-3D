@@ -10,6 +10,7 @@ import {
   defaultOutputConfig,
   matchMonitorIndex,
   normalizeRotationOffset,
+  renderConfigFrom,
   viewSettingsFrom,
   OUTPUT_CONFIG_STORAGE_KEY,
   OUTPUT_CONFIG_VERSION,
@@ -303,7 +304,7 @@ describe('toPersistedOutput', () => {
       monitor: live,
       mode: 'sos-equirect',
       view: { trackCamera: false, split: true, rotationOffsetDeg: 0 },
-      render: { framebufferWidth: 8192, debugOverlay: true },
+      render: { framebufferWidth: 8192, debugOverlay: true, calibration: true },
     })
 
     live.position.x = 9999
@@ -444,5 +445,44 @@ describe('viewSettingsFrom (rung 14)', () => {
         persisted({ trackOperatorCamera: false, split: true, rotationOffsetDeg: 42.5 }),
       ),
     ).toEqual({ trackCamera: false, split: true, rotationOffsetDeg: 42.5 })
+  })
+})
+
+describe('renderConfigFrom (rung 14b)', () => {
+  it('restores the window settings that were stored', () => {
+    expect(renderConfigFrom(persisted({ framebufferWidth: 8192, debugOverlay: true }))).toEqual({
+      framebufferWidth: 8192,
+      debugOverlay: true,
+      calibration: false,
+    })
+  })
+
+  it('never brings the calibration pattern back, whatever was stored', () => {
+    // What you calibrate persists; the act of calibrating does not.
+    // The HUD beside it is an overlay *on* the content, so an
+    // installation that restored with it on still shows its data. The
+    // pattern *replaces* the content, so restoring it on would put a
+    // graticule in front of an audience with no data behind it — the
+    // difference between a setting that came back and an installation
+    // that did not.
+    //
+    // Written against a raw blob with the field forced in, not against
+    // `PersistedOutput`, because the type does not have it — which is
+    // the mechanism, and this is the behaviour it buys.
+    const stored = { ...persisted({}), calibration: true } as unknown as Parameters<
+      typeof renderConfigFrom
+    >[0]
+    expect(renderConfigFrom(stored).calibration).toBe(false)
+  })
+
+  it('keeps the pattern out of what gets written, too', () => {
+    const written = toPersistedOutput({
+      label: 'output-1',
+      monitor: monitor({}),
+      mode: 'sos-equirect',
+      view: { trackCamera: true, split: false, rotationOffsetDeg: 0 },
+      render: { framebufferWidth: 4096, debugOverlay: false, calibration: true },
+    })
+    expect('calibration' in written).toBe(false)
   })
 })

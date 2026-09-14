@@ -133,6 +133,25 @@ function painted(): boolean {
 const $ = <T extends Element>(sel: string): T | null => document.querySelector<T>(sel)
 const $$ = (sel: string): Element[] => [...document.querySelectorAll(sel)]
 
+/**
+ * A row's switch, found by its label rather than its position.
+ *
+ * Index-based lookup was here first and its own comment predicted how
+ * it would fail — "an unscoped index would silently start meaning a
+ * different control the next time a section moves" — which is exactly
+ * what rung 14b's fourth toggle did. Scoping to the row was not the
+ * fix; the ordinal was. A test asserting on the *debug overlay* switch
+ * should say so, and then adding a control above it is not a test
+ * change at all.
+ */
+const toggle = (labelText: string): HTMLInputElement => {
+  const found = $$('.output-item .output-toggle').find(
+    el => el.querySelector('.output-toggle-label')?.textContent === labelText,
+  )
+  if (!found) throw new Error(`no toggle labelled "${labelText}"`)
+  return found.querySelector('.output-toggle-box') as HTMLInputElement
+}
+
 beforeEach(() => {
   // The SPA's app-wide live region (`src/index.html`). The panel
   // announces health transitions through it rather than through a
@@ -357,13 +376,7 @@ describe('the Outputs panel', () => {
     $<HTMLButtonElement>('.output-add-btn')!.click()
     await until(() => $('.output-item') !== null, 'the new output row')
 
-    // Scoped to the row: the launch opt-in wears the same class, and an
-    // unscoped index would silently start meaning a different control
-    // the next time a section moves.
-    const boxes = $$('.output-item .output-toggle-box') as HTMLInputElement[]
-    // Three switches on a row now, and the HUD is the third.
-    expect(boxes).toHaveLength(3)
-    const overlay = boxes[2]
+    const overlay = toggle('Debug overlay (drawn on the output)')
     expect(overlay.checked).toBe(false)
 
     overlay.checked = true
@@ -379,6 +392,49 @@ describe('the Outputs panel', () => {
     expect(raw.setOutputView).not.toHaveBeenCalled()
   })
 
+  it('pushes the calibration pattern on the config channel, beside the debug HUD', async () => {
+    const { mgr, raw } = fakeManager()
+    mount(mgr)
+    await until(painted, 'the panel body')
+    $<HTMLButtonElement>('.output-add-btn')!.click()
+    await until(() => $('.output-item') !== null, 'the new output row')
+
+    const pattern = toggle('Calibration pattern')
+    expect(pattern.checked).toBe(false)
+
+    pattern.checked = true
+    pattern.dispatchEvent(new Event('change'))
+
+    await until(() => raw.setOutputRenderConfig.mock.calls.length === 1, 'the config push')
+    expect(raw.setOutputRenderConfig).toHaveBeenCalledWith('output-1', { calibration: true })
+    // The same reason the debug HUD goes here: it is a property of one
+    // window, and routing it through the view would put it inside the
+    // sequence the aggregator diffs — and would put a test pattern on
+    // every output when the operator is aligning one sphere.
+    expect(raw.setOutputView).not.toHaveBeenCalled()
+  })
+
+  it('sits directly above the rotation it is used with', async () => {
+    const { mgr } = fakeManager()
+    mount(mgr)
+    await until(painted, 'the panel body')
+    $<HTMLButtonElement>('.output-add-btn')!.click()
+    await until(() => $('.output-item') !== null, 'the new output row')
+
+    // Not decoration: the pattern is what the rotation is turned
+    // *against*, and an operator doing that job reaches for the two in
+    // this order. Pinned so a later control cannot quietly land between
+    // them.
+    const row = $('.output-item')!
+    const kids = [...row.children]
+    const pattern = kids.findIndex(
+      el => el.querySelector('.output-toggle-label')?.textContent === 'Calibration pattern',
+    )
+    const rotation = kids.findIndex(el => el.querySelector('.output-rotation-number') !== null)
+    expect(pattern).toBeGreaterThan(-1)
+    expect(rotation).toBe(pattern + 1)
+  })
+
   it('puts the debug checkbox back when the output refuses it', async () => {
     const { mgr, raw } = fakeManager()
     raw.setOutputRenderConfig.mockRejectedValue(new Error('output is gone'))
@@ -388,7 +444,7 @@ describe('the Outputs panel', () => {
     $<HTMLButtonElement>('.output-add-btn')!.click()
     await until(() => $('.output-item') !== null, 'the new output row')
 
-    const overlay = ($$('.output-item .output-toggle-box') as HTMLInputElement[])[2]
+    const overlay = toggle('Debug overlay (drawn on the output)')
     overlay.checked = true
     overlay.dispatchEvent(new Event('change'))
 
@@ -495,7 +551,8 @@ describe('the Outputs panel', () => {
     $<HTMLButtonElement>('.output-add-btn')!.click()
     await until(() => $('.output-item') !== null, 'the new output row')
 
-    const [track, split] = $$('.output-toggle-box') as HTMLInputElement[]
+    const track = toggle('Track operator camera')
+    const split = toggle('Split sphere')
     expect(track.checked).toBe(true)
     expect(split.checked).toBe(false)
 
@@ -519,7 +576,7 @@ describe('the Outputs panel', () => {
     $<HTMLButtonElement>('.output-add-btn')!.click()
     await until(() => $('.output-item') !== null, 'the new output row')
 
-    const split = ($$('.output-toggle-box') as HTMLInputElement[])[1]
+    const split = toggle('Split sphere')
     split.checked = true
     split.dispatchEvent(new Event('change'))
 

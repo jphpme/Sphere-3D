@@ -528,6 +528,7 @@
   "outputs.decoders.spent": "No decoders left. Close a globe panel or an output, or raise the budget.",
   "outputs.decoders.used": "{used} of {budget} video decoders in use",
   "outputs.intro": "Send a projection-corrected view of the live globe to another display — a Science On a Sphere projector, a dome, or a second monitor.",
+  "outputs.item.calibration": "Calibration pattern",
   "outputs.item.debugOverlay": "Debug overlay (drawn on the output)",
   "outputs.item.framebuffer": "Framebuffer",
   "outputs.item.framebufferOption": "{width}×{height}",

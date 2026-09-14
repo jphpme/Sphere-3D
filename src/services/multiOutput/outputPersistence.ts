@@ -374,9 +374,30 @@ export function toPersistedOutput(
   }
 }
 
-/** The render settings a restored output comes back with. */
+/**
+ * The render settings a restored output comes back with.
+ *
+ * **`calibration` is absent from `PersistedOutput` on purpose, and
+ * comes back off.** The rule is that what you calibrate persists and
+ * the act of calibrating does not — `rotationOffsetDeg` is a property
+ * of the room and must survive a relaunch, while a test pattern is a
+ * property of the afternoon you spent aligning the rig.
+ *
+ * It is the one operator choice here that does not persist, which makes
+ * it worth separating from `debugOverlay` beside it. The HUD is an
+ * overlay *on* the content, so an installation that restored with it on
+ * still shows its data with a small box in a corner: self-announcing
+ * and degraded, but working. The pattern *replaces* the content, so an
+ * installation that restored with it on shows no data at all — which is
+ * the difference between a setting that came back and an installation
+ * that did not.
+ */
 export function renderConfigFrom(output: PersistedOutput): OutputRenderConfig {
-  return { framebufferWidth: output.framebufferWidth, debugOverlay: output.debugOverlay }
+  return {
+    framebufferWidth: output.framebufferWidth,
+    debugOverlay: output.debugOverlay,
+    calibration: false,
+  }
 }
 
 /**
