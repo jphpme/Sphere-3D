@@ -84,6 +84,7 @@ import {
   parseDecoderBudget,
   renderConfigFrom,
   toPersistedOutput,
+  viewSettingsFrom,
   type OutputConfigStore,
 } from './outputPersistence'
 import {
@@ -838,7 +839,7 @@ export class MultiOutputManager {
       const record: OutputRecord = {
         label,
         mode: config.mode,
-        view: { trackCamera: config.trackOperatorCamera, split: config.split },
+        view: viewSettingsFrom(config),
         render: renderConfigFrom(config),
         monitor: monitors[index],
         // `false` until it answers, which is what the timeout below
@@ -977,7 +978,7 @@ export class MultiOutputManager {
             monitors[index],
             index,
             output.mode,
-            { trackCamera: output.trackOperatorCamera, split: output.split },
+            viewSettingsFrom(output),
             renderConfigFrom(output),
           ),
         )

@@ -544,6 +544,7 @@
   "outputs.item.meta": "{width}×{height} · {mode}",
   "outputs.item.remove": "Remove",
   "outputs.item.removeAria": "Remove the output on {monitor}",
+  "outputs.item.rotationOffset": "Rotation offset (°)",
   "outputs.item.split": "Split sphere",
   "outputs.item.trackCamera": "Track operator camera",
   "outputs.list.empty": "No outputs yet.",

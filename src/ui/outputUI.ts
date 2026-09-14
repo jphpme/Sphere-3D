@@ -1006,7 +1006,113 @@ function buildRow(
     ),
   )
   item.appendChild(buildFramebufferPicker(mgr, record))
+  item.appendChild(buildRotationOffset(mgr, record))
   return item
+}
+
+/**
+ * The per-output rotation offset (rung 14).
+ *
+ * **A property of the room, not of the session.** An LED sphere is a
+ * physical object whose north-pole pin may not align with celestial
+ * north, or whose owner wants the prime meridian facing the main
+ * entrance. The operator loads the calibration pattern, turns this
+ * until the prime meridian lands where the building needs it, and never
+ * touches it again — which is why it is persisted per output rather
+ * than being a session control, and why two outputs on two spheres each
+ * carry their own.
+ *
+ * **A slider and a number, both live**, because the two halves of the
+ * job want different controls: finding the right rotation is a drag
+ * while watching the sphere, and reproducing a known one next
+ * installation is typing 137.5. They write through the same commit, so
+ * neither can report a value the output is not running at.
+ *
+ * Committed on `input` rather than `change`, unlike the framebuffer
+ * picker beside it. That is the point of the control: the operator is
+ * looking at the sphere, not at this panel, and a rotation that only
+ * lands on mouse-up makes them drag-release-look-drag instead of just
+ * turning it. It costs a uniform write per event — `setParams` does not
+ * rebuild the shader for a scalar — so the live path is the cheap one.
+ */
+function buildRotationOffset(mgr: OutputPanelManager, record: OutputRecord): HTMLElement {
+  const field = document.createElement('div')
+  field.className = 'output-field'
+
+  const text = document.createElement('label')
+  text.className = 'output-field-label'
+  text.textContent = t('outputs.item.rotationOffset')
+
+  const slider = document.createElement('input')
+  slider.type = 'range'
+  slider.className = 'output-field-slider'
+  slider.min = '0'
+  // 359.9, not 360: the two ends are the same rotation, and an operator
+  // who drags to the stop should not land on a value that persists as 0
+  // and reads back at the other end of the track next launch.
+  slider.max = '359.9'
+  slider.step = '0.1'
+
+  const number = document.createElement('input')
+  number.type = 'number'
+  // Its own class beside the shared one: `.output-field-number` is
+  // also the decoder-budget field, and this one is wider and lives
+  // in a row a test has to be able to name.
+  number.className = 'output-field-number output-rotation-number'
+  number.min = '0'
+  number.max = '359.9'
+  number.step = '0.1'
+
+  // Labelled through the same `<label>` the slider is, so the number
+  // input is not an unnamed spinner to a screen reader. The unit is in
+  // the label text rather than repeated on each control.
+  const id = `output-rotation-${record.label}`
+  slider.id = id
+  text.htmlFor = id
+  number.setAttribute('aria-label', t('outputs.item.rotationOffset'))
+
+  let applied = record.view.rotationOffsetDeg
+  const show = (deg: number): void => {
+    slider.value = String(deg)
+    number.value = String(deg)
+  }
+  show(applied)
+
+  const commit = (raw: string): void => {
+    // The empty check is separate from the finite one and both are
+    // needed, which is not obvious and is why it is spelled out:
+    // `Number('')` is **0**, not `NaN`. A `type="number"` input reports
+    // an empty string while the operator is mid-edit — clearing the
+    // field to retype it — so a lone `Number.isFinite` guard would
+    // read that as a deliberate zero and spin the picture back to the
+    // prime meridian between keystrokes. The finite check still earns
+    // its place: a half-typed `-` does parse as NaN.
+    if (raw.trim() === '') return
+    const parsed = Number(raw)
+    if (!Number.isFinite(parsed)) return
+    const next = ((parsed % 360) + 360) % 360
+    show(next)
+    void mgr
+      .setOutputView(record.label, { rotationOffsetDeg: next })
+      .then(() => {
+        applied = next
+      })
+      .catch(err => {
+        // Same posture as every other control here: one that reports a
+        // state the output is not in is worse than one that refuses.
+        logger.warn('[outputUI] rotation offset change failed:', err)
+        show(applied)
+      })
+  }
+
+  slider.addEventListener('input', () => commit(slider.value))
+  // `change` on the number, not `input`: committing per keystroke turns
+  // "137" into a rotation to 1, then 13, then 137, which on a projector
+  // is the picture spinning while someone types.
+  number.addEventListener('change', () => commit(number.value))
+
+  field.append(text, slider, number)
+  return field
 }
 
 /**

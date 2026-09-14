@@ -33,7 +33,7 @@ function record(label: string, on: OutputMonitor): OutputRecord {
   return {
     label,
     mode: 'sos-equirect',
-    view: { trackCamera: true, split: false },
+    view: { trackCamera: true, split: false, rotationOffsetDeg: 0 },
     render: defaultRenderConfig(),
     monitor: on,
     ready: false,
@@ -1026,5 +1026,84 @@ describe('the position diagram', () => {
     // The display is still listed: it can be picked even if it cannot
     // be drawn to scale.
     expect($$('.output-monitor-select option')).toHaveLength(1)
+  })
+})
+
+describe('the rotation offset control (rung 14)', () => {
+  const slider = () => $<HTMLInputElement>('.output-field-slider')
+  const number = () => $<HTMLInputElement>('.output-rotation-number')
+
+  const withOutput = async () => {
+    const fake = fakeManager()
+    mount(fake.mgr)
+    await until(painted, 'the panel to settle')
+    await fake.mgr.addOutput({ monitorIndex: 0 })
+    fake.notifyChanged()
+    await until(() => slider() !== null, 'the rotation control')
+    return fake
+  }
+
+  it('offers a slider and a number showing the same value', async () => {
+    // Two controls for one job: finding the rotation is a drag while
+    // watching the sphere, reproducing a known one is typing it.
+    const fake = await withOutput()
+    fake.records[0].view.rotationOffsetDeg = 0
+
+    expect(slider()!.value).toBe('0')
+    expect(number()!.value).toBe('0')
+  })
+
+  it('commits a drag live, because the operator is looking at the sphere', async () => {
+    // `input`, not `change`. A rotation that only lands on mouse-up
+    // makes calibration a drag-release-look loop instead of a turn.
+    const fake = await withOutput()
+
+    slider()!.value = '90'
+    slider()!.dispatchEvent(new Event('input'))
+
+    await until(() => fake.raw.setOutputView.mock.calls.length > 0, 'the commit')
+    expect(fake.raw.setOutputView).toHaveBeenCalledWith('output-1', { rotationOffsetDeg: 90 })
+    // And the other control follows, so neither can show a value the
+    // output is not running at.
+    expect(number()!.value).toBe('90')
+  })
+
+  it('wraps a typed value into range instead of rejecting it', async () => {
+    const fake = await withOutput()
+
+    number()!.value = '370'
+    number()!.dispatchEvent(new Event('change'))
+
+    await until(() => fake.raw.setOutputView.mock.calls.length > 0, 'the commit')
+    expect(fake.raw.setOutputView).toHaveBeenCalledWith('output-1', { rotationOffsetDeg: 10 })
+    expect(slider()!.value).toBe('10')
+  })
+
+  it('ignores a half-typed value rather than snapping the sphere to zero', async () => {
+    // `Number('')` is 0, not NaN — so a lone `Number.isFinite` guard
+    // reads a field cleared for retyping as a deliberate zero and spins
+    // the picture back to the prime meridian between keystrokes. This
+    // test failed against exactly that, on the first version.
+    const fake = await withOutput()
+
+    for (const halfTyped of ['', '   ', '-']) {
+      number()!.value = halfTyped
+      number()!.dispatchEvent(new Event('change'))
+    }
+
+    expect(fake.raw.setOutputView).not.toHaveBeenCalled()
+  })
+
+  it('puts the value back when the commit fails', async () => {
+    // Same posture as every other control here: one that reports a
+    // state the output is not in is worse than one that refuses.
+    const fake = await withOutput()
+    fake.raw.setOutputView.mockRejectedValueOnce(new Error('no such window'))
+
+    slider()!.value = '120'
+    slider()!.dispatchEvent(new Event('input'))
+
+    await until(() => slider()!.value === '0', 'the value to be put back')
+    expect(number()!.value).toBe('0')
   })
 })

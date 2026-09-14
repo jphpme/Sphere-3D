@@ -172,7 +172,11 @@ export function outputInitialState(mode: OutputMode = OUTPUT_MODE): OutputGlobeS
       dayNight: true,
       // Copied, not aliased: `IDENTITY_PARAMS` is module-scoped and a
       // later in-place write would edit the shader's own constant.
-      params: { cameraOffset: { ...IDENTITY_PARAMS.cameraOffset }, split: IDENTITY_PARAMS.split },
+      params: {
+        cameraOffset: { ...IDENTITY_PARAMS.cameraOffset },
+        split: IDENTITY_PARAMS.split,
+        rotationOffsetRad: IDENTITY_PARAMS.rotationOffsetRad,
+      },
     },
   }
 }

@@ -1227,6 +1227,7 @@ describe('persistence', () => {
         mode: 'sos-equirect',
         trackOperatorCamera: true,
         split: false,
+        rotationOffsetDeg: 0,
         framebufferWidth: DEFAULT_FRAMEBUFFER_WIDTH,
         debugOverlay: false,
       },
@@ -1415,6 +1416,7 @@ const persistedOn = (label: string, monitor: OutputMonitor) => ({
   mode: 'sos-equirect' as const,
   trackOperatorCamera: true,
   split: false,
+  rotationOffsetDeg: 0,
   framebufferWidth: DEFAULT_FRAMEBUFFER_WIDTH,
   debugOverlay: false,
 })
@@ -1459,7 +1461,7 @@ describe('restoreOutputs', () => {
     const restored = await makeManager(fake.host, { store }).restoreOutputs()
 
     expect(restored).toHaveLength(1)
-    expect(restored[0].view).toEqual({ trackCamera: false, split: true })
+    expect(restored[0].view).toEqual({ trackCamera: false, split: true, rotationOffsetDeg: 0 })
     // The same spawn sequence a fresh output goes through — the order
     // is the correctness, so restore must not have its own copy of it.
     expect(fake.calls).toEqual([
@@ -1941,6 +1943,7 @@ describe('telemetry', () => {
           mode: 'sos-equirect' as const,
           trackOperatorCamera: true,
           split: false,
+          rotationOffsetDeg: 0,
           framebufferWidth: 4096,
           debugOverlay: false,
         },
@@ -2116,7 +2119,7 @@ describe('adoptOrphanedOutputs', () => {
 
     expect(adopted).toHaveLength(1)
     expect(adopted[0].label).toBe('output-1')
-    expect(adopted[0].view).toEqual({ trackCamera: false, split: true })
+    expect(adopted[0].view).toEqual({ trackCamera: false, split: true, rotationOffsetDeg: 0 })
     expect(adopted[0].monitor).toEqual(MONITORS[1])
     // No window was created: the whole point is that the imagery on the
     // projector never went away.

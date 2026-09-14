@@ -9,6 +9,8 @@ import {
   createOutputConfigStore,
   defaultOutputConfig,
   matchMonitorIndex,
+  normalizeRotationOffset,
+  viewSettingsFrom,
   OUTPUT_CONFIG_STORAGE_KEY,
   OUTPUT_CONFIG_VERSION,
   parseOutputConfig,
@@ -35,6 +37,7 @@ function persisted(over: Partial<PersistedOutput> = {}): PersistedOutput {
     mode: 'sos-equirect',
     trackOperatorCamera: true,
     split: false,
+    rotationOffsetDeg: 0,
     framebufferWidth: DEFAULT_FRAMEBUFFER_WIDTH,
     debugOverlay: false,
     ...over,
@@ -299,7 +302,7 @@ describe('toPersistedOutput', () => {
       label: 'output-1',
       monitor: live,
       mode: 'sos-equirect',
-      view: { trackCamera: false, split: true },
+      view: { trackCamera: false, split: true, rotationOffsetDeg: 0 },
       render: { framebufferWidth: 8192, debugOverlay: true },
     })
 
@@ -365,5 +368,81 @@ describe('createOutputConfigStore', () => {
     }
 
     expect(createOutputConfigStore(storage).read()).toEqual(defaultOutputConfig())
+  })
+})
+
+describe('normalizeRotationOffset (rung 14)', () => {
+  it('defaults a config written before rung 14 to no rotation', () => {
+    // The rung-11 rule: a missing key must not cost an operator their
+    // outputs on the launch after an update.
+    expect(normalizeRotationOffset(undefined)).toBe(0)
+    expect(normalizeRotationOffset(null)).toBe(0)
+    expect(normalizeRotationOffset('90')).toBe(0)
+    expect(normalizeRotationOffset(Number.NaN)).toBe(0)
+    expect(normalizeRotationOffset(Number.POSITIVE_INFINITY)).toBe(0)
+  })
+
+  it('keeps a value already in range exactly', () => {
+    expect(normalizeRotationOffset(0)).toBe(0)
+    expect(normalizeRotationOffset(137.5)).toBe(137.5)
+    expect(normalizeRotationOffset(359.9)).toBe(359.9)
+  })
+
+  it('wraps rather than rejecting, unlike the framebuffer rung', () => {
+    // The difference is whether the stored value means anything. A
+    // width off the ladder is meaningless and gets replaced; 370° aims
+    // the sphere exactly where 10° does, so discarding it would
+    // silently un-calibrate an installation whose operator nudged past
+    // a full turn.
+    expect(normalizeRotationOffset(370)).toBeCloseTo(10, 10)
+    expect(normalizeRotationOffset(360)).toBe(0)
+    expect(normalizeRotationOffset(-20)).toBeCloseTo(340, 10)
+    expect(normalizeRotationOffset(-400)).toBeCloseTo(320, 10)
+  })
+
+  it('round-trips through write and load', () => {
+    const storage = memoryStorage()
+    const store = createOutputConfigStore(storage)
+    store.write({ ...defaultOutputConfig(), outputs: [persisted({ rotationOffsetDeg: 42.5 })] })
+
+    expect(createOutputConfigStore(storage).read().outputs[0].rotationOffsetDeg).toBe(42.5)
+  })
+
+  it('survives an entry that predates the field', () => {
+    // The whole entry must come back, not be dropped — one missing key
+    // costing an installation its four projectors is the failure this
+    // parse is written against.
+    const raw = { ...persisted() } as Record<string, unknown>
+    delete raw.rotationOffsetDeg
+    const storage = memoryStorage()
+    storage.setItem(
+      OUTPUT_CONFIG_STORAGE_KEY,
+      JSON.stringify({
+        version: OUTPUT_CONFIG_VERSION,
+        autoRestoreOnLaunch: false,
+        outputs: [raw],
+      }),
+    )
+
+    const loaded = createOutputConfigStore(storage).read()
+
+    expect(loaded.outputs).toHaveLength(1)
+    expect(loaded.outputs[0].rotationOffsetDeg).toBe(0)
+  })
+})
+
+describe('viewSettingsFrom (rung 14)', () => {
+  it('carries every view field a restore needs', () => {
+    // Extracted because the mapping was written out twice — once in
+    // `restoreOutputs`, once in `adoptOrphanedOutputs`. An operator who
+    // calibrates a sphere and then reloads the control window would
+    // otherwise get their rotation back from one path and not the
+    // other, and the symptom is a picture turned a few degrees with
+    // nothing on screen to explain it.
+    expect(
+      viewSettingsFrom(
+        persisted({ trackOperatorCamera: false, split: true, rotationOffsetDeg: 42.5 }),
+      ),
+    ).toEqual({ trackCamera: false, split: true, rotationOffsetDeg: 42.5 })
   })
 })

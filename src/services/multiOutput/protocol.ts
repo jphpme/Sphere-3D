@@ -269,6 +269,21 @@ export interface MirroredEquirectParams {
   /** Mirror the area of focus to the antipodal hemisphere — matches
    *  existing SOS sphere-split behaviour. Per-output. */
   split: boolean
+  /**
+   * Per-installation longitude rotation, **radians** (rung 14).
+   *
+   * Per-output rather than shared, and that is the whole reason it is
+   * in `params`: two spheres in two rooms are mounted differently, and
+   * a globally-broadcast offset would turn both when the operator
+   * aligns one.
+   *
+   * Radians on the wire though the operator types degrees, because
+   * this object *is* `equirectRtt`'s `EquirectParams` — a narrowed
+   * output hands it straight to `setParams` — so a degree value here
+   * would need converting inside the output too, which is a second
+   * conversion free to disagree with `projectView`'s.
+   */
+  rotationOffsetRad: number
 }
 
 /** What every arm of `MirroredView` carries, whatever its geometry. */

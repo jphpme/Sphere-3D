@@ -453,7 +453,7 @@ describe('the sphere texture binding', () => {
 
     it('keeps the projection across a recompile', async () => {
       const { three, scene } = await build()
-      scene.setParams({ cameraOffset: { x: 0.4, y: 0, z: 0 }, split: true })
+      scene.setParams({ cameraOffset: { x: 0.4, y: 0, z: 0 }, split: true, rotationOffsetRad: 0 })
 
       scene.setLayers([layer()])
 

@@ -87,6 +87,16 @@ export interface PersistedOutput {
   trackOperatorCamera: boolean
   split: boolean
   /**
+   * Per-installation longitude rotation, degrees in `[0, 360)`
+   * (rung 14).
+   *
+   * The one field here that is a property of the *room* rather than of
+   * the session: a sphere's mounting does not change between launches,
+   * so an operator calibrates once and this is what stops them doing
+   * it again every morning.
+   */
+  rotationOffsetDeg: number
+  /**
    * This output's render settings (rung 11).
    *
    * Both are the operator's explicit choice, so both come back — the
@@ -249,6 +259,12 @@ function parseOutput(entry: unknown): PersistedOutput | null {
     mode,
     trackOperatorCamera: entry.trackOperatorCamera !== false,
     split: entry.split === true,
+    // Normalised, not merely defaulted. A stored value outside one
+    // turn is not wrong — 370 and 10 aim the sphere identically — but
+    // the panel's slider has a range, and showing a number it cannot
+    // represent is the same "two numbers, no way to tell which is
+    // running" failure the framebuffer rung is narrowed against.
+    rotationOffsetDeg: normalizeRotationOffset(entry.rotationOffsetDeg),
     // Defaulted rather than required: an entry written before rung 11
     // has neither key, and dropping it would cost an operator their
     // outputs on the launch after an update.
@@ -263,6 +279,27 @@ function parseOutput(entry: unknown): PersistedOutput | null {
       : DEFAULT_FRAMEBUFFER_WIDTH,
     debugOverlay: entry.debugOverlay === true,
   }
+}
+
+/**
+ * A stored rotation offset, folded into `[0, 360)`.
+ *
+ * Absent, non-finite or non-numeric resolves to `0` — a config written
+ * before rung 14 has no key at all, and dropping the whole entry for
+ * that would cost an operator their outputs on the launch after an
+ * update (the rule rung 11's two fields already follow).
+ *
+ * A finite value is **wrapped rather than rejected**, and that is the
+ * difference from `isFramebufferWidth` above. A framebuffer width off
+ * the ladder is meaningless and gets replaced; 370° is perfectly
+ * meaningful and aims the sphere exactly where 10° does, so throwing it
+ * away would silently un-calibrate an installation whose operator
+ * nudged past a full turn. `-20` wraps to `340` for the same reason.
+ */
+export function normalizeRotationOffset(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 0
+  const wrapped = value % 360
+  return wrapped < 0 ? wrapped + 360 : wrapped
 }
 
 /** Whether a stored value names a framebuffer rung this build offers. */
@@ -331,6 +368,7 @@ export function toPersistedOutput(
     mode,
     trackOperatorCamera: view.trackCamera,
     split: view.split,
+    rotationOffsetDeg: view.rotationOffsetDeg,
     framebufferWidth: render.framebufferWidth,
     debugOverlay: render.debugOverlay,
   }
@@ -339,6 +377,28 @@ export function toPersistedOutput(
 /** The render settings a restored output comes back with. */
 export function renderConfigFrom(output: PersistedOutput): OutputRenderConfig {
   return { framebufferWidth: output.framebufferWidth, debugOverlay: output.debugOverlay }
+}
+
+/**
+ * The view settings a restored or adopted output comes back with.
+ *
+ * Extracted at rung 14 because the mapping was written out twice — once
+ * in `restoreOutputs`, once in `adoptOrphanedOutputs` — and a third
+ * field is what made that a drift risk rather than a repetition. The
+ * two paths must agree by construction: an operator who calibrates a
+ * sphere and then reloads the control window would otherwise get their
+ * rotation back from one path and not the other, and the symptom is a
+ * picture turned a few degrees on a projector, which nothing on screen
+ * would explain.
+ *
+ * Paired with `renderConfigFrom` above for the same reason it exists.
+ */
+export function viewSettingsFrom(output: PersistedOutput): OutputViewSettings {
+  return {
+    trackCamera: output.trackOperatorCamera,
+    split: output.split,
+    rotationOffsetDeg: output.rotationOffsetDeg,
+  }
 }
 
 /**

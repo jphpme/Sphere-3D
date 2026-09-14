@@ -221,7 +221,7 @@ describe('the store: the mode check', () => {
     const view = {
       mode: OUTPUT_MODE,
       dayNight: false,
-      params: { cameraOffset: { x: 0.5, y: 0, z: 0 }, split: true },
+      params: { cameraOffset: { x: 0.5, y: 0, z: 0 }, split: true, rotationOffsetRad: 0 },
     }
 
     expect(store.accept(diff(1, { view })).changed).toEqual(['view'])

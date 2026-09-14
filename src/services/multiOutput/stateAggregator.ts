@@ -140,11 +140,28 @@ export interface OutputViewSettings {
   /** Mirror the area of focus to the antipodal hemisphere.
    *  `sos-equirect` only — see `MirroredEquirectParams`. */
   split: boolean
+  /**
+   * Per-installation longitude rotation, **degrees** in `[0, 360)`
+   * (rung 14).
+   *
+   * Degrees here and radians in `MirroredEquirectParams`, because this
+   * type is what the operator edits and what gets persisted — the
+   * number they type into the panel and read back next launch — while
+   * the params object is what the shader is handed. `projectView` is
+   * the single conversion, the same shape `camera` → `cameraOffset`
+   * already has.
+   *
+   * Flat beside `split` rather than grouped, for the reason that type's
+   * docstring gives: this is persisted, so regrouping would be a schema
+   * change that resets every operator's saved outputs.
+   */
+  rotationOffsetDeg: number
 }
 
 export const DEFAULT_VIEW_SETTINGS: OutputViewSettings = {
   trackCamera: true,
   split: false,
+  rotationOffsetDeg: 0,
 }
 
 /**
@@ -192,6 +209,14 @@ export function projectView(
             ? cameraOffsetForCamera(shared.camera.lat, shared.camera.lon, shared.camera.zoom)
             : { ...CENTRED_CAMERA },
           split: settings.split,
+          // The one place degrees become radians. A non-finite stored
+          // value resolves to no rotation rather than reaching the
+          // shader as a NaN longitude, which would make every ray miss
+          // — the same guard `operatorCameraFrom` applies to a camera
+          // MapLibre reported as NaN.
+          rotationOffsetRad: Number.isFinite(settings.rotationOffsetDeg)
+            ? (settings.rotationOffsetDeg * Math.PI) / 180
+            : 0,
         },
       }
     default:

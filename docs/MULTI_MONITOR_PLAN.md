@@ -2649,7 +2649,7 @@ fragment shader (~80 lines of GLSL). No `<video>`, no HLS,
 no network. The pattern recomputes only when
 `framebufferSize` changes.
 
-#### 2. Per-output rotation offset
+#### 2. Per-output rotation offset — **landed**
 
 LED spheres are physical objects. Some installations
 mechanically rotate the sphere relative to canonical 0°
@@ -2663,11 +2663,24 @@ every longitude lookup in the equirect RTT shader before
 the camera-offset math runs. Operationally:
 
 ```glsl
-// In equirectRtt.frag — applied before the cameraOffset ray-march.
-float lon = (uv.x - 0.5) * 6.2831853;          // [-π, π]
-lon = mod(lon + uRotationOffsetRad, 6.2831853); // shift, wrap
-// ...continue with normal cameraOffset ray-march from lon, lat
+// In equirectRtt.frag — after the split fold, before the ray-march.
+float u   = uSplit ? fract(vUv.x * 2.0) : vUv.x;
+float lon = (u - 0.5) * TWO_PI - uRotationOffsetRad;
+// ...continue with the normal cameraOffset ray-march from lon, lat
 ```
+
+**Two corrections to the snippet this replaces**, both found building
+it:
+
+- It rotated `uv.x` **before** the split fold. `foldSplitU` is periodic
+  in U with period ½, so a 180° offset would have been a *no-op* — on
+  exactly the installations most likely to be running split mode. The
+  rotation goes on the longitude the fold produced, which turns both
+  copies together.
+- It ended `mod(lon + offset, TWO_PI)`. That is dead arithmetic: the
+  only consumers are `cos` and `sin`, and the offset is bounded to one
+  turn, so there is no range to normalise and no precision to protect.
+  Dropped, so the GLSL and its TypeScript mirror stay one line each.
 
 UI: a numeric input + slider in the per-output config menu,
 labelled "Rotation offset (°)". 0.1° granularity. Defaults
@@ -2680,10 +2693,28 @@ the desired physical reference (e.g. the museum entrance).
 Save. Once calibrated, leave it alone — it's a per-
 installation constant, not per-session.
 
-The protocol carries the offset in `view.rotationOffsetDeg`
-alongside `cameraOffset` and `split`. It's a per-output
-flag, not a globally-broadcast view field — different
-outputs on different spheres need different offsets.
+It is a per-output flag, not a globally-broadcast view field —
+different outputs on different spheres need different
+offsets — and that part shipped as designed.
+
+**Where it shipped differs from this section in one way.**
+The protocol carries `rotationOffsetRad`, not the
+`view.rotationOffsetDeg` written above: `MirroredEquirectParams`
+*is* `equirectRtt`'s `EquirectParams`, the object a narrowed
+output hands straight to `setParams`, so degrees on the wire
+would need a second conversion inside the output — free to
+disagree with the first. Degrees live where the operator meets
+them, in `OutputViewSettings` and the persisted config, and
+`projectView` is the single conversion. That is the shape
+`camera` → `cameraOffset` already had, and this section predates
+the shared/mirrored view split that introduced it.
+
+A stored value is **wrapped, not rejected**: 370° aims the sphere
+exactly where 10° does, so discarding it would silently
+un-calibrate an installation whose operator nudged past a full
+turn. That is the opposite of the framebuffer rung's rule, and
+deliberately so — a width off the ladder is meaningless, a
+rotation past 360 is not.
 
 ### Tour engine interaction
 

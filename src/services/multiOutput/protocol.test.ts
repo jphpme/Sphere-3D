@@ -81,7 +81,7 @@ describe('isFullState', () => {
     view: {
       mode: 'sos-equirect',
       dayNight: true,
-      params: { cameraOffset: { x: 0, y: 0, z: 0 }, split: false },
+      params: { cameraOffset: { x: 0, y: 0, z: 0 }, split: false, rotationOffsetRad: 0 },
     },
   }
 

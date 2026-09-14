@@ -669,6 +669,9 @@ export async function createOutputScene(
       ),
     },
     [EQUIRECT_UNIFORMS.split]: { value: (options.params ?? IDENTITY_PARAMS).split },
+    [EQUIRECT_UNIFORMS.rotationOffset]: {
+      value: (options.params ?? IDENTITY_PARAMS).rotationOffsetRad,
+    },
     // Derived here through `latLonToDirection`, **not** copied from
     // `earth.sunDir`. Sharing `getSunPosition` is not enough: that
     // handle's vector is built for the globe *mesh*'s frame, which
@@ -833,6 +836,12 @@ export async function createOutputScene(
       }
       offset.set(params.cameraOffset.x, params.cameraOffset.y, params.cameraOffset.z)
       uniforms[EQUIRECT_UNIFORMS.split].value = params.split
+      // Rung 14. A uniform write, not a shader rebuild: the rotation is
+      // a scalar the fragment shader already reads, so an operator
+      // dragging the slider costs an upload per frame rather than a
+      // recompile — which is what makes a live nudge usable while
+      // watching the sphere.
+      uniforms[EQUIRECT_UNIFORMS.rotationOffset].value = params.rotationOffsetRad
     },
     setLayers(layers) {
       // Capped rather than an error: WebGL guarantees only 8 fragment
