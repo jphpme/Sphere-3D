@@ -578,7 +578,14 @@ describe('broadcast', () => {
     // do nothing until someone happens to pan — the same reason
     // `setOutputView` pushes.
     expect(configEmits(fake.emitted)).toEqual([
-      { label: 'output-1', config: { framebufferWidth: DEFAULT_FRAMEBUFFER_WIDTH, debugOverlay: true } },
+      {
+        label: 'output-1',
+        config: {
+          framebufferWidth: DEFAULT_FRAMEBUFFER_WIDTH,
+          debugOverlay: true,
+          calibration: false,
+        },
+      },
     ])
     // And nothing on the state channel: a window setting is not a globe
     // change, so it must not consume a sequence number.
@@ -997,6 +1004,185 @@ describe('a stale link (rung 13, case 3)', () => {
   })
 })
 
+describe('a lost GPU context (rung 13, case 5)', () => {
+  const gpuLost = (label: string) => ({ type: 'output_gpu_lost' as const, label })
+  const gpuBack = (label: string) => ({ type: 'output_gpu_recovered' as const, label })
+
+  it('badges the output and notifies the panel', async () => {
+    const fake = createFakeHost()
+    const manager = makeManager(fake.host)
+    await manager.start()
+    await manager.addOutput({ monitorIndex: 0 })
+    fake.send(ready('output-1'))
+    expect(manager.outputs()[0].health).toBe('live')
+    const seen = vi.fn()
+    manager.onOutputsChanged(seen)
+
+    fake.send(gpuLost('output-1'))
+
+    expect(manager.outputs()[0].health).toBe('gpu-lost')
+    expect(seen).toHaveBeenCalled()
+  })
+
+  it('outranks a stale link, because it is a report rather than a guess', async () => {
+    // An output can be both: its context goes, and separately the
+    // control window stops reaching it. `stale` is inferred from
+    // silence and says the sphere holds an old frame; `gpu-lost` is
+    // the window stating outright that it holds nothing. The specific
+    // claim wins.
+    const fake = createFakeHost()
+    let clock = 0
+    const manager = makeManager(fake.host, { nowMs: () => clock })
+    await manager.start()
+    await manager.addOutput({ monitorIndex: 0 })
+    fake.send(ready('output-1'))
+
+    fake.send({ type: 'output_health_check', label: 'output-1', silentMs: 5000 })
+    expect(manager.outputs()[0].health).toBe('stale')
+
+    fake.send(gpuLost('output-1'))
+    expect(manager.outputs()[0].health).toBe('gpu-lost')
+  })
+
+  it('does NOT age out the way a stale link does', async () => {
+    // The two facts decay differently and this is the one that must
+    // not. An output stops complaining about its link by going quiet,
+    // so `stale` has to expire on a TTL — but a lost context is
+    // announced once and then nothing more is said about it, so the
+    // same treatment would declare a black projector healthy five
+    // seconds later. Only the matching recovery clears it.
+    const fake = createFakeHost()
+    let clock = 0
+    const manager = makeManager(fake.host, { nowMs: () => clock })
+    await manager.start()
+    await manager.addOutput({ monitorIndex: 0 })
+    fake.send(ready('output-1'))
+    fake.send(gpuLost('output-1'))
+
+    clock += STALE_REPORT_TTL_MS * 100
+    await manager.tick()
+
+    expect(manager.outputs()[0].health).toBe('gpu-lost')
+  })
+
+  it('clears the badge when the output says the context came back', async () => {
+    const fake = createFakeHost()
+    const manager = makeManager(fake.host)
+    await manager.start()
+    await manager.addOutput({ monitorIndex: 0 })
+    fake.send(ready('output-1'))
+    fake.send(gpuLost('output-1'))
+    expect(manager.outputs()[0].health).toBe('gpu-lost')
+
+    fake.send(gpuBack('output-1'))
+
+    expect(manager.outputs()[0].health).toBe('live')
+  })
+
+  it('reports the incident as a PAIR — opened on the loss, closed on the recovery', async () => {
+    // The first draft emitted only the opening row and argued that one
+    // row per incident avoided double-counting. Review caught that
+    // `recovered` is defined on the schema as whether the output
+    // carried on afterwards — and an output Three rebuilds does — so a
+    // never-updated `false` reported every recovered installation as
+    // unrecovered, on the dashboard panel this rung added.
+    const fake = createFakeHost()
+    const manager = makeManager(fake.host)
+    await manager.start()
+    await manager.addOutput({ monitorIndex: 0 })
+    fake.send(ready('output-1'))
+    vi.mocked(emit).mockClear()
+
+    fake.send(gpuLost('output-1'))
+    fake.send(gpuBack('output-1'))
+
+    const failures = vi
+      .mocked(emit)
+      .mock.calls.map(c => c[0])
+      .filter(e => e.event_type === 'output_failure')
+    expect(failures).toEqual([
+      // Opening: nothing attempted here, nothing known about the
+      // outcome yet.
+      { event_type: 'output_failure', kind: 'gpu-loss', retries: 0, recovered: false },
+      // Closing: `retries: 1` credits the browser and Three's
+      // `initGLContext()`, which is the only thing that retried.
+      { event_type: 'output_failure', kind: 'gpu-loss', retries: 1, recovered: true },
+    ])
+  })
+
+  it('leaves an incident that never comes back with only its opening row', async () => {
+    // So "incidents" is the count of `recovered: false` rows, whatever
+    // happened afterwards — which is what makes the pair countable.
+    const fake = createFakeHost()
+    const manager = makeManager(fake.host)
+    await manager.start()
+    await manager.addOutput({ monitorIndex: 0 })
+    fake.send(ready('output-1'))
+    vi.mocked(emit).mockClear()
+
+    fake.send(gpuLost('output-1'))
+
+    const failures = vi
+      .mocked(emit)
+      .mock.calls.map(c => c[0])
+      .filter(e => e.event_type === 'output_failure')
+    expect(failures).toHaveLength(1)
+    expect(failures[0]).toMatchObject({ recovered: false })
+  })
+
+  it('does not close an incident this manager never opened', async () => {
+    // A reattached output reports its standing `restored` state to the
+    // fresh manager that poked it. Without the latch check that would
+    // open a recovery for a loss this installation never saw, and the
+    // dashboard would count a recovery that did not happen here.
+    const fake = createFakeHost()
+    const manager = makeManager(fake.host)
+    await manager.start()
+    await manager.addOutput({ monitorIndex: 0 })
+    fake.send(ready('output-1'))
+    vi.mocked(emit).mockClear()
+
+    fake.send(gpuBack('output-1'))
+
+    expect(
+      vi
+        .mocked(emit)
+        .mock.calls.map(c => c[0])
+        .filter(e => e.event_type === 'output_failure'),
+    ).toEqual([])
+  })
+
+  it('does not persist the GPU latch', async () => {
+    // Same `Pick` that keeps `health` and `lastHealthCheckAtMs` out. A
+    // GPU that failed last Tuesday says nothing about a window that has
+    // not been spawned yet.
+    const fake = createFakeHost()
+    const store = memoryStore()
+    const manager = makeManager(fake.host, { store })
+    await manager.start()
+    await manager.addOutput({ monitorIndex: 0 })
+    fake.send(ready('output-1'))
+    fake.send(gpuLost('output-1'))
+
+    const [persisted] = store.current().outputs
+    expect(persisted).not.toHaveProperty('gpuLost')
+  })
+
+  it('ignores a report from a label it does not know', async () => {
+    const fake = createFakeHost()
+    const manager = makeManager(fake.host)
+    await manager.start()
+    await manager.addOutput({ monitorIndex: 0 })
+    fake.send(ready('output-1'))
+    vi.mocked(emit).mockClear()
+
+    fake.send(gpuLost('output-9'))
+
+    expect(manager.outputs()[0].health).toBe('live')
+    expect(vi.mocked(emit)).not.toHaveBeenCalled()
+  })
+})
+
 describe('lifecycle', () => {
   it('start() is idempotent — one listener, one timer', async () => {
     vi.useFakeTimers()
@@ -1093,6 +1279,7 @@ describe('persistence', () => {
         mode: 'sos-equirect',
         trackOperatorCamera: true,
         split: false,
+        rotationOffsetDeg: 0,
         framebufferWidth: DEFAULT_FRAMEBUFFER_WIDTH,
         debugOverlay: false,
       },
@@ -1281,6 +1468,7 @@ const persistedOn = (label: string, monitor: OutputMonitor) => ({
   mode: 'sos-equirect' as const,
   trackOperatorCamera: true,
   split: false,
+  rotationOffsetDeg: 0,
   framebufferWidth: DEFAULT_FRAMEBUFFER_WIDTH,
   debugOverlay: false,
 })
@@ -1325,7 +1513,7 @@ describe('restoreOutputs', () => {
     const restored = await makeManager(fake.host, { store }).restoreOutputs()
 
     expect(restored).toHaveLength(1)
-    expect(restored[0].view).toEqual({ trackCamera: false, split: true })
+    expect(restored[0].view).toEqual({ trackCamera: false, split: true, rotationOffsetDeg: 0 })
     // The same spawn sequence a fresh output goes through — the order
     // is the correctness, so restore must not have its own copy of it.
     expect(fake.calls).toEqual([
@@ -1807,6 +1995,7 @@ describe('telemetry', () => {
           mode: 'sos-equirect' as const,
           trackOperatorCamera: true,
           split: false,
+          rotationOffsetDeg: 0,
           framebufferWidth: 4096,
           debugOverlay: false,
         },
@@ -1982,7 +2171,7 @@ describe('adoptOrphanedOutputs', () => {
 
     expect(adopted).toHaveLength(1)
     expect(adopted[0].label).toBe('output-1')
-    expect(adopted[0].view).toEqual({ trackCamera: false, split: true })
+    expect(adopted[0].view).toEqual({ trackCamera: false, split: true, rotationOffsetDeg: 0 })
     expect(adopted[0].monitor).toEqual(MONITORS[1])
     // No window was created: the whole point is that the imagery on the
     // projector never went away.

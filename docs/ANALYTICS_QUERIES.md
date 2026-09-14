@@ -444,10 +444,25 @@ output that never came back, so it has no paired `output_added`.
 `crash`) — the first answers "how many outputs stopped and why", the
 second "how healthy is this installation".
 
-> **Landed so far:** `crash` is the only `kind` with a detector, and
-> `monitor-gone` / `gpu-loss-timeout` are the only `reason`s without
-> one. The enums are complete now so a dashboard pinned to them does
-> not have to change when failure-recovery cases 2-5 ship.
+> **Landed so far:** three `kind`s have detectors — `crash`,
+> `ipc-silence` (case 6's boot scan; `recovered` says whether the
+> orphan answered the poke) and `gpu-loss` (case 5). `hls-stalled` and
+> `monitor-unplug` arrive with cases 2 and 4. Of the `reason`s, only
+> `gpu-loss-timeout` is still without a detector — `monitor-gone` got
+> one with case 6. The enums were complete from the start, so a
+> dashboard pinned to them has not had to change as these landed.
+>
+> **`gpu-loss` is the one kind that emits a pair**, and a query that
+> counts incidents needs to know it: the loss emits
+> `retries=0, recovered=false` and a recovery emits
+> `retries=1, recovered=true`. So **incidents = the `recovered=false`
+> rows** and recoveries are the rest; an incident that never comes back
+> has only its opening row. One row per incident was the first shape
+> and was wrong — `recovered` is defined as whether the output carried
+> on afterwards, and a never-updated `false` reported every recovered
+> installation as unrecovered. The `retries=1` credits the browser and
+> Three's `initGLContext()`, which is the only thing that retries;
+> nothing in this repo does.
 
 A framebuffer width that is not a rung on the ladder reports the rung
 **below** it, matching what `outputScene` actually renders — so a

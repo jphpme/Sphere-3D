@@ -119,6 +119,7 @@ describe('equirectSourceUv', () => {
     const params = {
       cameraOffset: latLonToDirection(0, 0),
       split: false,
+      rotationOffsetRad: 0,
     }
     params.cameraOffset = {
       x: params.cameraOffset.x * MAX_CAMERA_OFFSET,
@@ -140,7 +141,7 @@ describe('equirectSourceUv', () => {
     // The whole point of the off-centre camera. Measure how much
     // output width is spent on the near hemisphere: it must grow.
     const nearHalfWidth = (offset: number) => {
-      const params = { cameraOffset: { x: offset, y: 0, z: 0 }, split: false }
+      const params = { cameraOffset: { x: offset, y: 0, z: 0 }, split: false, rotationOffsetRad: 0 }
       let near = 0
       const step = 0.001
       for (let u = 0; u < 1; u += step) {
@@ -156,7 +157,7 @@ describe('equirectSourceUv', () => {
   })
 
   it('split puts two copies of the projection in one frame', () => {
-    const params = { cameraOffset: { x: 0.4, y: 0, z: 0 }, split: true }
+    const params = { cameraOffset: { x: 0.4, y: 0, z: 0 }, split: true, rotationOffsetRad: 0 }
     for (const u of [0.05, 0.2, 0.37, 0.49]) {
       const left = equirectSourceUv(u, 0.6, params)
       const right = equirectSourceUv(u + 0.5, 0.6, params)
@@ -166,7 +167,7 @@ describe('equirectSourceUv', () => {
   })
 
   it('leaves the frame unsplit when split is off', () => {
-    const params = { cameraOffset: { x: 0.4, y: 0, z: 0 }, split: false }
+    const params = { cameraOffset: { x: 0.4, y: 0, z: 0 }, split: false, rotationOffsetRad: 0 }
     expect(equirectSourceUv(0.2, 0.6, params).u).not.toBeCloseTo(
       equirectSourceUv(0.7, 0.6, params).u,
       6,
@@ -239,9 +240,111 @@ describe('shader source', () => {
     expect(EQUIRECT_FRAGMENT_SHADER).not.toContain('discard')
   })
 
-  it('does not carry a rotation uniform yet', () => {
-    // Ladder commit 14 adds it. If this starts failing, the mirror in
-    // this module needs the same rotation or the two have diverged.
-    expect(EQUIRECT_FRAGMENT_SHADER).not.toContain('uRotationOffsetRad')
+  it('carries the rotation uniform, and the TS mirror applies it too', () => {
+    // This was `not.toContain` until rung 14, guarding the deferral.
+    // Inverted rather than deleted: what it was really protecting is
+    // that the shader and `equirectSourceUv` stay one implementation,
+    // so it now asserts both ends moved together.
+    expect(EQUIRECT_FRAGMENT_SHADER).toContain('uRotationOffsetRad')
+    expect(
+      equirectSourceUv(0.5, 0.5, { ...IDENTITY_PARAMS, rotationOffsetRad: 1 }).u,
+    ).not.toBeCloseTo(equirectSourceUv(0.5, 0.5, IDENTITY_PARAMS).u, 3)
+  })
+})
+
+describe('the rotation offset (rung 14)', () => {
+  const withRotation = (deg: number) => ({
+    ...IDENTITY_PARAMS,
+    rotationOffsetRad: (deg * Math.PI) / 180,
+  })
+
+  it('is the identity at zero', () => {
+    // The property every other calibration claim rests on: an
+    // installation that never calibrates must be byte-for-byte what it
+    // was before this rung existed.
+    for (const u of [0, 0.13, 0.5, 0.87, 1]) {
+      for (const v of [0.1, 0.5, 0.9]) {
+        const before = equirectSourceUv(u, v, IDENTITY_PARAMS)
+        const after = equirectSourceUv(u, v, withRotation(0))
+        expect(after.u).toBeCloseTo(before.u, 12)
+        expect(after.v).toBeCloseTo(before.v, 12)
+      }
+    }
+  })
+
+  it('shifts the sampled longitude by exactly the offset', () => {
+    // With a centred camera the projection is the identity, so the
+    // whole effect is readable off one sample: the pixel that used to
+    // show lon 0 now shows lon −90, which is the picture turning 90°
+    // east on the sphere.
+    const centreU = 0.5
+    const plain = equirectSourceUv(centreU, 0.5, IDENTITY_PARAMS)
+    const turned = equirectSourceUv(centreU, 0.5, withRotation(90))
+    // u = lon/360 + 0.5, so a −90° sample lands a quarter turn back.
+    expect(plain.u).toBeCloseTo(0.5, 10)
+    expect(turned.u).toBeCloseTo(0.25, 10)
+  })
+
+  it('leaves latitude alone', () => {
+    // It is a rotation about the polar axis. A version that touched
+    // latitude would tilt the picture on the sphere, which is a
+    // different and much worse mounting error than the one this fixes.
+    for (const v of [0.05, 0.25, 0.5, 0.75, 0.95]) {
+      const plain = equirectSourceUv(0.3, v, IDENTITY_PARAMS)
+      const turned = equirectSourceUv(0.3, v, withRotation(137.5))
+      expect(turned.v).toBeCloseTo(plain.v, 10)
+    }
+  })
+
+  it('wraps a full turn back to nothing', () => {
+    const full = equirectSourceUv(0.42, 0.6, withRotation(360))
+    const none = equirectSourceUv(0.42, 0.6, IDENTITY_PARAMS)
+    expect(full.u).toBeCloseTo(none.u, 9)
+    expect(full.v).toBeCloseTo(none.v, 9)
+  })
+
+  it('turns BOTH halves of a split frame together', () => {
+    // The reason the offset is applied to the longitude the fold
+    // produced rather than to the fold's input. `foldSplitU` is
+    // periodic in U with period ½, so rotating before it would make a
+    // 180° offset a no-op — on exactly the installations most likely to
+    // be running split mode.
+    const params = { cameraOffset: { x: 0, y: 0, z: 0 }, split: true, rotationOffsetRad: Math.PI }
+    for (const u of [0.05, 0.2, 0.37, 0.49]) {
+      const left = equirectSourceUv(u, 0.6, params)
+      const right = equirectSourceUv(u + 0.5, 0.6, params)
+      // Still two identical copies…
+      expect(right.u).toBeCloseTo(left.u, 10)
+      // …and both actually moved.
+      const unturned = equirectSourceUv(u, 0.6, { ...params, rotationOffsetRad: 0 })
+      expect(left.u).not.toBeCloseTo(unturned.u, 3)
+    }
+  })
+
+  it('composes with the camera zoom rather than fighting it', () => {
+    // The operator calibrates once and then zooms all day. A rotation
+    // that only worked at a centred camera would drift the sphere's
+    // alignment every time someone touched the control globe.
+    const zoomed = { cameraOffset: latLonToDirection(0, 0), split: false, rotationOffsetRad: 0 }
+    zoomed.cameraOffset = {
+      x: zoomed.cameraOffset.x * 0.5,
+      y: zoomed.cameraOffset.y * 0.5,
+      z: zoomed.cameraOffset.z * 0.5,
+    }
+    const turned = { ...zoomed, rotationOffsetRad: Math.PI / 2 }
+    // Turning by 90° and asking for the pixel a quarter-frame along
+    // must land where the unturned projection put the original pixel.
+    const a = equirectSourceUv(0.5, 0.5, zoomed)
+    const b = equirectSourceUv(0.75, 0.5, turned)
+    expect(b.u).toBeCloseTo(a.u, 9)
+    expect(b.v).toBeCloseTo(a.v, 9)
+  })
+
+  it('declares the uniform the shader reads', () => {
+    // A misspelled uniform is silently ignored by WebGL and reads as
+    // "the rotation does nothing" — the same trap `EQUIRECT_UNIFORMS`
+    // exists for.
+    expect(EQUIRECT_FRAGMENT_SHADER).toContain(`uniform float ${EQUIRECT_UNIFORMS.rotationOffset};`)
+    expect(EQUIRECT_FRAGMENT_SHADER).toContain(`- ${EQUIRECT_UNIFORMS.rotationOffset};`)
   })
 })

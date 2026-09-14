@@ -60,6 +60,7 @@
 
 import { logger } from '../utils/logger'
 import type { LinkHealth } from './linkWatchdog'
+import type { GpuContextState } from './outputScene'
 import type { SyncKind } from './outputSync'
 
 /** How often the HUD re-reads and repaints. */
@@ -89,6 +90,14 @@ export interface DebugOverlayReading {
    *  forever. */
   link: LinkHealth
   gpu: string | null
+  /** What this window has observed about its GPU context (rung 13,
+   *  case 5). Shown beside the renderer name because it is the same
+   *  subject, and shown *only* when it is not `live` — for the reason
+   *  the Outputs panel draws no badge on a healthy output: a line
+   *  decorated in the normal case is a line the reader learns to skip,
+   *  and this one has to be legible at a glance from a few metres
+   *  away. */
+  gpuState: GpuContextState
   framebuffer: { width: number; height: number }
 }
 
@@ -101,7 +110,7 @@ export interface DebugOverlayReading {
  * hunting a lead output that is actually late.
  */
 export function formatOverlay(reading: DebugOverlayReading): string[] {
-  const { datasetId, driftS, fps, gpu, framebuffer, syncKind, link } = reading
+  const { datasetId, driftS, fps, gpu, gpuState, framebuffer, syncKind, link } = reading
   const sync =
     driftS === null
       ? `sync  —${syncKind ? ` ${syncKind}` : ''}`
@@ -118,7 +127,7 @@ export function formatOverlay(reading: DebugOverlayReading): string[] {
     `link  ${link}`,
     `fps   ${fps.toFixed(1)}`,
     `buf   ${framebuffer.width}×${framebuffer.height}`,
-    `gpu   ${gpu ?? 'unreported'}`,
+    `gpu   ${gpu ?? 'unreported'}${gpuState === 'live' ? '' : ` — context ${gpuState}`}`,
   ]
 }
 

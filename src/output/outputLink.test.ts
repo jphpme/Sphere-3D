@@ -221,7 +221,7 @@ describe('the store: the mode check', () => {
     const view = {
       mode: OUTPUT_MODE,
       dayNight: false,
-      params: { cameraOffset: { x: 0.5, y: 0, z: 0 }, split: true },
+      params: { cameraOffset: { x: 0.5, y: 0, z: 0 }, split: true, rotationOffsetRad: 0 },
     }
 
     expect(store.accept(diff(1, { view })).changed).toEqual(['view'])
@@ -791,5 +791,126 @@ describe('link health (rung 13, case 3)', () => {
 
     expect(link.linkHealth()).toBe('live')
     expect(host.emit).not.toHaveBeenCalled()
+  })
+})
+
+describe('reporting the GPU context (rung 13, case 5)', () => {
+  it('emits a loss and a recovery on the shared event channel', async () => {
+    const host = fakeHost()
+    const link = await connectOutputLink(host)
+    host.emit.mockClear()
+
+    link.reportGpuState('lost')
+    link.reportGpuState('restored')
+
+    expect(host.emit.mock.calls).toEqual([
+      [OUTPUT_EVENT, { type: 'output_gpu_lost', label: 'output-3' }],
+      [OUTPUT_EVENT, { type: 'output_gpu_recovered', label: 'output-3' }],
+    ])
+  })
+
+  it('says nothing for live, which is the boot state and not a transition', async () => {
+    // The scene only ever *leaves* `live`, so there is no third
+    // message. `main.ts` pushes the current state once at connect —
+    // that push is the one that would otherwise announce a healthy
+    // window to the manager on every launch.
+    const host = fakeHost()
+    const link = await connectOutputLink(host)
+    host.emit.mockClear()
+
+    link.reportGpuState('live')
+
+    expect(host.emit).not.toHaveBeenCalled()
+  })
+
+  it('does not let a failed report escape into a DOM event handler', async () => {
+    // This is called from `webglcontextlost`. A report that cannot be
+    // delivered is a worse link, not a reason to throw inside the
+    // handler for the failure being reported.
+    const host = fakeHost()
+    const link = await connectOutputLink(host)
+    host.emit.mockRejectedValue(new Error('channel gone'))
+
+    expect(() => link.reportGpuState('lost')).not.toThrow()
+  })
+
+  it('stays quiet once the link is stopped', async () => {
+    const host = fakeHost()
+    const link = await connectOutputLink(host)
+    await link.stop()
+    host.emit.mockClear()
+
+    link.reportGpuState('lost')
+
+    expect(host.emit).not.toHaveBeenCalled()
+  })
+})
+
+describe('re-announcing on a poke (rung 13, case 6 + case 5)', () => {
+  it('notifies subscribers after the re-announcement, not before', async () => {
+    // The manager drops an event whose label has no record, so the
+    // announcement has to reach it first. Keeping the same order as the
+    // first announcement means one rule rather than two.
+    const host = fakeHost()
+    const link = await connectOutputLink(host)
+    const order: string[] = []
+    host.emit.mockImplementation(async () => {
+      order.push('announce')
+    })
+    link.onReannounce(() => order.push('reannounce'))
+
+    host.deliverReattach()
+    await until(() => order.includes('reannounce'), 'the reannounce hook')
+
+    expect(order).toEqual(['announce', 'reannounce'])
+  })
+
+  it('lets a subscriber report state a fresh manager has never heard', async () => {
+    // The gap this closes: a manager that booted after a control-window
+    // reload adopts the output with `gpuLost: false`, so an output
+    // sitting in `lost` gets no Display lost badge. GPU state travels on
+    // edges and has no heartbeat to re-state it.
+    const host = fakeHost()
+    const link = await connectOutputLink(host)
+    link.onReannounce(() => link.reportGpuState('lost'))
+    host.emit.mockClear()
+
+    host.deliverReattach()
+
+    await until(
+      () =>
+        host.emit.mock.calls.some(
+          c => (c[1] as { type?: string })?.type === 'output_gpu_lost',
+        ),
+      'the replayed GPU state',
+    )
+  })
+
+  it('keeps notifying the others when one subscriber throws', async () => {
+    const host = fakeHost()
+    const link = await connectOutputLink(host)
+    const seen: string[] = []
+    link.onReannounce(() => {
+      throw new Error('listener blew up')
+    })
+    link.onReannounce(() => seen.push('second'))
+
+    host.deliverReattach()
+
+    await until(() => seen.length > 0, 'the surviving listener')
+    expect(seen).toEqual(['second'])
+  })
+
+  it('unsubscribes, and goes quiet once the link stops', async () => {
+    const host = fakeHost()
+    const link = await connectOutputLink(host)
+    const seen: string[] = []
+    const off = link.onReannounce(() => seen.push('fired'))
+
+    off()
+    host.deliverReattach()
+    await new Promise(r => setTimeout(r, 0))
+
+    expect(seen).toEqual([])
   })
 })

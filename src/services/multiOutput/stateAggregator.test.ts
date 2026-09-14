@@ -18,6 +18,7 @@ import type {
   MirroredDataset,
   MirroredGlobeState,
   MirroredLayer,
+  SharedView,
 } from './protocol'
 import { isFullState } from './protocol'
 import {
@@ -265,7 +266,7 @@ describe('per-output view projection', () => {
   }
 
   it('passes the operator camera through when tracking', () => {
-    const v = projectView(shared, { trackCamera: true, split: false }, 'sos-equirect')
+    const v = projectView(shared, { trackCamera: true, split: false, rotationOffsetDeg: 0 }, 'sos-equirect')
     expect(v.params.cameraOffset.x).toBeCloseTo(0, 10)
     expect(v.params.cameraOffset.y).toBeCloseTo(0.5, 10)
     expect(v.params.cameraOffset.z).toBeCloseTo(0, 10)
@@ -273,13 +274,13 @@ describe('per-output view projection', () => {
   })
 
   it('centres the camera when not tracking', () => {
-    const v = projectView(shared, { trackCamera: false, split: false }, 'sos-equirect')
+    const v = projectView(shared, { trackCamera: false, split: false, rotationOffsetDeg: 0 }, 'sos-equirect')
     expect(v.params.cameraOffset).toEqual(CENTRED_CAMERA)
   })
 
   it('takes split from the output, never from the shared view', () => {
     expect(
-      projectView(shared, { trackCamera: true, split: true }, 'sos-equirect').params.split,
+      projectView(shared, { trackCamera: true, split: true, rotationOffsetDeg: 0 }, 'sos-equirect').params.split,
     ).toBe(true)
     // There is nowhere on the shared view for a `split` to come from
     // any more — it is not a globe fact — so the output's own setting
@@ -291,8 +292,8 @@ describe('per-output view projection', () => {
   })
 
   it('does not alias the shared offset, so one output cannot mutate another', () => {
-    const a = projectView(shared, { trackCamera: true, split: false }, 'sos-equirect')
-    const b = projectView(shared, { trackCamera: true, split: false }, 'sos-equirect')
+    const a = projectView(shared, { trackCamera: true, split: false, rotationOffsetDeg: 0 }, 'sos-equirect')
+    const b = projectView(shared, { trackCamera: true, split: false, rotationOffsetDeg: 0 }, 'sos-equirect')
     // Each output gets its own object graph. The offset is derived per
     // projection now rather than copied from a stored one, so two
     // outputs cannot end up sharing — but that has to stay true if the
@@ -304,14 +305,14 @@ describe('per-output view projection', () => {
 
   it('leaves a diff without a view untouched', () => {
     const diff = { simulationDate: '2026-01-01T00:00:00Z' }
-    const projected = projectState(diff, { trackCamera: false, split: true }, 'sos-equirect')
+    const projected = projectState(diff, { trackCamera: false, split: true, rotationOffsetDeg: 0 }, 'sos-equirect')
     expect(projected).toBe(diff)
     expect('view' in projected).toBe(false)
   })
 
   it('projects a diff that does carry a view', () => {
     const diff = { view: shared }
-    const projected = projectState(diff, { trackCamera: false, split: true }, 'sos-equirect')
+    const projected = projectState(diff, { trackCamera: false, split: true, rotationOffsetDeg: 0 }, 'sos-equirect')
     expect(projected.view!.params.cameraOffset).toEqual(CENTRED_CAMERA)
     expect(projected.view!.params.split).toBe(true)
     // The input is not mutated — two outputs project the same diff.
@@ -360,5 +361,51 @@ describe('per-output view projection', () => {
     expect(() =>
       projectView(shared, DEFAULT_VIEW_SETTINGS, 'flat-perspective' as 'sos-equirect'),
     ).toThrow(/no view projection for mode/)
+  })
+})
+
+describe('the rotation offset (rung 14)', () => {
+  const shared = (): SharedView => ({
+    dayNight: true,
+    camera: { lat: 0, lon: 0, zoom: 0 },
+  })
+
+  it('converts the operator degrees to shader radians, once', () => {
+    // The single conversion. Degrees are what the operator types and
+    // what gets persisted; radians are what the shader takes. A second
+    // conversion inside the output would be free to disagree with this
+    // one, and the symptom is a sphere turned by the wrong amount.
+    const view = projectView(
+      shared(),
+      { ...DEFAULT_VIEW_SETTINGS, rotationOffsetDeg: 180 },
+      'sos-equirect',
+    )
+    expect(view.params.rotationOffsetRad).toBeCloseTo(Math.PI, 12)
+  })
+
+  it('is per-output, so one sphere can be aligned without turning another', () => {
+    // Two spheres in two rooms are mounted differently. This is the
+    // reason the offset rides `params` rather than the shared view.
+    const a = projectView(shared(), { ...DEFAULT_VIEW_SETTINGS, rotationOffsetDeg: 90 }, 'sos-equirect')
+    const b = projectView(shared(), { ...DEFAULT_VIEW_SETTINGS, rotationOffsetDeg: 0 }, 'sos-equirect')
+    expect(a.params.rotationOffsetRad).toBeCloseTo(Math.PI / 2, 12)
+    expect(b.params.rotationOffsetRad).toBe(0)
+  })
+
+  it('falls back to no rotation rather than sending NaN to the shader', () => {
+    // A NaN longitude makes every ray miss, which is a black sphere in
+    // front of an audience. Same guard `operatorCameraFrom` applies to
+    // a camera MapLibre reported as NaN.
+    const view = projectView(
+      shared(),
+      { ...DEFAULT_VIEW_SETTINGS, rotationOffsetDeg: Number.NaN },
+      'sos-equirect',
+    )
+    expect(view.params.rotationOffsetRad).toBe(0)
+  })
+
+  it('defaults to none, so an uncalibrated install is unchanged', () => {
+    expect(DEFAULT_VIEW_SETTINGS.rotationOffsetDeg).toBe(0)
+    expect(projectView(shared(), DEFAULT_VIEW_SETTINGS, 'sos-equirect').params.rotationOffsetRad).toBe(0)
   })
 })

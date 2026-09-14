@@ -298,6 +298,15 @@
   background: rgba(255, 255, 255, 0.12);
 }
 
+/* Red rather than the stale amber, and the step up is deliberate: a
+   stale output is still putting a picture on the sphere, this one is
+   putting up nothing. The two sit in the same list and an operator
+   scanning it needs to reach this row first. */
+.output-item-health.is-gpu-lost {
+  color: var(--color-danger-text, #2b0000);
+  background: var(--color-danger, #e5534b);
+}
+
 .output-toggle {
   display: flex;
   align-items: center;
@@ -346,6 +355,23 @@
 .output-field-select:disabled {
   opacity: 0.6;
   cursor: default;
+}
+
+/* Takes the space the label and the number leave. The two controls
+   drive one value, so the slider is the coarse half and must not
+   squeeze the number it agrees with. */
+.output-field-slider {
+  flex: 1 1 4rem;
+  min-inline-size: 0;
+  accent-color: var(--color-accent, #4da6ff);
+}
+
+/* Wider than the budget field it shares a class with: this one runs to
+   "359.9", and a calibration value clipped inside its own box is the
+   same "two numbers, no way to tell which is running" problem the
+   framebuffer picker is written against. */
+.output-rotation-number {
+  inline-size: 4.75rem;
 }
 
 /* Narrow on purpose: the decoder budget is a small whole number, and a

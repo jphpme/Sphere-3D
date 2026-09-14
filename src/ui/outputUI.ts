@@ -853,16 +853,54 @@ function announceHealthChanges(
     const was = previous.get(record.label)
     if (was === undefined || was === record.health) continue
     const monitor = monitorRowName(record.monitor, monitors)
+    // Recovery from a GPU loss is announced as *that*, not as the
+    // generic `live`, which says only "in contact with the control
+    // window" — true the whole time, since the link was never the thing
+    // that failed. A screen-reader operator would be told the one fact
+    // that was never in doubt and not the one that changed. It is the
+    // only transition where the destination alone is not enough to
+    // describe what happened, which is why this is a special case
+    // rather than a second table keyed on both ends. Found in review.
     said.push(
-      record.health === 'stale'
-        ? t('outputs.item.healthAnnounce.stale', { monitor })
-        : record.health === 'starting'
-          ? t('outputs.item.healthAnnounce.starting', { monitor })
-          : t('outputs.item.healthAnnounce.live', { monitor }),
+      record.health === 'live' && was === 'gpu-lost'
+        ? t('outputs.item.healthAnnounce.gpuRecovered', { monitor })
+        : t(HEALTH_ANNOUNCE[record.health], { monitor }),
     )
   }
   if (said.length > 0) announcePolite(said.join(' '))
 }
+
+/**
+ * Health → message key, as tables rather than the nested ternaries
+ * these were.
+ *
+ * `satisfies Record<…, string>` over the union is the point: adding a
+ * state to `OutputHealth` fails to compile here instead of quietly
+ * falling through to whichever branch was last. A badge that silently
+ * reports the wrong condition is worse than no badge, and the whole
+ * reason this panel exists is that nothing else in the app can tell an
+ * operator what a projector is doing.
+ */
+const HEALTH_ANNOUNCE = {
+  'gpu-lost': 'outputs.item.healthAnnounce.gpuLost',
+  stale: 'outputs.item.healthAnnounce.stale',
+  starting: 'outputs.item.healthAnnounce.starting',
+  live: 'outputs.item.healthAnnounce.live',
+} as const satisfies Record<OutputHealth, string>
+
+/** The chip's two words. No entry for `live` — it draws nothing. */
+const HEALTH_LABEL = {
+  'gpu-lost': 'outputs.item.health.gpuLost',
+  stale: 'outputs.item.health.stale',
+  starting: 'outputs.item.health.starting',
+} as const satisfies Record<Exclude<OutputHealth, 'live'>, string>
+
+/** The visually-hidden half, which carries what two words cannot. */
+const HEALTH_DETAIL = {
+  'gpu-lost': 'outputs.item.healthAria.gpuLost',
+  stale: 'outputs.item.healthAria.stale',
+  starting: 'outputs.item.healthAria.starting',
+} as const satisfies Record<Exclude<OutputHealth, 'live'>, string>
 
 /**
  * The health badge, or nothing at all when the output is fine.
@@ -903,15 +941,11 @@ function buildHealthBadge(health: OutputHealth): HTMLElement | null {
 
   const label = document.createElement('span')
   label.className = 'output-item-health-label'
-  label.textContent =
-    health === 'stale' ? t('outputs.item.health.stale') : t('outputs.item.health.starting')
+  label.textContent = t(HEALTH_LABEL[health])
 
   const detail = document.createElement('span')
   detail.className = 'sr-only'
-  detail.textContent =
-    health === 'stale'
-      ? t('outputs.item.healthAria.stale')
-      : t('outputs.item.healthAria.starting')
+  detail.textContent = t(HEALTH_DETAIL[health])
 
   badge.append(label, detail)
   return badge
@@ -984,7 +1018,153 @@ function buildRow(
     ),
   )
   item.appendChild(buildFramebufferPicker(mgr, record))
+  item.appendChild(
+    // Directly above the rotation offset, not beside the debug toggle
+    // it shares a channel with, because these two are used together:
+    // the pattern is what an operator turns the rotation *against*, so
+    // the switch that reveals the graticule sits over the control that
+    // moves it, in the order the job is done.
+    buildToggle(t('outputs.item.calibration'), record.render.calibration, next =>
+      mgr.setOutputRenderConfig(record.label, { calibration: next }),
+    ),
+  )
+  item.appendChild(buildRotationOffset(mgr, record))
   return item
+}
+
+/**
+ * The per-output rotation offset (rung 14).
+ *
+ * **A property of the room, not of the session.** An LED sphere is a
+ * physical object whose north-pole pin may not align with celestial
+ * north, or whose owner wants the prime meridian facing the main
+ * entrance. The operator turns this until the prime meridian lands
+ * where the building needs it, and never touches it again — which is
+ * why it is persisted per output rather than being a session control,
+ * and why two outputs on two spheres each carry their own.
+ *
+ * **What they align against is the toggle directly above** — rung 14b's
+ * calibration pattern, whose longitude scale turns with the sphere, so
+ * the operator reads the rotation off whichever label has reached the
+ * physical mark rather than off this field. That is the pairing, and it
+ * is why the two controls are adjacent.
+ *
+ * The pattern is a *per-output* switch on the render-config channel and
+ * this is a *per-output* view setting that persists, and the difference
+ * is the rule: what you calibrate persists, the act of calibrating does
+ * not. A rig that relaunches keeps its rotation and comes back showing
+ * data.
+ *
+ * **A slider and a number, both live**, because the two halves of the
+ * job want different controls: finding the right rotation is a drag
+ * while watching the sphere, and reproducing a known one next
+ * installation is typing 137.5. They write through the same commit, so
+ * neither can report a value the output is not running at.
+ *
+ * Committed on `input` rather than `change`, unlike the framebuffer
+ * picker beside it. That is the point of the control: the operator is
+ * looking at the sphere, not at this panel, and a rotation that only
+ * lands on mouse-up makes them drag-release-look-drag instead of just
+ * turning it. It costs a uniform write per event — `setParams` does not
+ * rebuild the shader for a scalar — so the live path is the cheap one.
+ */
+function buildRotationOffset(mgr: OutputPanelManager, record: OutputRecord): HTMLElement {
+  const field = document.createElement('div')
+  field.className = 'output-field'
+
+  const text = document.createElement('label')
+  text.className = 'output-field-label'
+  text.textContent = t('outputs.item.rotationOffset')
+
+  const slider = document.createElement('input')
+  slider.type = 'range'
+  slider.className = 'output-field-slider'
+  slider.min = '0'
+  // 359.9, not 360: the two ends are the same rotation, and an operator
+  // who drags to the stop should not land on a value that persists as 0
+  // and reads back at the other end of the track next launch.
+  slider.max = '359.9'
+  slider.step = '0.1'
+
+  const number = document.createElement('input')
+  number.type = 'number'
+  // Its own class beside the shared one: `.output-field-number` is
+  // also the decoder-budget field, and this one is wider and lives
+  // in a row a test has to be able to name.
+  number.className = 'output-field-number output-rotation-number'
+  number.min = '0'
+  number.max = '359.9'
+  number.step = '0.1'
+
+  // Labelled through the same `<label>` the slider is, so the number
+  // input is not an unnamed spinner to a screen reader. The unit is in
+  // the label text rather than repeated on each control.
+  const id = `output-rotation-${record.label}`
+  slider.id = id
+  text.htmlFor = id
+  number.setAttribute('aria-label', t('outputs.item.rotationOffset'))
+
+  let applied = record.view.rotationOffsetDeg
+  /**
+   * Which commit is the latest, so an older one cannot win.
+   *
+   * The framebuffer picker beside this needs no such thing because it
+   * fires on `change` — one commit per interaction. This one fires on
+   * `input`, so a drag starts a commit per event and they settle in
+   * whatever order the IPC returns them. Without the generation, a slow
+   * early commit resolving after a fast later one rewrites `applied` to
+   * the older value, and its failure path then puts *both* controls
+   * back to a number the output is no longer running at. Found in
+   * review, and it is a hazard the live-commit choice created.
+   */
+  let generation = 0
+  const show = (deg: number): void => {
+    slider.value = String(deg)
+    number.value = String(deg)
+  }
+  show(applied)
+
+  const commit = (raw: string): void => {
+    // The empty check is separate from the finite one and both are
+    // needed, which is not obvious and is why it is spelled out:
+    // `Number('')` is **0**, not `NaN`. A `type="number"` input reports
+    // an empty string while the operator is mid-edit — clearing the
+    // field to retype it — so a lone `Number.isFinite` guard would
+    // read that as a deliberate zero and spin the picture back to the
+    // prime meridian between keystrokes. The finite check still earns
+    // its place: a half-typed `-` does parse as NaN.
+    if (raw.trim() === '') return
+    const parsed = Number(raw)
+    if (!Number.isFinite(parsed)) return
+    const next = ((parsed % 360) + 360) % 360
+    show(next)
+    const mine = ++generation
+    void mgr
+      .setOutputView(record.label, { rotationOffsetDeg: next })
+      .then(() => {
+        // A stale success must not rewrite the baseline a newer commit
+        // has already moved past.
+        if (mine === generation) applied = next
+      })
+      .catch(err => {
+        // Same posture as every other control here: one that reports a
+        // state the output is not in is worse than one that refuses —
+        // but only the newest commit gets to say what that state is. An
+        // older rejection landing after a newer success would otherwise
+        // drag the sphere back to a value nobody asked for.
+        logger.warn('[outputUI] rotation offset change failed:', err)
+        if (mine === generation) show(applied)
+      })
+  }
+
+  slider.addEventListener('input', () => commit(slider.value))
+  // `change` on the number, not `input`: committing per keystroke turns
+  // "137" into a rotation to 1, then 13, then 137, which on a projector
+  // is the picture spinning while someone types.
+  number.addEventListener('change', () => commit(number.value))
+
+  field.append(text, slider, number)
+  return field
 }
 
 /**

@@ -94,6 +94,10 @@ export function monitorKeyOf(monitor: {
  * itself, and whether it has complained *recently*.
  */
 export type OutputHealth =
+  /** The output reported that its WebGL context went away (rung 13,
+   *  case 5) and has not reported it back. The sphere is showing
+   *  nothing at all. */
+  | 'gpu-lost'
   /** Spawned, has not announced `output_ready`. Normal for a second or
    *  two; sustained, it means the window is not coming up. */
   | 'starting'
@@ -123,20 +127,37 @@ export const STALE_REPORT_TTL_MS = LINK_PING_INTERVAL_MS * 2.5
 /**
  * Derive the badge.
  *
- * Takes the two fields it reads rather than an `OutputRecord`, which
- * lives in `manager.ts` — importing it would point this module at its
- * own consumer, and the manager is the thing that must stay
- * constructible without a window.
+ * Takes the fields it reads rather than an `OutputRecord`, which lives
+ * in `manager.ts` — importing it would point this module at its own
+ * consumer, and the manager is the thing that must stay constructible
+ * without a window.
  *
- * `starting` outranks `stale`: an output that never announced has
+ * **`gpu-lost` outranks everything, and the reason is not urgency.**
+ * The other two are inferences the manager draws from *silence*: a
+ * window that has not spoken yet is `starting`, one that complained
+ * recently is `stale`. A GPU loss is the only one the output states
+ * outright — and it is the only failure a healthy link can carry, so
+ * an output can sit here perfectly `live` by every other measure with
+ * nothing on the sphere at all. A positive report beats a guess drawn
+ * from its absence.
+ *
+ * `starting` then outranks `stale`: an output that never announced has
  * nothing to be stale *from*, and reporting a degraded link for a
  * window that has not finished booting would send an operator looking
  * at the wrong thing.
+ *
+ * There is deliberately **no badge for a context that came back.** The
+ * panel answers "is something wrong now"; a chip that stayed on a
+ * recovered output for the rest of the session is the row-of-green-
+ * chips problem in slower motion. The output's own debug HUD keeps
+ * `restored`, because that surface answers "what has happened to this
+ * window", which is a different question.
  */
 export function outputHealthState(
-  output: { ready: boolean; lastHealthCheckAtMs: number | null },
+  output: { ready: boolean; lastHealthCheckAtMs: number | null; gpuLost: boolean },
   nowMs: number,
 ): OutputHealth {
+  if (output.gpuLost) return 'gpu-lost'
   if (!output.ready) return 'starting'
   if (output.lastHealthCheckAtMs === null) return 'live'
   return nowMs - output.lastHealthCheckAtMs < STALE_REPORT_TTL_MS ? 'stale' : 'live'

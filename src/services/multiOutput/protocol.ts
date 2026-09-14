@@ -269,6 +269,21 @@ export interface MirroredEquirectParams {
   /** Mirror the area of focus to the antipodal hemisphere — matches
    *  existing SOS sphere-split behaviour. Per-output. */
   split: boolean
+  /**
+   * Per-installation longitude rotation, **radians** (rung 14).
+   *
+   * Per-output rather than shared, and that is the whole reason it is
+   * in `params`: two spheres in two rooms are mounted differently, and
+   * a globally-broadcast offset would turn both when the operator
+   * aligns one.
+   *
+   * Radians on the wire though the operator types degrees, because
+   * this object *is* `equirectRtt`'s `EquirectParams` — a narrowed
+   * output hands it straight to `setParams` — so a degree value here
+   * would need converting inside the output too, which is a second
+   * conversion free to disagree with `projectView`'s.
+   */
+  rotationOffsetRad: number
 }
 
 /** What every arm of `MirroredView` carries, whatever its geometry. */
@@ -473,6 +488,23 @@ export interface OutputRenderConfig {
   framebufferWidth: number
   /** Whether to draw the debug HUD over the projection. */
   debugOverlay: boolean
+  /**
+   * Show the calibration test pattern **instead of** whatever this
+   * output is mirroring (rung 14b).
+   *
+   * It rides this channel rather than `GlobeState` for the reason the
+   * channel exists: it is a property of one *window*, and calibration
+   * is done one sphere at a time — a rig with four outputs is four
+   * differently-mounted spheres, and putting a pattern on all of them
+   * to align one is the opposite of what the operator asked for.
+   * Routing it through the mirrored `dataset` would do exactly that,
+   * and would also replace the control window's own globe, which is
+   * where the operator is reading the rotation they are turning.
+   *
+   * Instead-of rather than over: a pattern is for checking *geometry*,
+   * and a graticule composited over a dataset leaves neither legible.
+   */
+  calibration: boolean
 }
 
 /**
@@ -494,7 +526,7 @@ export interface OutputRenderConfig {
  * indistinguishable from a real failure.
  */
 export function defaultRenderConfig(): OutputRenderConfig {
-  return { framebufferWidth: DEFAULT_FRAMEBUFFER_WIDTH, debugOverlay: false }
+  return { framebufferWidth: DEFAULT_FRAMEBUFFER_WIDTH, debugOverlay: false, calibration: false }
 }
 
 // --- Manager → output ---
@@ -622,7 +654,30 @@ export interface OutputDatasetStalledEvent extends OutputEventBase {
   datasetId: string | null
 }
 
-/** A lost WebGL context came back and the scene was rebuilt. */
+/**
+ * This window's WebGL context went away (rung 13, case 5).
+ *
+ * It exists because the manager has no other way to learn this. The
+ * window is alive, the link is fine, the heartbeat is answered — and
+ * the sphere is black. Every other failure signal the manager has is
+ * an *absence*, and this one is the opposite: a healthy channel
+ * reporting an unhealthy picture, which is exactly the case the
+ * absence-based detectors are blind to.
+ */
+export interface OutputGpuLostEvent extends OutputEventBase {
+  type: 'output_gpu_lost'
+}
+
+/**
+ * A lost WebGL context came back.
+ *
+ * Deliberately **not** a claim that the picture did. Three rebuilds its
+ * GL state on restore and re-uploads on the next draw, which for the
+ * output's scene should be the whole of it — but that is read from
+ * Three's source rather than observed on hardware, and the two states
+ * are reported separately so the difference stays visible if it turns
+ * out not to hold.
+ */
 export interface OutputGpuRecoveredEvent extends OutputEventBase {
   type: 'output_gpu_recovered'
 }
@@ -654,6 +709,7 @@ export type OutputEvent =
   | OutputReadyEvent
   | OutputHealthCheckEvent
   | OutputDatasetStalledEvent
+  | OutputGpuLostEvent
   | OutputGpuRecoveredEvent
   | OutputFrameStaleEvent
   | OutputClosingEvent

@@ -9,6 +9,9 @@ import {
   createOutputConfigStore,
   defaultOutputConfig,
   matchMonitorIndex,
+  normalizeRotationOffset,
+  renderConfigFrom,
+  viewSettingsFrom,
   OUTPUT_CONFIG_STORAGE_KEY,
   OUTPUT_CONFIG_VERSION,
   parseOutputConfig,
@@ -35,6 +38,7 @@ function persisted(over: Partial<PersistedOutput> = {}): PersistedOutput {
     mode: 'sos-equirect',
     trackOperatorCamera: true,
     split: false,
+    rotationOffsetDeg: 0,
     framebufferWidth: DEFAULT_FRAMEBUFFER_WIDTH,
     debugOverlay: false,
     ...over,
@@ -299,8 +303,8 @@ describe('toPersistedOutput', () => {
       label: 'output-1',
       monitor: live,
       mode: 'sos-equirect',
-      view: { trackCamera: false, split: true },
-      render: { framebufferWidth: 8192, debugOverlay: true },
+      view: { trackCamera: false, split: true, rotationOffsetDeg: 0 },
+      render: { framebufferWidth: 8192, debugOverlay: true, calibration: true },
     })
 
     live.position.x = 9999
@@ -365,5 +369,120 @@ describe('createOutputConfigStore', () => {
     }
 
     expect(createOutputConfigStore(storage).read()).toEqual(defaultOutputConfig())
+  })
+})
+
+describe('normalizeRotationOffset (rung 14)', () => {
+  it('defaults a config written before rung 14 to no rotation', () => {
+    // The rung-11 rule: a missing key must not cost an operator their
+    // outputs on the launch after an update.
+    expect(normalizeRotationOffset(undefined)).toBe(0)
+    expect(normalizeRotationOffset(null)).toBe(0)
+    expect(normalizeRotationOffset('90')).toBe(0)
+    expect(normalizeRotationOffset(Number.NaN)).toBe(0)
+    expect(normalizeRotationOffset(Number.POSITIVE_INFINITY)).toBe(0)
+  })
+
+  it('keeps a value already in range exactly', () => {
+    expect(normalizeRotationOffset(0)).toBe(0)
+    expect(normalizeRotationOffset(137.5)).toBe(137.5)
+    expect(normalizeRotationOffset(359.9)).toBe(359.9)
+  })
+
+  it('wraps rather than rejecting, unlike the framebuffer rung', () => {
+    // The difference is whether the stored value means anything. A
+    // width off the ladder is meaningless and gets replaced; 370° aims
+    // the sphere exactly where 10° does, so discarding it would
+    // silently un-calibrate an installation whose operator nudged past
+    // a full turn.
+    expect(normalizeRotationOffset(370)).toBeCloseTo(10, 10)
+    expect(normalizeRotationOffset(360)).toBe(0)
+    expect(normalizeRotationOffset(-20)).toBeCloseTo(340, 10)
+    expect(normalizeRotationOffset(-400)).toBeCloseTo(320, 10)
+  })
+
+  it('round-trips through write and load', () => {
+    const storage = memoryStorage()
+    const store = createOutputConfigStore(storage)
+    store.write({ ...defaultOutputConfig(), outputs: [persisted({ rotationOffsetDeg: 42.5 })] })
+
+    expect(createOutputConfigStore(storage).read().outputs[0].rotationOffsetDeg).toBe(42.5)
+  })
+
+  it('survives an entry that predates the field', () => {
+    // The whole entry must come back, not be dropped — one missing key
+    // costing an installation its four projectors is the failure this
+    // parse is written against.
+    const raw = { ...persisted() } as Record<string, unknown>
+    delete raw.rotationOffsetDeg
+    const storage = memoryStorage()
+    storage.setItem(
+      OUTPUT_CONFIG_STORAGE_KEY,
+      JSON.stringify({
+        version: OUTPUT_CONFIG_VERSION,
+        autoRestoreOnLaunch: false,
+        outputs: [raw],
+      }),
+    )
+
+    const loaded = createOutputConfigStore(storage).read()
+
+    expect(loaded.outputs).toHaveLength(1)
+    expect(loaded.outputs[0].rotationOffsetDeg).toBe(0)
+  })
+})
+
+describe('viewSettingsFrom (rung 14)', () => {
+  it('carries every view field a restore needs', () => {
+    // Extracted because the mapping was written out twice — once in
+    // `restoreOutputs`, once in `adoptOrphanedOutputs`. An operator who
+    // calibrates a sphere and then reloads the control window would
+    // otherwise get their rotation back from one path and not the
+    // other, and the symptom is a picture turned a few degrees with
+    // nothing on screen to explain it.
+    expect(
+      viewSettingsFrom(
+        persisted({ trackOperatorCamera: false, split: true, rotationOffsetDeg: 42.5 }),
+      ),
+    ).toEqual({ trackCamera: false, split: true, rotationOffsetDeg: 42.5 })
+  })
+})
+
+describe('renderConfigFrom (rung 14b)', () => {
+  it('restores the window settings that were stored', () => {
+    expect(renderConfigFrom(persisted({ framebufferWidth: 8192, debugOverlay: true }))).toEqual({
+      framebufferWidth: 8192,
+      debugOverlay: true,
+      calibration: false,
+    })
+  })
+
+  it('never brings the calibration pattern back, whatever was stored', () => {
+    // What you calibrate persists; the act of calibrating does not.
+    // The HUD beside it is an overlay *on* the content, so an
+    // installation that restored with it on still shows its data. The
+    // pattern *replaces* the content, so restoring it on would put a
+    // graticule in front of an audience with no data behind it — the
+    // difference between a setting that came back and an installation
+    // that did not.
+    //
+    // Written against a raw blob with the field forced in, not against
+    // `PersistedOutput`, because the type does not have it — which is
+    // the mechanism, and this is the behaviour it buys.
+    const stored = { ...persisted({}), calibration: true } as unknown as Parameters<
+      typeof renderConfigFrom
+    >[0]
+    expect(renderConfigFrom(stored).calibration).toBe(false)
+  })
+
+  it('keeps the pattern out of what gets written, too', () => {
+    const written = toPersistedOutput({
+      label: 'output-1',
+      monitor: monitor({}),
+      mode: 'sos-equirect',
+      view: { trackCamera: true, split: false, rotationOffsetDeg: 0 },
+      render: { framebufferWidth: 4096, debugOverlay: false, calibration: true },
+    })
+    expect('calibration' in written).toBe(false)
   })
 })

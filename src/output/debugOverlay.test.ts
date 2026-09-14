@@ -28,6 +28,7 @@ function reading(over: Partial<DebugOverlayReading> = {}): DebugOverlayReading {
     fps: 30,
     link: 'live',
     gpu: 'NVIDIA GeForce RTX 4090 Laptop GPU',
+    gpuState: 'live',
     framebuffer: { width: 4096, height: 2048 },
     ...over,
   }
@@ -105,6 +106,34 @@ describe('formatOverlay', () => {
     expect(formatOverlay(reading({ gpu: null })).find(l => l.startsWith('gpu'))).toContain(
       'unreported',
     )
+  })
+
+  it('leaves the gpu line undecorated while the context is live', () => {
+    // Same rule as the Outputs panel's health badge: nothing is drawn
+    // for the healthy case. A line that carries "(live)" on every
+    // output of every installation is a line an operator stops
+    // reading, and this HUD is read at a glance from a few metres.
+    const line = formatOverlay(reading({ gpuState: 'live' })).find(l => l.startsWith('gpu'))
+    expect(line).toBe('gpu   NVIDIA GeForce RTX 4090 Laptop GPU')
+  })
+
+  it('names a lost context beside the renderer, not on a line of its own', () => {
+    // Beside it because it is the same subject, and because the HUD is
+    // six lines over a sphere — a seventh for a field that is empty
+    // almost always is the wrong trade.
+    expect(
+      formatOverlay(reading({ gpuState: 'lost' })).find(l => l.startsWith('gpu')),
+    ).toContain('context lost')
+  })
+
+  it('keeps saying so after a restore', () => {
+    // A restore is not silence. Three rebuilds its GL state, but this
+    // window has still had a GPU event this session, and that is worth
+    // knowing when someone is working out why a sphere looked wrong
+    // ten minutes ago.
+    expect(
+      formatOverlay(reading({ gpuState: 'restored' })).find(l => l.startsWith('gpu')),
+    ).toContain('context restored')
   })
 
   it('reports the framebuffer, which is not the window', () => {

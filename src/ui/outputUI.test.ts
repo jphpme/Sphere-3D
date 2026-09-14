@@ -33,11 +33,12 @@ function record(label: string, on: OutputMonitor): OutputRecord {
   return {
     label,
     mode: 'sos-equirect',
-    view: { trackCamera: true, split: false },
+    view: { trackCamera: true, split: false, rotationOffsetDeg: 0 },
     render: defaultRenderConfig(),
     monitor: on,
     ready: false,
     lastHealthCheckAtMs: null,
+  gpuLost: false,
     health: 'starting' as const,
     lastEvent: null,
     departing: false,
@@ -131,6 +132,25 @@ function painted(): boolean {
 
 const $ = <T extends Element>(sel: string): T | null => document.querySelector<T>(sel)
 const $$ = (sel: string): Element[] => [...document.querySelectorAll(sel)]
+
+/**
+ * A row's switch, found by its label rather than its position.
+ *
+ * Index-based lookup was here first and its own comment predicted how
+ * it would fail — "an unscoped index would silently start meaning a
+ * different control the next time a section moves" — which is exactly
+ * what rung 14b's fourth toggle did. Scoping to the row was not the
+ * fix; the ordinal was. A test asserting on the *debug overlay* switch
+ * should say so, and then adding a control above it is not a test
+ * change at all.
+ */
+const toggle = (labelText: string): HTMLInputElement => {
+  const found = $$('.output-item .output-toggle').find(
+    el => el.querySelector('.output-toggle-label')?.textContent === labelText,
+  )
+  if (!found) throw new Error(`no toggle labelled "${labelText}"`)
+  return found.querySelector('.output-toggle-box') as HTMLInputElement
+}
 
 beforeEach(() => {
   // The SPA's app-wide live region (`src/index.html`). The panel
@@ -356,13 +376,7 @@ describe('the Outputs panel', () => {
     $<HTMLButtonElement>('.output-add-btn')!.click()
     await until(() => $('.output-item') !== null, 'the new output row')
 
-    // Scoped to the row: the launch opt-in wears the same class, and an
-    // unscoped index would silently start meaning a different control
-    // the next time a section moves.
-    const boxes = $$('.output-item .output-toggle-box') as HTMLInputElement[]
-    // Three switches on a row now, and the HUD is the third.
-    expect(boxes).toHaveLength(3)
-    const overlay = boxes[2]
+    const overlay = toggle('Debug overlay (drawn on the output)')
     expect(overlay.checked).toBe(false)
 
     overlay.checked = true
@@ -378,6 +392,49 @@ describe('the Outputs panel', () => {
     expect(raw.setOutputView).not.toHaveBeenCalled()
   })
 
+  it('pushes the calibration pattern on the config channel, beside the debug HUD', async () => {
+    const { mgr, raw } = fakeManager()
+    mount(mgr)
+    await until(painted, 'the panel body')
+    $<HTMLButtonElement>('.output-add-btn')!.click()
+    await until(() => $('.output-item') !== null, 'the new output row')
+
+    const pattern = toggle('Calibration pattern')
+    expect(pattern.checked).toBe(false)
+
+    pattern.checked = true
+    pattern.dispatchEvent(new Event('change'))
+
+    await until(() => raw.setOutputRenderConfig.mock.calls.length === 1, 'the config push')
+    expect(raw.setOutputRenderConfig).toHaveBeenCalledWith('output-1', { calibration: true })
+    // The same reason the debug HUD goes here: it is a property of one
+    // window, and routing it through the view would put it inside the
+    // sequence the aggregator diffs — and would put a test pattern on
+    // every output when the operator is aligning one sphere.
+    expect(raw.setOutputView).not.toHaveBeenCalled()
+  })
+
+  it('sits directly above the rotation it is used with', async () => {
+    const { mgr } = fakeManager()
+    mount(mgr)
+    await until(painted, 'the panel body')
+    $<HTMLButtonElement>('.output-add-btn')!.click()
+    await until(() => $('.output-item') !== null, 'the new output row')
+
+    // Not decoration: the pattern is what the rotation is turned
+    // *against*, and an operator doing that job reaches for the two in
+    // this order. Pinned so a later control cannot quietly land between
+    // them.
+    const row = $('.output-item')!
+    const kids = [...row.children]
+    const pattern = kids.findIndex(
+      el => el.querySelector('.output-toggle-label')?.textContent === 'Calibration pattern',
+    )
+    const rotation = kids.findIndex(el => el.querySelector('.output-rotation-number') !== null)
+    expect(pattern).toBeGreaterThan(-1)
+    expect(rotation).toBe(pattern + 1)
+  })
+
   it('puts the debug checkbox back when the output refuses it', async () => {
     const { mgr, raw } = fakeManager()
     raw.setOutputRenderConfig.mockRejectedValue(new Error('output is gone'))
@@ -387,7 +444,7 @@ describe('the Outputs panel', () => {
     $<HTMLButtonElement>('.output-add-btn')!.click()
     await until(() => $('.output-item') !== null, 'the new output row')
 
-    const overlay = ($$('.output-item .output-toggle-box') as HTMLInputElement[])[2]
+    const overlay = toggle('Debug overlay (drawn on the output)')
     overlay.checked = true
     overlay.dispatchEvent(new Event('change'))
 
@@ -494,7 +551,8 @@ describe('the Outputs panel', () => {
     $<HTMLButtonElement>('.output-add-btn')!.click()
     await until(() => $('.output-item') !== null, 'the new output row')
 
-    const [track, split] = $$('.output-toggle-box') as HTMLInputElement[]
+    const track = toggle('Track operator camera')
+    const split = toggle('Split sphere')
     expect(track.checked).toBe(true)
     expect(split.checked).toBe(false)
 
@@ -518,7 +576,7 @@ describe('the Outputs panel', () => {
     $<HTMLButtonElement>('.output-add-btn')!.click()
     await until(() => $('.output-item') !== null, 'the new output row')
 
-    const split = ($$('.output-toggle-box') as HTMLInputElement[])[1]
+    const split = toggle('Split sphere')
     split.checked = true
     split.dispatchEvent(new Event('change'))
 
@@ -711,6 +769,26 @@ describe('the health badge', () => {
     expect(badge?.hasAttribute('aria-label')).toBe(false)
     // The visible chip stays two words — the explanation is for AT.
     expect($('.output-item-health-label')?.textContent).toBe('Link stale')
+  })
+
+  it('badges a lost GPU context, and says the sphere is blank rather than stale', async () => {
+    // The distinction is the entire value of the badge. A stale output
+    // is showing an old picture; this one is showing nothing at all,
+    // and on a projector both look like "something on the wall" until
+    // someone reads the row.
+    const fake = fakeManager()
+    mount(fake.mgr)
+    await until(painted, 'the panel to settle')
+    await fake.mgr.addOutput({ monitorIndex: 0 })
+    fake.records[0].health = 'gpu-lost'
+    fake.notifyChanged()
+
+    await until(() => $('.output-item-health') !== null, 'the badge')
+    const badge = $<HTMLElement>('.output-item-health')
+    expect(badge?.classList.contains('is-gpu-lost')).toBe(true)
+    expect($('.output-item-health-label')?.textContent).toBe('Display lost')
+    expect(badge?.textContent ?? '').toMatch(/nothing at all/i)
+    expect(badge?.hasAttribute('aria-label')).toBe(false)
   })
 
   it('announces a transition, because the repaint itself is silent', async () => {
@@ -1005,5 +1083,164 @@ describe('the position diagram', () => {
     // The display is still listed: it can be picked even if it cannot
     // be drawn to scale.
     expect($$('.output-monitor-select option')).toHaveLength(1)
+  })
+})
+
+describe('the rotation offset control (rung 14)', () => {
+  const slider = () => $<HTMLInputElement>('.output-field-slider')
+  const number = () => $<HTMLInputElement>('.output-rotation-number')
+
+  const withOutput = async () => {
+    const fake = fakeManager()
+    mount(fake.mgr)
+    await until(painted, 'the panel to settle')
+    await fake.mgr.addOutput({ monitorIndex: 0 })
+    fake.notifyChanged()
+    await until(() => slider() !== null, 'the rotation control')
+    return fake
+  }
+
+  it('offers a slider and a number showing the same value', async () => {
+    // Two controls for one job: finding the rotation is a drag while
+    // watching the sphere, reproducing a known one is typing it.
+    const fake = await withOutput()
+    fake.records[0].view.rotationOffsetDeg = 0
+
+    expect(slider()!.value).toBe('0')
+    expect(number()!.value).toBe('0')
+  })
+
+  it('commits a drag live, because the operator is looking at the sphere', async () => {
+    // `input`, not `change`. A rotation that only lands on mouse-up
+    // makes calibration a drag-release-look loop instead of a turn.
+    const fake = await withOutput()
+
+    slider()!.value = '90'
+    slider()!.dispatchEvent(new Event('input'))
+
+    await until(() => fake.raw.setOutputView.mock.calls.length > 0, 'the commit')
+    expect(fake.raw.setOutputView).toHaveBeenCalledWith('output-1', { rotationOffsetDeg: 90 })
+    // And the other control follows, so neither can show a value the
+    // output is not running at.
+    expect(number()!.value).toBe('90')
+  })
+
+  it('wraps a typed value into range instead of rejecting it', async () => {
+    const fake = await withOutput()
+
+    number()!.value = '370'
+    number()!.dispatchEvent(new Event('change'))
+
+    await until(() => fake.raw.setOutputView.mock.calls.length > 0, 'the commit')
+    expect(fake.raw.setOutputView).toHaveBeenCalledWith('output-1', { rotationOffsetDeg: 10 })
+    expect(slider()!.value).toBe('10')
+  })
+
+  it('ignores a half-typed value rather than snapping the sphere to zero', async () => {
+    // `Number('')` is 0, not NaN — so a lone `Number.isFinite` guard
+    // reads a field cleared for retyping as a deliberate zero and spins
+    // the picture back to the prime meridian between keystrokes. This
+    // test failed against exactly that, on the first version.
+    const fake = await withOutput()
+
+    for (const halfTyped of ['', '   ', '-']) {
+      number()!.value = halfTyped
+      number()!.dispatchEvent(new Event('change'))
+    }
+
+    expect(fake.raw.setOutputView).not.toHaveBeenCalled()
+  })
+
+  it('puts the value back when the commit fails', async () => {
+    // Same posture as every other control here: one that reports a
+    // state the output is not in is worse than one that refuses.
+    const fake = await withOutput()
+    fake.raw.setOutputView.mockRejectedValueOnce(new Error('no such window'))
+
+    slider()!.value = '120'
+    slider()!.dispatchEvent(new Event('input'))
+
+    await until(() => slider()!.value === '0', 'the value to be put back')
+    expect(number()!.value).toBe('0')
+  })
+})
+
+describe('announcing a GPU recovery (rung 13, case 5 — review)', () => {
+  it('says the display recovered, not that the link is in contact', async () => {
+    // `live` from any other state says "in contact with the control
+    // window" — true the whole time a GPU was lost, since the link was
+    // never what failed. A screen-reader operator would be told the one
+    // fact that was never in doubt and not the one that changed.
+    const fake = fakeManager()
+    mount(fake.mgr)
+    await until(painted, 'the panel to settle')
+    await fake.mgr.addOutput({ monitorIndex: 0 })
+    fake.records[0].health = 'gpu-lost'
+    fake.notifyChanged()
+    await until(() => $('.output-item-health') !== null, 'the badge')
+    document.getElementById('a11y-announcer')!.textContent = ''
+
+    fake.records[0].health = 'live'
+    fake.notifyChanged()
+
+    const live = document.getElementById('a11y-announcer')!
+    await until(() => (live.textContent ?? '') !== '', 'the announcement')
+    expect(live.textContent).toMatch(/recovered/i)
+    expect(live.textContent).not.toMatch(/in contact/i)
+  })
+
+  it('still says "in contact" when a stale link recovers', async () => {
+    // The special case is keyed on where the transition came *from*, so
+    // the ordinary stale→live recovery is untouched.
+    const fake = fakeManager()
+    mount(fake.mgr)
+    await until(painted, 'the panel to settle')
+    await fake.mgr.addOutput({ monitorIndex: 0 })
+    fake.records[0].health = 'stale'
+    fake.notifyChanged()
+    await until(() => $('.output-item-health') !== null, 'the badge')
+    document.getElementById('a11y-announcer')!.textContent = ''
+
+    fake.records[0].health = 'live'
+    fake.notifyChanged()
+
+    const live = document.getElementById('a11y-announcer')!
+    await until(() => (live.textContent ?? '') !== '', 'the announcement')
+    expect(live.textContent).toMatch(/in contact/i)
+  })
+})
+
+describe('the rotation slider under a fast drag (review)', () => {
+  it('does not let an older commit overwrite a newer one', async () => {
+    // `input` fires per drag event, so several commits are in flight at
+    // once and settle in whatever order IPC returns them. Without a
+    // generation guard a slow early commit resolving last rewrites the
+    // baseline to its own stale value.
+    const fake = fakeManager()
+    mount(fake.mgr)
+    await until(painted, 'the panel to settle')
+    await fake.mgr.addOutput({ monitorIndex: 0 })
+    fake.notifyChanged()
+    await until(() => $('.output-field-slider') !== null, 'the rotation control')
+    const slider = $<HTMLInputElement>('.output-field-slider')!
+
+    // The first commit hangs; the second resolves straight away.
+    let releaseFirst: (() => void) | undefined
+    fake.raw.setOutputView.mockImplementationOnce(
+      async () => new Promise<void>(resolve => { releaseFirst = () => resolve() }),
+    )
+    slider.value = '30'
+    slider.dispatchEvent(new Event('input'))
+    slider.value = '200'
+    slider.dispatchEvent(new Event('input'))
+    await until(() => fake.raw.setOutputView.mock.calls.length === 2, 'both commits')
+
+    // Now let the stale one finish, and fail it — the worst case, since
+    // its catch would otherwise repaint both controls.
+    releaseFirst?.()
+    await new Promise(r => setTimeout(r, 0))
+
+    expect(slider.value).toBe('200')
+    expect($<HTMLInputElement>('.output-rotation-number')!.value).toBe('200')
   })
 })

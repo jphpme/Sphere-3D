@@ -35,11 +35,6 @@
  *
  * Not here yet, on purpose:
  *
- * - **`uRotationOffsetRad`.** The per-installation longitude offset
- *   lands with the calibration tooling in ladder commit 14, whose
- *   backout note is explicit that until then the persisted value sits
- *   inert. `foldSplitU` is where it will apply — before the
- *   ray-march, per §"Calibration tooling".
  * - **Layer compositing.** This samples one sphere texture. The
  *   multi-shell stack arrives with `layerStack.ts` in commit 4.
  */
@@ -71,12 +66,29 @@ export interface EquirectParams {
   cameraOffset: Vec3
   /** Mirror the area of focus to the antipodal hemisphere. */
   split: boolean
+  /**
+   * Per-installation longitude rotation, **radians** (rung 14).
+   *
+   * An LED sphere is a physical object: its north-pole pin may not
+   * align with celestial north, or a museum may want the prime
+   * meridian facing the main entrance. This turns the whole picture on
+   * the sphere so the operator can put it where the room needs it.
+   *
+   * Radians rather than the degrees the operator types, because a
+   * `EquirectParams` is what `setParams` hands the shader — the same
+   * reason `cameraOffset` is a derived `Vec3` here and lat/lon/zoom on
+   * the wire. `OutputViewSettings.rotationOffsetDeg` holds the
+   * operator's number and `projectView` is the one place that
+   * converts, so no second conversion exists to disagree with it.
+   */
+  rotationOffsetRad: number
 }
 
-/** The centred, unsplit projection — a uniform 1:1 unwrap. */
+/** The centred, unsplit, unrotated projection — a uniform 1:1 unwrap. */
 export const IDENTITY_PARAMS: EquirectParams = {
   cameraOffset: { x: 0, y: 0, z: 0 },
   split: false,
+  rotationOffsetRad: 0,
 }
 
 /**
@@ -149,6 +161,31 @@ export function directionToLatLon(d: Vec3): { lat: number; lon: number } {
 }
 
 /**
+ * Turn the picture on the physical sphere by `rotationOffsetRad`.
+ *
+ * **Applied to the longitude, after the split fold, before the
+ * ray-march.** The plan says only "before the ray-march" and the old
+ * note here pointed at `foldSplitU`, which would be wrong: `foldSplitU`
+ * is periodic in U with period ½, so rotating its *input* would make a
+ * 180° offset a no-op on exactly the installations most likely to use
+ * split mode. Rotating the longitude the fold produced turns both
+ * copies together, which is what an operator aligning a sphere means.
+ *
+ * No wrap. The plan's snippet ends `mod(lon + offset, TWO_PI)`, which
+ * is dead arithmetic — the only consumers are `cos` and `sin`, and the
+ * offset is bounded to one turn, so there is no range to normalise and
+ * no precision to protect. Left out rather than transcribed, so the TS
+ * mirror and the GLSL stay one line each.
+ *
+ * Sign: a **positive** offset moves the picture east on the sphere, so
+ * an operator who sees the prime meridian 20° west of the doorway
+ * types 20. That is a convention, and the test pins it.
+ */
+export function applyRotationOffset(lonDeg: number, rotationOffsetRad: number): number {
+  return lonDeg - (rotationOffsetRad / DEG)
+}
+
+/**
  * Distance along `dir` from `origin` to the unit sphere.
  *
  * With the origin strictly inside the sphere the quadratic
@@ -177,7 +214,7 @@ export function equirectSourceUv(
 ): { u: number; v: number } {
   const folded = foldSplitU(u, params.split)
   const { lat, lon } = outputUvToLatLon(folded, v)
-  const dir = latLonToDirection(lat, lon)
+  const dir = latLonToDirection(lat, applyRotationOffset(lon, params.rotationOffsetRad))
   const o = params.cameraOffset
   const t = rayUnitSphereT(o, dir)
   const hit: Vec3 = {
@@ -215,6 +252,7 @@ export const EQUIRECT_UNIFORMS = {
   sphereTexture: 'uSphereTexture',
   cameraOffset: 'uCameraOffset',
   split: 'uSplit',
+  rotationOffset: 'uRotationOffsetRad',
 } as const
 
 /** Fullscreen pass. GLSL ES 1.00, matching the dialect Three's
@@ -240,6 +278,7 @@ varying vec2 vUv;
 uniform sampler2D uSphereTexture;
 uniform vec3 uCameraOffset;
 uniform bool uSplit;
+uniform float uRotationOffsetRad;
 
 const float PI = 3.14159265358979;
 const float TWO_PI = 6.28318530717959;
@@ -249,8 +288,11 @@ void main() {
   float u = uSplit ? fract(vUv.x * 2.0) : vUv.x;
 
   // Output pixel -> the direction it represents. V is bottom-up: v = 0
-  // is the south pole.
-  float lon = (u - 0.5) * TWO_PI;
+  // is the south pole. The per-installation rotation is subtracted from
+  // the longitude here — after the fold, so both copies of a split
+  // frame turn together, and with no mod() because the only consumers
+  // are cos and sin. See applyRotationOffset in this module.
+  float lon = (u - 0.5) * TWO_PI - uRotationOffsetRad;
   float lat = (vUv.y - 0.5) * PI;
   float cosLat = cos(lat);
   vec3 dir = vec3(cosLat * cos(lon), sin(lat), cosLat * sin(lon));
