@@ -711,6 +711,47 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
   updateInputClass()
   session.addEventListener('inputsourceschange', updateInputClass)
 
+  /**
+   * Is a controller driving this session, or is it touch-only?
+   *
+   * A capability test, deliberately NOT an archetype test. The archetype
+   * above guesses *how* a device is being used, per source, and Android
+   * AR has been observed resolving to `transient` rather than `screen` —
+   * so every gate written as `inputClass === 'screen'` silently did
+   * nothing on a phone whose taps report `transient-pointer`: the DOM
+   * touch layer never mounted, the XR pinch was never suppressed, and two
+   * taps kept driving the two-hand scale path from two unrelated
+   * transient sources. What the session states outright is whether a
+   * source carries a gamepad, and no phone has one; everything that means
+   * "this is a touch device" keys off that instead.
+   */
+  const hasGamepadInput = (): boolean => {
+    for (const source of session.inputSources) {
+      if (source?.gamepad) return true
+    }
+    return false
+  }
+  let touchDriven = !hasGamepadInput()
+  /**
+   * True once the DOM touch layer is mounted and owns globe manipulation.
+   *
+   * This — not the archetype — is what lets vrInteraction stand its own
+   * scale and grab paths down, and it is why a device where the DOM path
+   * cannot work (no dom-overlay granted, so no touch events mid-session)
+   * falls back to the pre-existing XR behaviour instead of losing
+   * manipulation entirely: the layer never mounts, so nothing stands
+   * down, and the two-hand floor in vrInteraction keeps that path sane.
+   */
+  let touchControlsMounted = false
+  const updateTouchDriven = (): void => {
+    const next = !hasGamepadInput()
+    if (next !== touchDriven) {
+      logger.info(`[VR] touch-driven input: ${touchDriven} -> ${next}`)
+      touchDriven = next
+    }
+  }
+  session.addEventListener('inputsourceschange', updateTouchDriven)
+
   // Whether the session actually granted the DOM overlay. Requested
   // as optional above, so Quest browsers (which don't implement the
   // dom-overlays module) silently skip it and this reads false —
@@ -722,6 +763,17 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     domOverlayRoot !== null &&
     (session as unknown as { domOverlayState?: { type?: string } })
       .domOverlayState?.type === 'screen'
+
+  // One line that answers "why did the AR gestures not engage?" without
+  // a device attached: the resolved archetype, how many input sources the
+  // session reports, whether any of them carries a gamepad, and whether
+  // the browser granted the DOM overlay. Everything downstream keys off
+  // the last two.
+  logger.info(
+    `[VR] input at start: class=${sessionTelemetry.inputClass} ` +
+      `sources=${session.inputSources.length} gamepad=${!touchDriven} ` +
+      `domOverlay=${domOverlayActive} touchDriven=${touchDriven}`,
+  )
 
   // Lazy-load the controller-model addon alongside Three.js. The
   // factory fetches per-controller glTF models from a CDN at runtime
@@ -1209,11 +1261,13 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     tourOverlay,
     placement,
     renderer,
-    // Latched input archetype — lets vrInteraction suppress touch-
-    // driven scale paths on handheld AR (the DOM slider is the
-    // exclusive zoom control there). Reads the live value so the
-    // lazy archetype resolution (first tap) is picked up.
-    isScreenInput: () => sessionTelemetry.inputClass === 'screen',
+    // True while the DOM touch layer owns manipulation — vrInteraction
+    // then declines its own globe grab and pinch, so one drag cannot
+    // rotate and move at once and two touches cannot fight the pinch.
+    // Keyed on the layer actually being mounted rather than on any
+    // guess about the device: unmounted means the XR path keeps its
+    // upstream behaviour.
+    isScreenInput: () => touchControlsMounted,
     onCameraSettled: () => {
       const state = captureVrCameraState()
       if (!state) return
@@ -1321,7 +1375,7 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
   // it on top of the AR camera feed.
   let zoomOverlay: VrZoomOverlayHandle | null = null
   const syncZoomOverlay = (): void => {
-    const wantOverlay = sessionTelemetry.inputClass === 'screen' && domOverlayActive
+    const wantOverlay = touchDriven && domOverlayActive
     if (wantOverlay && !zoomOverlay) {
       zoomOverlay = createVrZoomOverlay({
         onZoom: (raw) => {
@@ -1357,8 +1411,9 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
   const touchAxis = new THREE_.Vector3()
 
   const syncTouchControls = (): void => {
-    const wantControls = sessionTelemetry.inputClass === 'screen' && domOverlayActive
+    const wantControls = touchDriven && domOverlayActive
     if (wantControls && !touchControls) {
+      logger.info('[VR] AR touch layer mounted — one finger moves, two pinch/twist')
       touchControls = createVrTouchControls({
         onMove: (delta) => {
           if (currentAnchor) {
@@ -1408,6 +1463,7 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
       touchControls.dispose()
       touchControls = null
     }
+    touchControlsMounted = touchControls !== null
   }
   syncTouchControls()
   session.addEventListener('inputsourceschange', syncTouchControls)
@@ -1425,6 +1481,7 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
       session.removeEventListener('inputsourceschange', syncTouchControls)
       touchControls?.dispose()
       touchControls = null
+      touchControlsMounted = false
       placementTouch?.dispose()
       placementTouch = null
     },

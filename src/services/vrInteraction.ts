@@ -111,6 +111,23 @@ const THUMBSTICK_DEADZONE = 0.15
 const ZOOM_RATE_PER_SECOND = 2.5
 
 /**
+ * Smallest hand separation a two-hand gesture may start from, in metres.
+ *
+ * The pinch applies `currentDistance / startDistance` to the globe's
+ * scale, so a start separation near zero turns every subsequent
+ * millimetre into a huge scale change — the globe runs away on contact
+ * rather than on a gesture. That is not hypothetical: a phone's taps
+ * arrive as *transient* input sources whose world positions sit at the
+ * device, so a pair of them are centimetres apart at best, and the
+ * ratio is meaningless. Two hands deliberately posed for a pinch are
+ * tens of centimetres apart, so a 5 cm floor costs nothing there and
+ * takes the runaway away here. Inputs that cannot clear it fall back to
+ * idle, and the release-and-regrab the old guard already documented
+ * applies unchanged.
+ */
+const MIN_TWO_HAND_SEPARATION_M = 0.05
+
+/**
  * Multiplier applied to every rotation delta (single-hand and
  * two-hand). On-headset feedback called the rotation "slow…
  * doesn't quite keep up with the controllers". The native rotation
@@ -861,9 +878,12 @@ export function createVrInteraction(
     controllers[0].getWorldPosition(p0)
     controllers[1].getWorldPosition(p1)
     const startDistance = p0.distanceTo(p1)
-    // Guard against degenerate start distance (controllers coincident).
-    // Fall back to idle; user can release and re-grab.
-    if (startDistance < 0.001) return { kind: 'idle' }
+    // Guard against a start distance too small to be a gesture — see
+    // MIN_TWO_HAND_SEPARATION_M: this is what stops a phone's two
+    // transient sources (both at the device) from reporting an
+    // arbitrarily large pinch. Falls back to idle; the user can release
+    // and re-grab.
+    if (startDistance < MIN_TWO_HAND_SEPARATION_M) return { kind: 'idle' }
     return {
       kind: 'two-hand',
       // Fresh quaternion — this is stored as the two-hand baseline
