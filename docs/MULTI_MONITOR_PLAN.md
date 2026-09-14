@@ -2515,7 +2515,6 @@ Full enumeration:
     "core:window:allow-set-fullscreen",
     "core:window:allow-set-decorations",
     "core:window:allow-close",
-    "core:window:allow-destroy",
 
     {
       "identifier": "http:default",
@@ -2541,14 +2540,13 @@ Full enumeration:
 | `core:window:allow-is-decorated` / `is-fullscreen` | F11 toggle reads current state to decide direction |
 | `core:window:allow-set-fullscreen` / `set-decorations` | F11 toggle (per §3.6) writes new state |
 | `core:window:allow-close` | Output participates in graceful shutdown — emits `output_closing` then closes itself |
-| `core:window:allow-destroy` | **Required by `allow-close`, not optional.** Tauri's `onCloseRequested` does not let the Rust side finish the close: it hands that to JS, which calls `destroy()` on the window when the handler declines to `preventDefault()`. That call is checked against the *output*, so without this grant every close request is denied inside Tauri's own callback and an output cannot be closed by any means — Remove, Alt+F4 or otherwise. Found on hardware after rung 13 added the hook |
 | `http:default` with `https://*` | HLS manifest + segment fetch, image variant fetch from CDN/proxy origins |
 
 **What's deliberately *excluded* and why:**
 
 | Excluded | Reason |
 |---|---|
-| `core:default` | Grants `invoke` to all Tauri commands (download_manager, keychain, tile_cache, asset protocol). Output never invokes commands; all coordination flows through events. |
+| `core:default` | Excluded, but **it is not the boundary this table used to claim**. Tauri's ACL gates *plugin* commands (`plugin:window\|…`, `plugin:http\|…`) and app-defined `#[tauri::command]`s only when the app ships a permission manifest of its own — a `src-tauri/permissions/` directory or `AppManifest::commands` in `build.rs`. This app ships neither, so `has_app_acl_manifest` is false and `tauri::webview`'s gate (`plugin_command.is_some() \|\| has_app_acl_manifest \|\| !is_local`) never fires for a local caller. An output can therefore invoke `quit_app`, `keychain::get_api_key` and the download commands today. Pre-existing, unrelated to multi-monitor, and **open** — see *App commands are not ACL-gated* below. What excluding `core:default` does still buy is the plugin half: no asset protocol, no `plugin:fs`, no `plugin:updater`. |
 | `core:window:default` | Not because it is dangerous — it is read-only (getters + monitor queries), so including it would be harmless. Excluded for reviewability: enumerating the four getters the output actually uses makes the intent auditable, and keeps a future Tauri release quietly widening the `default` bundle from widening this file with it. |
 | `core:webview:allow-create-webview-window` | Output cannot spawn more windows. Only the manager (in the main window) creates output windows. |
 | `updater:default` | Auto-update is a main-window concern — Tauri restarts the app on update, taking outputs down with it. |
@@ -2556,6 +2554,77 @@ Full enumeration:
 | `core:shell:*`, `core:dialog:*`, `core:clipboard:*` | None apply to a render-only surface. |
 | Asset protocol scope (`asset.localhost`) | Output doesn't need to load locally-cached datasets. The control window does (offline downloads → output via the asset protocol on the main window only). For an output window to render a downloaded dataset, the manager broadcasts the `asset.localhost` URL and the output fetches it via HTTP — denied by the explicit deny on localhost below. **Implication: offline downloads are control-window-only in v1; outputs require network.** Phase 5 polish if installations need it. |
 | `http://localhost:*`, `http://127.0.0.1:*` | Explicit deny. The only legitimate localhost use case in `default.json` is local LLM servers (Ollama, LM Studio, llama.cpp), which the output never talks to. The deny is documentation-as-code for security review: outputs cannot phone home to anything on the operator's machine. |
+
+**How an output closes itself.** `core:window:allow-destroy` is
+**not** granted here, and getting to that took two tries worth
+recording, because the first one shipped.
+
+Registering `onCloseRequested` moves completion of the close out of
+Rust and into JS: `@tauri-apps/api`'s helper awaits the handler and
+then calls `destroy()` on the window unless the handler called
+`preventDefault()`. That `destroy()` is ACL-checked against the
+**output**, so granting `allow-close` alone made every output
+unclosable — the manager's Remove, the operator's Alt+F4, all of it —
+with the denial happening inside Tauri's own listener callback, where
+nothing in this repo can observe it: `handle.close()` resolves
+normally on the manager side and `discard()` goes on to drop the
+record, so the panel row disappears and the window stays on the
+projector. Task manager, or nothing. Found on hardware.
+
+Granting `allow-destroy` fixed that and gave away more than it fixed.
+Neither `close` nor `destroy` is scoped to the calling window —
+`windows: ["output-*"]` restricts *callers*, not *targets* — so a
+compromised output could tear down the control window or a sibling.
+And `destroy` skips the target's own `onCloseRequested`, so no
+`output_closing` is emitted, so `classifyDeparture` reads absence and
+calls it a **crash**: three of those blocklist a working monitor for
+the session, which makes "quietly disable the rig's displays one at a
+time" a reachable outcome. Raised in review on the PR that shipped it.
+
+What the output does instead is `preventDefault()` and invoke
+`close_self`, an app command in `lib.rs` that destroys the window
+Tauri hands it:
+
+```rust
+#[tauri::command]
+fn close_self<R: tauri::Runtime>(window: tauri::Window<R>) { /* window.destroy() */ }
+```
+
+There is no target parameter to forge, so an output can only ever
+destroy itself, and the generic grant comes back out of this file.
+`acl_tests` in `lib.rs` pins both halves against the real capability
+files through `tauri::test`'s `MockRuntime`: an `output-1` window can
+invoke `close_self`, cannot invoke `plugin:window|destroy`, and the
+control window has not lost it.
+
+**Open: app commands are not ACL-gated.** `close_self` needs no
+permission entry, and the reason is a hole rather than a convenience.
+Tauri's ACL covers plugin commands; an app-defined
+`#[tauri::command]` is checked only when the app ships a permission
+manifest of its own — a `src-tauri/permissions/` directory, or
+`AppManifest::commands` in `build.rs`. This app ships neither
+(`build.rs` is a bare `tauri_build::build()`), so `has_app_acl_manifest`
+is false and the gate in `tauri::webview`,
+
+```rust
+if (plugin_command.is_some() || has_app_acl_manifest || !is_local)
+  && invoke.acl.is_none() { /* reject */ }
+```
+
+is false for every local caller. So an output window can invoke
+`quit_app`, `keychain::get_api_key` / `set_api_key`, `get_tile` and the
+eight download commands, today — the exposure that matters is the OS
+keychain entry holding the LLM API key, and ending an installation
+mid-show.
+
+This predates multi-monitor and is not caused by it; what multi-monitor
+added is a *second, less trusted* webview that inherits it. Closing it
+means giving the app a manifest and then granting each command
+explicitly — `default.json` gains the full set, `output.json` gains
+`close_self` and nothing else. That is a change whose failure mode is
+every command in the app silently refusing, so it wants a desktop run
+rather than a build-green, and it is deliberately **not** bundled with
+the fix above.
 
 **IPC event direction.** The manager-→output direction uses
 `emit_to('output-N', ...)` from the main window. The

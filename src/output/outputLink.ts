@@ -662,11 +662,22 @@ export async function connectOutputLink(
  * `core:window:allow-current-monitor` for the placement check. `label`
  * needs no grant: it is a property Tauri sets on the window object,
  * not a command.
+ *
+ * `close_self` needs no grant either, and for a less comfortable
+ * reason: Tauri's ACL gates *plugin* commands, and app-defined ones
+ * only when the app ships a permission manifest of its own — which
+ * this app does not. So every `#[tauri::command]` in `lib.rs` is
+ * already reachable from here, `quit_app` and the keychain included,
+ * and `close_self` relies on that rather than on a grant. Narrowing it
+ * is `docs/MULTI_MONITOR_PLAN.md` §6's open item; what this file can
+ * do is not ask for a *window* permission that reaches every window
+ * when a self-only command reaches one.
  */
 export async function createTauriLinkHost(): Promise<OutputLinkHost> {
-  const [windowApi, eventApi] = await Promise.all([
+  const [windowApi, eventApi, coreApi] = await Promise.all([
     import('@tauri-apps/api/window'),
     import('@tauri-apps/api/event'),
+    import('@tauri-apps/api/core'),
   ])
   const self = windowApi.getCurrentWindow()
 
@@ -690,11 +701,35 @@ export async function createTauriLinkHost(): Promise<OutputLinkHost> {
       await eventApi.emit(event, payload)
     },
     async onCloseRequested(handler) {
-      // Deliberately not `preventDefault()`-ing the close. The operator
-      // asked for this window to go and it goes; the announcement is a
-      // courtesy to the manager, not a veto, and a hook that could
-      // block would be a hook that can strand an undecorated window.
-      await self.onCloseRequested(() => handler())
+      await self.onCloseRequested(async event => {
+        handler()
+        // `preventDefault()` here is not a veto — it takes the close
+        // away from the API helper, which completes it by calling
+        // `destroy()` on this window, and hands it to `close_self` on
+        // the next line instead. The helper's route is the one that
+        // needs `core:window:allow-destroy`, and that grant is not
+        // scoped to the calling window: it would let a compromised
+        // output tear down the control window or a sibling, and
+        // `destroy` skips a sibling's own `onCloseRequested`, so the
+        // manager would read that departure as a crash — three of
+        // which blocklist a working monitor for the session.
+        // `close_self` takes no label at all (Tauri supplies the
+        // calling window), so this window can only ever destroy itself.
+        //
+        // Still nothing that can block: a hook that could veto is a
+        // hook that can strand an undecorated window, so the only way
+        // out of here is the window going away.
+        event.preventDefault()
+        try {
+          await coreApi.invoke('close_self')
+        } catch (err) {
+          // Loud rather than swallowed: if this ever fails the window
+          // stays on the projector with no other way to close it —
+          // the exact bug `allow-destroy` was granted to fix, and that
+          // this replaces.
+          logger.error('[output] close_self failed; the window will not close:', err)
+        }
+      })
     },
   }
 }

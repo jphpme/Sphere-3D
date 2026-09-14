@@ -75,16 +75,61 @@ fn __dev_force_panic() {
 /// menu accelerator because a window with no menu bar — which is what
 /// kiosk mode is — does not reliably fire one.
 ///
-/// **Who may call it is already decided by the capability split.**
-/// `invoke` needs `core:default`, which `capabilities/default.json`
-/// grants the main window and `capabilities/output.json` deliberately
-/// withholds. So an output cannot quit the installation even if its
-/// webview is compromised, and that is structural rather than a
-/// convention the caller has to keep. The `windowChrome` hotkey is
-/// wired only in the control window on top of that.
+/// **Who may call it is not decided by the capability split**, and this
+/// paragraph used to say the opposite. Tauri's ACL gates *plugin*
+/// commands (`plugin:window|...`, `plugin:http|...`); an app-defined
+/// command is checked only when the app ships an ACL manifest of its
+/// own, and this one does not — `build.rs` is a bare
+/// `tauri_build::build()` and there is no `src-tauri/permissions/`
+/// directory, so `has_app_acl_manifest` is false and the gate in
+/// `tauri::webview` (`plugin_command.is_some() || has_app_acl_manifest
+/// || !is_local`) is false for every local caller. Withholding
+/// `core:default` from `capabilities/output.json` therefore buys
+/// nothing here: an output window can reach this command, and the
+/// keychain and download commands beside it. Narrowing that means
+/// giving the app a permission manifest and granting each command
+/// explicitly, which is its own change and is written up in
+/// `docs/MULTI_MONITOR_PLAN.md` §6. The `windowChrome` hotkey is wired
+/// only in the control window, which is a convention rather than a
+/// boundary.
 #[tauri::command]
 fn quit_app(app: tauri::AppHandle) {
     app.exit(0);
+}
+
+/// Destroy the window that called this.
+///
+/// The one thing an output window invokes, and it exists so that
+/// `core:window:allow-destroy` can stay out of
+/// `capabilities/output.json`.
+///
+/// Registering `onCloseRequested` moves completion of the close into
+/// JS: `@tauri-apps/api`'s helper awaits the handler and then calls
+/// `destroy()` on the window unless the handler called
+/// `preventDefault()`. That call is ACL-checked against the *output*,
+/// so granting `allow-close` alone made every output unclosable —
+/// Remove, Alt+F4 and all — with the denial happening inside Tauri's
+/// own listener callback where nothing in this repo can observe it.
+/// Granting `allow-destroy` fixed that and handed a compromised output
+/// rather more than it needed: neither `close` nor `destroy` is scoped
+/// to the calling window, so an output could tear down the control
+/// window or a sibling — and `destroy` skips the sibling's own
+/// `onCloseRequested`, which is precisely what makes the manager read a
+/// departure as a *crash* (three of those blocklist a working monitor
+/// for the session).
+///
+/// **This takes no label.** Tauri supplies the calling window, so there
+/// is no target argument to forge and an output can only ever destroy
+/// itself. The output's close handler calls `preventDefault()` and
+/// invokes this instead of letting the helper's `destroy()` run.
+#[tauri::command]
+fn close_self<R: tauri::Runtime>(window: tauri::Window<R>) {
+    // Swallowed like the kiosk failures below: the window is on its way
+    // out and there is no surface left to report to. A failure here is
+    // visible as the window simply not closing.
+    if let Err(err) = window.destroy() {
+        eprintln!("[output] could not destroy {}: {err}", window.label());
+    }
 }
 
 /// CLI flag and environment variable that launch straight into kiosk
@@ -256,6 +301,7 @@ pub fn run() {
             download_commands::get_downloads_size,
             download_commands::is_downloading,
             quit_app,
+            close_self,
             __dev_force_panic,
         ])
         .run(tauri::generate_context!())
@@ -318,5 +364,100 @@ mod tests {
             args(&["terraviz", "--kiosk"]),
             Some("0".to_string())
         ));
+    }
+}
+
+/// Does an `output-*` window have what `close_self` needs, and has it
+/// stopped having what it must not?
+///
+/// Neither half is readable off `capabilities/output.json` alone, which
+/// is why these run rather than being argued in a comment. An app
+/// command needs no permission entry at all — Tauri's ACL gates
+/// *plugin* commands, and app-defined ones only when the app ships a
+/// permission manifest of its own, which this app does not — while
+/// `plugin:window|destroy` does need one and no longer has it. Getting
+/// the first half wrong puts a window on a projector that cannot be
+/// closed by any means; getting the second wrong hands a compromised
+/// output the ability to destroy the control window or a sibling.
+///
+/// `generate_context!()` embeds the ACL resolved from the real
+/// `capabilities/` directory and `get_ipc_response` puts the request
+/// through the same `RuntimeAuthority` a packaged build uses, so these
+/// are the shipped files being exercised, not a restatement of them.
+#[cfg(all(test, desktop))]
+mod acl_tests {
+    use super::*;
+    use tauri::test::{mock_builder, MockRuntime, INVOKE_KEY};
+    use tauri::webview::InvokeRequest;
+
+    fn app() -> tauri::App<MockRuntime> {
+        mock_builder()
+            // `close_self` alone: it is the only command under test, and
+            // `quit_app` takes a non-generic `AppHandle` (i.e. `AppHandle<Wry>`),
+            // which no `MockRuntime` app can supply.
+            .invoke_handler(tauri::generate_handler![close_self])
+            .build(tauri::generate_context!())
+            .expect("failed to build the mock app")
+    }
+
+    fn request(cmd: &str) -> InvokeRequest {
+        InvokeRequest {
+            cmd: cmd.into(),
+            callback: tauri::ipc::CallbackFn(0),
+            error: tauri::ipc::CallbackFn(1),
+            url: "tauri://localhost".parse().unwrap(),
+            body: tauri::ipc::InvokeBody::default(),
+            headers: Default::default(),
+            invoke_key: INVOKE_KEY.to_string(),
+        }
+    }
+
+    fn window(
+        app: &tauri::App<MockRuntime>,
+        label: &str,
+    ) -> tauri::WebviewWindow<MockRuntime> {
+        tauri::WebviewWindowBuilder::new(app, label, Default::default())
+            .build()
+            .expect("failed to build the window")
+    }
+
+    #[test]
+    fn an_output_can_close_itself() {
+        let app = app();
+        let output = window(&app, "output-1");
+        assert!(
+            tauri::test::get_ipc_response(&output, request("close_self")).is_ok(),
+            "an output must be able to invoke close_self, or it cannot be closed at all"
+        );
+    }
+
+    #[test]
+    fn an_output_cannot_destroy_another_window() {
+        let app = app();
+        let output = window(&app, "output-1");
+        let err = tauri::test::get_ipc_response(&output, request("plugin:window|destroy"))
+            .expect_err("an output must not hold the generic window destroy");
+        let message = err.to_string();
+        assert!(
+            message.contains("not allowed"),
+            "expected an ACL rejection, got: {message}"
+        );
+    }
+
+    #[test]
+    fn the_control_window_keeps_the_generic_destroy() {
+        // The manager tears an output down with it, so removing the
+        // grant from `output.json` must not have reached `default.json`.
+        // A missing `label` argument fails *after* the ACL, so the
+        // distinction being asserted is the rejection text, not success.
+        let app = app();
+        let main = window(&app, "main");
+        if let Err(err) = tauri::test::get_ipc_response(&main, request("plugin:window|destroy")) {
+            let message = err.to_string();
+            assert!(
+                !message.contains("not allowed"),
+                "the control window lost the destroy grant: {message}"
+            );
+        }
     }
 }
