@@ -231,6 +231,17 @@ export interface VrInteractionContext {
    */
   isScreenInput?: () => boolean
   /**
+   * True while the DOM touch layer owns globe manipulation (`?vrDebug`
+   * aside, this is the handheld-AR path that gives one finger = move,
+   * two = pinch/twist). When set, this layer declines to grab the globe
+   * so a single drag cannot rotate and move at once and two touches
+   * cannot fight the DOM pinch. Distinct from `isScreenInput`, which
+   * asks the wider question "is this session touch-only at all" and is
+   * what suppresses the pinch below — a device with no DOM overlay has
+   * no touch layer but is still touch-only, and must not pinch.
+   */
+  domTouchActive?: () => boolean
+  /**
    * Fired when globe manipulation settles: trigger-drag release
    * (to idle, not inertia), two-hand pinch release, flick-inertia
    * decay stop, or thumbstick-zoom release. Caller computes the
@@ -1109,7 +1120,7 @@ export function createVrInteraction(
     // two fingers would fight the pinch. Every branch above still runs,
     // so HUD / browse / tour / Place-button taps keep working exactly as
     // they did; only the globe grab is declined on this input class.
-    if (ctx.isScreenInput?.()) return
+    if (ctx.domTouchActive?.()) return
 
     // Any globe hit (primary or secondary) — flip this trigger's
     // rotation bit and capture which globe was grabbed so the
@@ -1401,13 +1412,14 @@ export function createVrInteraction(
     if (currentDistance < 0.001) return
 
     // Pinch zoom: scale is proportional to the distance ratio,
-    // clamped to the globe's configured min/max. SUPPRESSED on the
-    // screen input class (handheld AR): two simultaneous touches
-    // register as two transient input sources, so an incidental
-    // second finger would pinch-scale the globe — there the DOM
-    // zoom slider is the exclusive zoom control. Rigid-body rotation
-    // below still applies (two-finger twist rotates, matching the
-    // single-finger drag the class already supports).
+    // clamped to the globe's configured min/max. SUPPRESSED on any
+    // touch-only session: two simultaneous touches register as two
+    // transient input sources whose world positions sit at the device,
+    // so the "distance" between them is meaningless and the ratio runs
+    // away — the globe jumps to MAX_GLOBE_SCALE on contact and never
+    // comes back down. Real controllers carry a gamepad and are tens of
+    // centimetres apart, so they keep this path. Rigid-body rotation
+    // below still applies (two-finger twist rotates).
     if (!ctx.isScreenInput?.()) {
       const scale = Math.max(
         MIN_GLOBE_SCALE,

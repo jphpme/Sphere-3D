@@ -38,6 +38,7 @@ import { getSharedLumaSampler } from './glLumaSampler'
 import { createVrZoomOverlay, type VrZoomOverlayHandle } from '../ui/vrZoomOverlay'
 import { createVrPlacementTouch, type VrPlacementTouchHandle } from '../ui/vrPlacementTouch'
 import { createVrTouchControls, type VrTouchControlsHandle } from '../ui/vrTouchControls'
+import { createVrDebugPanel, type VrDebugPanelHandle } from './vrDebugPanel'
 import { MAX_GLOBE_SCALE, MIN_GLOBE_SCALE } from './vrScene'
 import { createVrPlacement, type VrPlacementHandle } from './vrPlacement'
 import { computeGazeSpawnPosition } from './vrSpawn'
@@ -1052,6 +1053,21 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     browseOpen: browse.isVisible(),
   })
 
+  // --- Optional in-view diagnostic (`?vrDebug=1`) ---
+  // The phone this AR mode runs on has no devtools, so a bug report has
+  // to be readable off the screen itself. Inert unless the URL asks.
+  // See vrDebugPanel.ts for what each field answers.
+  const debugEnabled =
+    typeof window !== 'undefined' &&
+    new URLSearchParams(window.location.search).get('vrDebug') === '1'
+  let debugPanel: VrDebugPanelHandle | null = null
+  if (debugEnabled) {
+    debugPanel = createVrDebugPanel(THREE_)
+    scene.scene.add(debugPanel.mesh)
+    logger.info('[VR] debug panel enabled (?vrDebug=1)')
+  }
+  let lastDebugRefreshMs = 0
+
   // XRControllerModelFactory was imported earlier (before scene
   // construction) so the loading-scene fade-out timing stays
   // predictable — see the comment at that import.
@@ -1267,7 +1283,14 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     // Keyed on the layer actually being mounted rather than on any
     // guess about the device: unmounted means the XR path keeps its
     // upstream behaviour.
-    isScreenInput: () => touchControlsMounted,
+    // Touch-only session (no gamepad anywhere): the XR pinch is driven
+    // by transient sources whose positions sit at the device, so its
+    // ratio is meaningless and it is the thing that runs the globe to
+    // maximum scale on any contact. Suppressed for the whole class.
+    isScreenInput: () => touchDriven,
+    // The DOM layer actually owning manipulation is a narrower fact, and
+    // it is the one that should stop this layer grabbing the globe.
+    domTouchActive: () => touchControlsMounted,
     onCameraSettled: () => {
       const state = captureVrCameraState()
       if (!state) return
@@ -1851,6 +1874,27 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     // pulses, fade-out tween, progress bar ease) — only while the
     // loading group is still alive.
     active.loading?.update(delta)
+
+    // Diagnostic readout: position every frame (it is camera-locked),
+    // re-text it at 1 Hz — `getDatasets()` builds a fresh array each
+    // call, which is why the browse poll is 1 Hz too.
+    if (debugPanel) {
+      debugPanel.update(active.camera)
+      if (now - lastDebugRefreshMs > 1000) {
+        lastDebugRefreshMs = now
+        debugPanel.setLines([
+          `${isAr ? 'AR' : 'VR'} class=${sessionTelemetry.inputClass} src=${session.inputSources.length} ` +
+            `pad=${hasGamepadInput() ? 'y' : 'n'} domOv=${domOverlayActive ? 'y' : 'n'}`,
+          `touch=${touchDriven ? 'y' : 'n'} layer=${touchControlsMounted ? 'y' : 'n'} ` +
+            `mounted=${touchControls !== null ? 'y' : 'n'}`,
+          `img=${ctx.getDatasetTexture() ? 'y' : 'n'} load=${active.loading ? 'y' : 'n'} ` +
+            `anchor=${currentAnchor ? 'y' : 'n'} place=${placement ? placement.getStep() : '-'}`,
+          `cat=${ctx.getDatasets().length} panels=${ctx.getPanelCount()} ` +
+            `scale=${active.scene.globe.scale.x.toFixed(2)}`,
+        ])
+      }
+    }
+
     active.renderer.render(active.scene.scene, active.camera)
   })
 
@@ -1898,6 +1942,11 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     cancelFlyTo()
     a.interaction.dispose()
     a.disposeZoomOverlay()
+    if (debugPanel) {
+      a.scene.scene.remove(debugPanel.mesh)
+      debugPanel.dispose()
+      debugPanel = null
+    }
     a.hud.dispose()
     a.browse.dispose()
     a.scene.scene.remove(a.tourControls.mesh)
