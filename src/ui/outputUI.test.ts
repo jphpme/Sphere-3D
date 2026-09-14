@@ -1107,3 +1107,83 @@ describe('the rotation offset control (rung 14)', () => {
     expect(number()!.value).toBe('0')
   })
 })
+
+describe('announcing a GPU recovery (rung 13, case 5 — review)', () => {
+  it('says the display recovered, not that the link is in contact', async () => {
+    // `live` from any other state says "in contact with the control
+    // window" — true the whole time a GPU was lost, since the link was
+    // never what failed. A screen-reader operator would be told the one
+    // fact that was never in doubt and not the one that changed.
+    const fake = fakeManager()
+    mount(fake.mgr)
+    await until(painted, 'the panel to settle')
+    await fake.mgr.addOutput({ monitorIndex: 0 })
+    fake.records[0].health = 'gpu-lost'
+    fake.notifyChanged()
+    await until(() => $('.output-item-health') !== null, 'the badge')
+    document.getElementById('a11y-announcer')!.textContent = ''
+
+    fake.records[0].health = 'live'
+    fake.notifyChanged()
+
+    const live = document.getElementById('a11y-announcer')!
+    await until(() => (live.textContent ?? '') !== '', 'the announcement')
+    expect(live.textContent).toMatch(/recovered/i)
+    expect(live.textContent).not.toMatch(/in contact/i)
+  })
+
+  it('still says "in contact" when a stale link recovers', async () => {
+    // The special case is keyed on where the transition came *from*, so
+    // the ordinary stale→live recovery is untouched.
+    const fake = fakeManager()
+    mount(fake.mgr)
+    await until(painted, 'the panel to settle')
+    await fake.mgr.addOutput({ monitorIndex: 0 })
+    fake.records[0].health = 'stale'
+    fake.notifyChanged()
+    await until(() => $('.output-item-health') !== null, 'the badge')
+    document.getElementById('a11y-announcer')!.textContent = ''
+
+    fake.records[0].health = 'live'
+    fake.notifyChanged()
+
+    const live = document.getElementById('a11y-announcer')!
+    await until(() => (live.textContent ?? '') !== '', 'the announcement')
+    expect(live.textContent).toMatch(/in contact/i)
+  })
+})
+
+describe('the rotation slider under a fast drag (review)', () => {
+  it('does not let an older commit overwrite a newer one', async () => {
+    // `input` fires per drag event, so several commits are in flight at
+    // once and settle in whatever order IPC returns them. Without a
+    // generation guard a slow early commit resolving last rewrites the
+    // baseline to its own stale value.
+    const fake = fakeManager()
+    mount(fake.mgr)
+    await until(painted, 'the panel to settle')
+    await fake.mgr.addOutput({ monitorIndex: 0 })
+    fake.notifyChanged()
+    await until(() => $('.output-field-slider') !== null, 'the rotation control')
+    const slider = $<HTMLInputElement>('.output-field-slider')!
+
+    // The first commit hangs; the second resolves straight away.
+    let releaseFirst: (() => void) | undefined
+    fake.raw.setOutputView.mockImplementationOnce(
+      async () => new Promise<void>(resolve => { releaseFirst = () => resolve() }),
+    )
+    slider.value = '30'
+    slider.dispatchEvent(new Event('input'))
+    slider.value = '200'
+    slider.dispatchEvent(new Event('input'))
+    await until(() => fake.raw.setOutputView.mock.calls.length === 2, 'both commits')
+
+    // Now let the stale one finish, and fail it — the worst case, since
+    // its catch would otherwise repaint both controls.
+    releaseFirst?.()
+    await new Promise(r => setTimeout(r, 0))
+
+    expect(slider.value).toBe('200')
+    expect($<HTMLInputElement>('.output-rotation-number')!.value).toBe('200')
+  })
+})

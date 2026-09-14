@@ -535,6 +535,7 @@
   "outputs.item.health.stale": "Link stale",
   "outputs.item.health.starting": "Starting",
   "outputs.item.healthAnnounce.gpuLost": "{monitor}: display lost. The output has lost its graphics context and is showing nothing.",
+  "outputs.item.healthAnnounce.gpuRecovered": "{monitor}: display recovered. The output is drawing again.",
   "outputs.item.healthAnnounce.live": "{monitor}: in contact with the control window.",
   "outputs.item.healthAnnounce.stale": "{monitor}: link stale. The output is still showing its last frame.",
   "outputs.item.healthAnnounce.starting": "{monitor}: starting.",

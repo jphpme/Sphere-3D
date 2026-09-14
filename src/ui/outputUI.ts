@@ -853,7 +853,19 @@ function announceHealthChanges(
     const was = previous.get(record.label)
     if (was === undefined || was === record.health) continue
     const monitor = monitorRowName(record.monitor, monitors)
-    said.push(t(HEALTH_ANNOUNCE[record.health], { monitor }))
+    // Recovery from a GPU loss is announced as *that*, not as the
+    // generic `live`, which says only "in contact with the control
+    // window" — true the whole time, since the link was never the thing
+    // that failed. A screen-reader operator would be told the one fact
+    // that was never in doubt and not the one that changed. It is the
+    // only transition where the destination alone is not enough to
+    // describe what happened, which is why this is a special case
+    // rather than a second table keyed on both ends. Found in review.
+    said.push(
+      record.health === 'live' && was === 'gpu-lost'
+        ? t('outputs.item.healthAnnounce.gpuRecovered', { monitor })
+        : t(HEALTH_ANNOUNCE[record.health], { monitor }),
+    )
   }
   if (said.length > 0) announcePolite(said.join(' '))
 }
@@ -1016,11 +1028,19 @@ function buildRow(
  * **A property of the room, not of the session.** An LED sphere is a
  * physical object whose north-pole pin may not align with celestial
  * north, or whose owner wants the prime meridian facing the main
- * entrance. The operator loads the calibration pattern, turns this
- * until the prime meridian lands where the building needs it, and never
- * touches it again — which is why it is persisted per output rather
- * than being a session control, and why two outputs on two spheres each
- * carry their own.
+ * entrance. The operator turns this until the prime meridian lands
+ * where the building needs it, and never touches it again — which is
+ * why it is persisted per output rather than being a session control,
+ * and why two outputs on two spheres each carry their own.
+ *
+ * **What they align against is rung 14b and is not built yet.** The
+ * plan pairs this control with a procedural calibration test pattern
+ * behind a `__terraviz_calibration__` sentinel, which is what makes the
+ * prime meridian visible on a sphere showing no dataset. Until that
+ * lands this control is usable only over loaded content, so do not
+ * write a docstring — or a label — that tells an operator to load a
+ * pattern that does not exist. Caught in review, having done exactly
+ * that.
  *
  * **A slider and a number, both live**, because the two halves of the
  * job want different controls: finding the right rotation is a drag
@@ -1072,6 +1092,19 @@ function buildRotationOffset(mgr: OutputPanelManager, record: OutputRecord): HTM
   number.setAttribute('aria-label', t('outputs.item.rotationOffset'))
 
   let applied = record.view.rotationOffsetDeg
+  /**
+   * Which commit is the latest, so an older one cannot win.
+   *
+   * The framebuffer picker beside this needs no such thing because it
+   * fires on `change` — one commit per interaction. This one fires on
+   * `input`, so a drag starts a commit per event and they settle in
+   * whatever order the IPC returns them. Without the generation, a slow
+   * early commit resolving after a fast later one rewrites `applied` to
+   * the older value, and its failure path then puts *both* controls
+   * back to a number the output is no longer running at. Found in
+   * review, and it is a hazard the live-commit choice created.
+   */
+  let generation = 0
   const show = (deg: number): void => {
     slider.value = String(deg)
     number.value = String(deg)
@@ -1092,16 +1125,22 @@ function buildRotationOffset(mgr: OutputPanelManager, record: OutputRecord): HTM
     if (!Number.isFinite(parsed)) return
     const next = ((parsed % 360) + 360) % 360
     show(next)
+    const mine = ++generation
     void mgr
       .setOutputView(record.label, { rotationOffsetDeg: next })
       .then(() => {
-        applied = next
+        // A stale success must not rewrite the baseline a newer commit
+        // has already moved past.
+        if (mine === generation) applied = next
       })
       .catch(err => {
         // Same posture as every other control here: one that reports a
-        // state the output is not in is worse than one that refuses.
+        // state the output is not in is worse than one that refuses —
+        // but only the newest commit gets to say what that state is. An
+        // older rejection landing after a newer success would otherwise
+        // drag the sphere back to a value nobody asked for.
         logger.warn('[outputUI] rotation offset change failed:', err)
-        show(applied)
+        if (mine === generation) show(applied)
       })
   }
 

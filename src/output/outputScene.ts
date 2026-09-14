@@ -575,6 +575,29 @@ export async function createOutputScene(
   }
   options.canvas.addEventListener('webglcontextlost', onContextLost, false)
   options.canvas.addEventListener('webglcontextrestored', onContextRestored, false)
+  // Reconciled, not merely subscribed. Three's listeners go on inside
+  // the constructor above and this module's go on after it returns, so
+  // a context already gone by this line would leave Three's renderer
+  // refusing to draw while `gpuState` reported `live` — and the HUD,
+  // the manager and the telemetry would all miss the incident.
+  //
+  // The spec queues `webglcontextlost` as a task rather than firing it
+  // synchronously, so in practice nothing can run between the
+  // constructor and this line. That is an argument, and `isContextLost()`
+  // is an observation: it costs one call at construction and does not
+  // depend on the event loop behaving the way the argument says.
+  // Raised in review on the PR that added this block.
+  try {
+    const gl = (
+      renderer as unknown as { getContext?: () => { isContextLost?: () => boolean } | null }
+    ).getContext?.()
+    if (gl?.isContextLost?.()) onContextLost()
+  } catch (err) {
+    // A driver that will not answer costs the reconciliation, not the
+    // scene — the listeners above are still installed and a later loss
+    // is still seen.
+    logger.warn('[Output] could not check the initial context state:', err)
+  }
 
   const scene = new THREE_.Scene()
   const camera = new THREE_.OrthographicCamera(-1, 1, 1, -1, 0, 1)

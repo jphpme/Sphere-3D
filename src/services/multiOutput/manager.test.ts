@@ -1072,11 +1072,13 @@ describe('a lost GPU context (rung 13, case 5)', () => {
     expect(manager.outputs()[0].health).toBe('live')
   })
 
-  it('reports one Tier A failure, on the loss and not again on the recovery', async () => {
-    // One row per incident. Emitting again on the restore would
-    // double-count every output that came back, and the schema has no
-    // field that could express the outcome without a change this slice
-    // does not make.
+  it('reports the incident as a PAIR — opened on the loss, closed on the recovery', async () => {
+    // The first draft emitted only the opening row and argued that one
+    // row per incident avoided double-counting. Review caught that
+    // `recovered` is defined on the schema as whether the output
+    // carried on afterwards — and an output Three rebuilds does — so a
+    // never-updated `false` reported every recovered installation as
+    // unrecovered, on the dashboard panel this rung added.
     const fake = createFakeHost()
     const manager = makeManager(fake.host)
     await manager.start()
@@ -1092,12 +1094,55 @@ describe('a lost GPU context (rung 13, case 5)', () => {
       .mock.calls.map(c => c[0])
       .filter(e => e.event_type === 'output_failure')
     expect(failures).toEqual([
-      // `0` and `false` literally: this detector reports without
-      // repairing, so it has attempted nothing and knows nothing about
-      // the outcome. That is the case `reportOutputFailure` refuses to
-      // supply defaults for.
+      // Opening: nothing attempted here, nothing known about the
+      // outcome yet.
       { event_type: 'output_failure', kind: 'gpu-loss', retries: 0, recovered: false },
+      // Closing: `retries: 1` credits the browser and Three's
+      // `initGLContext()`, which is the only thing that retried.
+      { event_type: 'output_failure', kind: 'gpu-loss', retries: 1, recovered: true },
     ])
+  })
+
+  it('leaves an incident that never comes back with only its opening row', async () => {
+    // So "incidents" is the count of `recovered: false` rows, whatever
+    // happened afterwards — which is what makes the pair countable.
+    const fake = createFakeHost()
+    const manager = makeManager(fake.host)
+    await manager.start()
+    await manager.addOutput({ monitorIndex: 0 })
+    fake.send(ready('output-1'))
+    vi.mocked(emit).mockClear()
+
+    fake.send(gpuLost('output-1'))
+
+    const failures = vi
+      .mocked(emit)
+      .mock.calls.map(c => c[0])
+      .filter(e => e.event_type === 'output_failure')
+    expect(failures).toHaveLength(1)
+    expect(failures[0]).toMatchObject({ recovered: false })
+  })
+
+  it('does not close an incident this manager never opened', async () => {
+    // A reattached output reports its standing `restored` state to the
+    // fresh manager that poked it. Without the latch check that would
+    // open a recovery for a loss this installation never saw, and the
+    // dashboard would count a recovery that did not happen here.
+    const fake = createFakeHost()
+    const manager = makeManager(fake.host)
+    await manager.start()
+    await manager.addOutput({ monitorIndex: 0 })
+    fake.send(ready('output-1'))
+    vi.mocked(emit).mockClear()
+
+    fake.send(gpuBack('output-1'))
+
+    expect(
+      vi
+        .mocked(emit)
+        .mock.calls.map(c => c[0])
+        .filter(e => e.event_type === 'output_failure'),
+    ).toEqual([])
   })
 
   it('does not persist the GPU latch', async () => {

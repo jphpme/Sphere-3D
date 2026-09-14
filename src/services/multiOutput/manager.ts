@@ -1378,22 +1378,36 @@ export class MultiOutputManager {
       // heartbeat is answered, and the sphere is black.
       logger.error(`[multiOutput] ${event.label} lost its WebGL context — it is showing nothing`)
       record.gpuLost = true
-      // `retries: 0, recovered: false`, and both are literal rather
-      // than lazy. This detector reports without repairing — the
-      // recovery, if there is one, is Three's `initGLContext()` inside
-      // the output — so it has attempted nothing and knows nothing
-      // about the outcome yet. That is exactly the case
-      // `reportOutputFailure` refuses to default for.
+      // The **opening** row of an incident: nothing has recovered yet
+      // and nothing has been attempted here, so `0` and `false` are
+      // literal rather than lazy defaults — the case
+      // `reportOutputFailure` refuses to supply them for.
       //
-      // Emitted on the loss alone, never again on the restore. One row
-      // per incident answers the question this Tier A event exists for
-      // ("how often do outputs lose their context?") without
-      // double-counting the ones that come back, and expressing the
-      // outcome would need a schema change this slice does not make.
+      // A first draft emitted only this row and argued that one row per
+      // incident avoided double-counting. That was wrong, and review
+      // caught it: `recovered` is defined on the schema as *whether the
+      // output carried on afterwards*, and an output whose context
+      // Three rebuilds does carry on — so a never-updated `false`
+      // reported every recovered installation as unrecovered, on the
+      // very dashboard panel this rung added. Wrong data is worse than
+      // redundant data, so the recovery below closes the pair.
       reportOutputFailure({ kind: 'gpu-loss', retries: 0, recovered: false })
     }
     if (event.type === 'output_gpu_recovered') {
       logger.warn(`[multiOutput] ${event.label} says its WebGL context is back`)
+      // The **closing** row, and only for an incident this manager
+      // actually opened. Without the latch check a reattached output
+      // reporting its standing `restored` state would open a recovery
+      // for a loss that never happened here, and a dashboard would
+      // count recoveries this installation never had.
+      //
+      // `retries: 1` credits the one automatic attempt that was made —
+      // the browser handing the context back and Three's
+      // `initGLContext()` rebuilding on it. Nothing in this repo
+      // retried, which is why the opening row says `0`.
+      if (record.gpuLost) {
+        reportOutputFailure({ kind: 'gpu-loss', retries: 1, recovered: true })
+      }
       record.gpuLost = false
     }
     // A ping and an announcement are served by **one** path, not two.

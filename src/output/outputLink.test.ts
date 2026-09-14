@@ -845,3 +845,72 @@ describe('reporting the GPU context (rung 13, case 5)', () => {
     expect(host.emit).not.toHaveBeenCalled()
   })
 })
+
+describe('re-announcing on a poke (rung 13, case 6 + case 5)', () => {
+  it('notifies subscribers after the re-announcement, not before', async () => {
+    // The manager drops an event whose label has no record, so the
+    // announcement has to reach it first. Keeping the same order as the
+    // first announcement means one rule rather than two.
+    const host = fakeHost()
+    const link = await connectOutputLink(host)
+    const order: string[] = []
+    host.emit.mockImplementation(async () => {
+      order.push('announce')
+    })
+    link.onReannounce(() => order.push('reannounce'))
+
+    host.deliverReattach()
+    await until(() => order.includes('reannounce'), 'the reannounce hook')
+
+    expect(order).toEqual(['announce', 'reannounce'])
+  })
+
+  it('lets a subscriber report state a fresh manager has never heard', async () => {
+    // The gap this closes: a manager that booted after a control-window
+    // reload adopts the output with `gpuLost: false`, so an output
+    // sitting in `lost` gets no Display lost badge. GPU state travels on
+    // edges and has no heartbeat to re-state it.
+    const host = fakeHost()
+    const link = await connectOutputLink(host)
+    link.onReannounce(() => link.reportGpuState('lost'))
+    host.emit.mockClear()
+
+    host.deliverReattach()
+
+    await until(
+      () =>
+        host.emit.mock.calls.some(
+          c => (c[1] as { type?: string })?.type === 'output_gpu_lost',
+        ),
+      'the replayed GPU state',
+    )
+  })
+
+  it('keeps notifying the others when one subscriber throws', async () => {
+    const host = fakeHost()
+    const link = await connectOutputLink(host)
+    const seen: string[] = []
+    link.onReannounce(() => {
+      throw new Error('listener blew up')
+    })
+    link.onReannounce(() => seen.push('second'))
+
+    host.deliverReattach()
+
+    await until(() => seen.length > 0, 'the surviving listener')
+    expect(seen).toEqual(['second'])
+  })
+
+  it('unsubscribes, and goes quiet once the link stops', async () => {
+    const host = fakeHost()
+    const link = await connectOutputLink(host)
+    const seen: string[] = []
+    const off = link.onReannounce(() => seen.push('fired'))
+
+    off()
+    host.deliverReattach()
+    await new Promise(r => setTimeout(r, 0))
+
+    expect(seen).toEqual([])
+  })
+})

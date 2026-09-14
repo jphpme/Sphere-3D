@@ -413,6 +413,23 @@ export interface OutputLink {
    * inside a `webglcontextlost` handler.
    */
   reportGpuState(state: GpuContextState): void
+  /**
+   * Called after this window re-announces itself to a manager that
+   * poked it (case 6's `OUTPUT_REATTACH_EVENT`).
+   *
+   * A poke only ever comes from a manager that booted *after* a control
+   * window reload, so it has never heard anything this window said —
+   * including its GPU state, which travels on its own edges and has no
+   * heartbeat to re-state it. Without this hook an output sitting in
+   * `lost` is adopted into a fresh record with `gpuLost: false` and no
+   * **Display lost** badge, which is the invisible-failure shape this
+   * whole rung is written against.
+   *
+   * Not fired for the *first* announcement: that one happens inside
+   * `connectOutputLink`, before any caller could have subscribed, so
+   * the composition pushes the initial state itself.
+   */
+  onReannounce(listener: () => void): () => void
   /** Detach the listener. Idempotent. */
   stop(): Promise<void>
 }
@@ -513,6 +530,7 @@ export async function connectOutputLink(
   // has stopped pinging, so this event is the only thing that can
   // return it to `live`, and the HUD's link field would otherwise read
   // `orphaned` over a window that is being actively driven again.
+  const reannounceListeners = new Set<() => void>()
   const unlistenReattach = await host.listen(OUTPUT_REATTACH_EVENT, () => {
     watchdog.sawMessage(host.nowMs?.() ?? Date.now())
     logger.warn('[output] reattach requested — re-announcing')
@@ -521,9 +539,24 @@ export async function connectOutputLink(
     // unhandled rejection in a window nobody is looking at. The manager
     // treats an unanswered poke as a dead window and closes it, which
     // is the correct outcome when the emit genuinely failed.
-    void announce().catch(err =>
-      logger.warn('[output] could not answer the reattach poke:', err),
-    )
+    void announce()
+      .then(() => {
+        // After the announcement, never before: the manager drops an
+        // event whose label has no record, and on a *poke* the record
+        // exists — but the ordering is kept the same as the first
+        // announcement's so there is one rule to remember rather than
+        // two. Isolated for `globeStateEvents`' reason: this runs from
+        // an IPC callback, and one listener throwing must not stop the
+        // rest.
+        for (const listener of [...reannounceListeners]) {
+          try {
+            listener()
+          } catch (err) {
+            logger.warn('[output] a reannounce listener threw:', err)
+          }
+        }
+      })
+      .catch(err => logger.warn('[output] could not answer the reattach poke:', err))
   })
 
   // Announce the close before announcing readiness, so a window torn
@@ -585,6 +618,10 @@ export async function connectOutputLink(
       return health
     },
     linkHealth: () => health,
+    onReannounce(listener) {
+      reannounceListeners.add(listener)
+      return () => reannounceListeners.delete(listener)
+    },
     reportGpuState(state) {
       // `live` is the boot state, not a transition anyone reaches: the
       // scene only ever leaves it, so there is no third message and no
@@ -603,6 +640,7 @@ export async function connectOutputLink(
       stopped = true
       listeners.clear()
       configListeners.clear()
+      reannounceListeners.clear()
       unlisten()
       unlistenConfig()
       unlistenReattach()

@@ -162,7 +162,34 @@ async function boot(): Promise<void> {
       // reason `link.renderConfig()` is read once — a context lost
       // during boot, which on a crowded machine is exactly when
       // eviction happens, would otherwise never be mentioned.
-      link.reportGpuState(scene.gpuState())
+      //
+      // **The initial push replays the incident, not just its
+      // outcome**, and that is a fix rather than a flourish. The gap
+      // between the scene being built and the link attaching is
+      // awaited twice (`createTauriLinkHost`, then
+      // `connectOutputLink`), so a loss *and* its restore can both land
+      // inside it — and reporting only `restored` then tells the
+      // manager a context came back that it never heard leave. It
+      // latches nothing and the incident is never counted. `restored`
+      // implies a loss happened, so saying both is the honest replay.
+      // Found in review.
+      const initial = scene.gpuState()
+      if (initial === 'restored') link.reportGpuState('lost')
+      link.reportGpuState(initial)
+
+      // A poke comes only from a manager that booted after a control
+      // window reload, so it has heard nothing this window ever said —
+      // and GPU state travels on edges with no heartbeat to re-state
+      // it, unlike `view` or `dataset`. Without this an output sitting
+      // in `lost` is adopted with `gpuLost: false` and no badge, which
+      // is precisely the invisible failure the badge exists for.
+      //
+      // The *current* state alone, never the replay above: the fresh
+      // manager needs this window's standing condition, while the
+      // incident itself was already reported to — and counted by — the
+      // manager that saw it happen.
+      link.onReannounce(() => link.reportGpuState(scene.gpuState()))
+
       scene.onGpuStateChange(state => link.reportGpuState(state))
 
       /**
