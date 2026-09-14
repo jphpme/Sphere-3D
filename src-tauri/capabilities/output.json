@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/crates/tauri-utils/schema.json",
   "identifier": "output",
-  "description": "Capability scoped to output-* windows. Narrowed for defence in depth: if an output is compromised (an XSS via a malicious dataset URL, a shader bug, a webview vulnerability) the blast radius is network fetch plus the window controls it drives on itself. No core:default, so no Tauri command invoke at all; no filesystem, no keychain, no asset protocol, no shell, no dialog, no clipboard, no updater, no window creation, no localhost HTTP. This does NOT restrain the manager: Tauri checks window commands against the CALLING window, so the manager's grants live in default.json.",
+  "description": "Capability scoped to output-* windows. Narrowed for defence in depth: if an output is compromised (an XSS via a malicious dataset URL, a shader bug, a webview vulnerability) the blast radius is network fetch plus the window controls it drives on itself. allow-destroy is granted alongside allow-close and is not optional: registering onCloseRequested makes Tauri's JS complete the close by calling destroy() on the window itself, so without it every close request — the manager's Remove and the operator's own Alt+F4 alike — is denied inside Tauri's callback and the window becomes unclosable except via the task manager. It widens nothing that allow-close did not already expose. No core:default, so no Tauri command invoke at all; no filesystem, no keychain, no asset protocol, no shell, no dialog, no clipboard, no updater, no window creation, no localhost HTTP. This does NOT restrain the manager: Tauri checks window commands against the CALLING window, so the manager's grants live in default.json.",
   "platforms": ["macOS", "windows", "linux"],
   "windows": ["output-*"],
   "permissions": [
@@ -16,6 +16,7 @@
     "core:window:allow-set-fullscreen",
     "core:window:allow-set-decorations",
     "core:window:allow-close",
+    "core:window:allow-destroy",
 
     {
       "identifier": "http:default",

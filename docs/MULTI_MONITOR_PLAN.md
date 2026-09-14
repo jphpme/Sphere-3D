@@ -2515,6 +2515,7 @@ Full enumeration:
     "core:window:allow-set-fullscreen",
     "core:window:allow-set-decorations",
     "core:window:allow-close",
+    "core:window:allow-destroy",
 
     {
       "identifier": "http:default",
@@ -2540,6 +2541,7 @@ Full enumeration:
 | `core:window:allow-is-decorated` / `is-fullscreen` | F11 toggle reads current state to decide direction |
 | `core:window:allow-set-fullscreen` / `set-decorations` | F11 toggle (per §3.6) writes new state |
 | `core:window:allow-close` | Output participates in graceful shutdown — emits `output_closing` then closes itself |
+| `core:window:allow-destroy` | **Required by `allow-close`, not optional.** Tauri's `onCloseRequested` does not let the Rust side finish the close: it hands that to JS, which calls `destroy()` on the window when the handler declines to `preventDefault()`. That call is checked against the *output*, so without this grant every close request is denied inside Tauri's own callback and an output cannot be closed by any means — Remove, Alt+F4 or otherwise. Found on hardware after rung 13 added the hook |
 | `http:default` with `https://*` | HLS manifest + segment fetch, image variant fetch from CDN/proxy origins |
 
 **What's deliberately *excluded* and why:**
