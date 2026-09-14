@@ -1011,9 +1011,10 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
   logger.info(`[VR] Entering with ${initialPanelCount} panel(s), primary: ${ctx.getPrimaryIndex()}`)
   scene.setPanelCount(initialPanelCount)
   syncSecondaryTextures(scene, ctx, initialPanelCount)
-  scene.setTexture(ctx.getDatasetTexture(), () => {
-    // Idempotent — a follow-up texture swap could re-fire this;
-    // we only want to drive the fade once per session.
+  /** Drive the one-way loading → scene handover. Idempotent. */
+  const finishLoading = (): void => {
+    // Idempotent — a follow-up texture swap could re-fire this; we only
+    // want to drive the fade once per session.
     if (loadingFinalized) return
     loadingFinalized = true
     loading.setProgress(1.0, 'Ready')
@@ -1042,7 +1043,24 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
         hud.mesh.visible = true
       })
     }, 250)
-  })
+  }
+  scene.setTexture(ctx.getDatasetTexture(), finishLoading)
+
+  // Safety net. Readiness normally arrives from the texture path above,
+  // but when it never does — a video dataset that cannot decode in AR, an
+  // element that never fires its events, a decode that stalls behind a
+  // slow network — the loading scene stays in front of the globe for the
+  // whole session. That reads as "the app is stuck on its splash" and as
+  // "there are two spheres", and the user has no way to tell it apart
+  // from a hang. An untextured globe is a better failure than an eternal
+  // splash, so show it either way.
+  const loadingFallbackId = setTimeout(() => {
+    if (loadingFinalized || loadingDisposed) return
+    logger.warn(
+      '[VR] no texture readiness after 10s — dismissing the loading scene anyway',
+    )
+    finishLoading()
+  }, 10_000)
   hud.setState({
     datasetTitle: ctx.getDatasetTitle(),
     isPlaying: ctx.isPlaying(),
@@ -1929,6 +1947,7 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     }
 
     if (!active) return
+    clearTimeout(loadingFallbackId)
     const a = active
     active = null
     a.renderer.setAnimationLoop(null)
