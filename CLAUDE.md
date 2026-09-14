@@ -113,7 +113,7 @@ npm run setup -- --interactive   # guided, with instructions + validation
 npm run setup -- --manual        # the prerequisites no API can do for you
 
 npm run dev:desktop  # Tauri dev mode (requires Rust)
-npm run build:desktop # codegen + tsc + vite build + tauri build
+npm run build:desktop # codegen + tsc + tauri build (tauri's beforeBuildCommand runs vite)
 
 # Visual testing & reporting (run against a dev server on :4173)
 npm run screenshots:report  # capture every scene × viewport → report-out/index.html
