@@ -496,10 +496,19 @@ export class MapRenderer implements GlobeRenderer {
       // attributions, sourced from `map.getStyle().sources[…].attribution`.
       // See src/ui/creditsPanel.ts for the design.
       attributionControl: false,
-      preserveDrawingBuffer: true, // needed for captureViewContext / toDataURL
+      // `preserveDrawingBuffer` lives under `canvasContextAttributes`, not at
+      // the top level. MapLibre moved it there in 5.0 and it was left behind,
+      // so for two majors the map has been running with the WebGL default of
+      // `false` — `getContextAttributes()` on the live canvas confirms it. The
+      // buffer is cleared after compositing, so `toDataURL` reads black, which
+      // is what `captureScreenshot` and `screenshotService` hand to Orbit's
+      // vision flow and the feedback form. It survived only on the timing of
+      // reading inside the `map.once('render')` callback; the 1 s fallback
+      // path captures nothing. Found in review of the MapLibre 6 migration.
+      canvasContextAttributes: { preserveDrawingBuffer: true },
       maxPitch: 85,
       maxTileCacheSize: isMobile() ? 750 : 2000,
-    } as maplibregl.MapOptions)
+    })
 
     // Double-click/double-tap resets to default view instead of zoom in
     this.map.doubleClickZoom.disable()
