@@ -150,8 +150,8 @@ async function main(argv: string[]): Promise<number> {
 }
 
 main(process.argv.slice(2))
-  .then(code => process.exit(code))
+  .then(code => { process.exitCode = code })
   .catch(e => {
     process.stderr.write(`Unhandled error: ${e instanceof Error ? e.stack ?? e.message : String(e)}\n`)
-    process.exit(1)
+    process.exitCode = 1
   })

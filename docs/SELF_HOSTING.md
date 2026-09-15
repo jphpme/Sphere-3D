@@ -1487,12 +1487,19 @@ planned STAC release will use it directly as the root Catalog description,
 without a profile-approval step. This is separate from the private
 `node_profile.mission` and `about_md` publication policy.
 
-**Update semantics:** re-running `init-node` without `--description` **clears**
-the stored description; omitting `--contact` also clears the contact email.
-Pass both values again when you want to keep them. Unlike these fields, an
-omitted public key is preserved only when no default key file is found — if
+**Update semantics:** re-running `init-node` without `--description` or
+`--contact` preserves the stored values. Use `--clear-description` or
+`--clear-contact` to store `null` explicitly. Empty string values remain
+explicit replacements. An omitted public key is preserved only when no default key file is found — if
 `node-public-key.txt` exists, it is read and sent again. Check that it is the
 correct key before updating an existing node.
+
+**Compatibility:** deploy the updated server before using this CLI's omission
+semantics. Older servers clear omitted description/contact fields, and older
+CLIs explicitly send null for omitted flags even against the updated server.
+Upgrade both together; during mixed-version operation, pass the values you
+intend to preserve explicitly. API callers must now send explicit `null` to
+clear either field; omission preserves it atomically without a read/merge/write.
 
 **Gate:**
 
@@ -1553,9 +1560,10 @@ publishing release must repeat this notice in its upgrade instructions.
   contact from the read, not the example placeholders. A write requires an
   admin or service token. Check the default key file as noted above so this
   update does not accidentally rotate the node key.
-3. To clear the description, run that same command **without** the
-  `--description` option; it stores `null`. Keep `--contact` if you want to
-  preserve the email. A bare `--description` is an error, not a clear request;
+3. To clear the description, run that same command with **`--clear-description`**
+  instead of `--description`; it stores `null`. Omit `--contact` to preserve
+  the email, or pass `--clear-contact` to clear it too. A bare `--description`
+  is an error, not a clear request;
   `--description=` stores an empty string instead of `null`.
 4. Repeat the authenticated read to verify the saved text or `null` and the
   unchanged node ID/public key. A cleared description will use the generic

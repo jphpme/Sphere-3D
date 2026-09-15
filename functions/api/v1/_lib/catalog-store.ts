@@ -286,16 +286,20 @@ export async function upsertNodeIdentity(
     await db
       .prepare(
         `UPDATE node_identity
-           SET display_name = ?, base_url = ?, description = ?,
-               contact_email = ?, public_key = ?
+           SET display_name = ?, base_url = ?,
+             description = CASE WHEN ? THEN ? ELSE description END,
+             contact_email = CASE WHEN ? THEN ? ELSE contact_email END,
+             public_key = COALESCE(?, public_key)
          WHERE node_id = ?`,
       )
       .bind(
         input.display_name,
         input.base_url,
+        input.description !== undefined ? 1 : 0,
         input.description ?? null,
+        input.contact_email !== undefined ? 1 : 0,
         input.contact_email ?? null,
-        input.public_key ?? existing.public_key,
+        input.public_key ?? null,
         existing.node_id,
       )
       .run()

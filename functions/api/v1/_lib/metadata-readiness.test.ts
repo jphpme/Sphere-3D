@@ -7,7 +7,7 @@ import {
   evaluateTemporal, isMetadataUlid, isSafeLicenseUrl, type MetadataReadinessInput,
 } from './metadata-readiness'
 import { newUlid } from './ulid'
-import { validateForPublish } from './validators'
+import { FORMAT_VALUES, validateForPublish } from './validators'
 import type { DatasetRow } from './catalog-store'
 
 const ID = '01HYAAAAAAAAAAAAAAAAAAAAAA'
@@ -20,6 +20,17 @@ function product(overrides: MetadataReadinessInput = {}): MetadataReadinessInput
     ...overrides,
   }
 }
+
+describe('authoritative format vocabulary', () => {
+  it.each([...FORMAT_VALUES])('assesses the native format %s', format => {
+    const result = evaluateMetadataReadiness(product({ format }))
+    expect(result.decision).toBe(format === 'tour/json' ? 'excluded' : 'item_candidate')
+    expect(result.reasons).not.toContain('resource_format_unsupported')
+  })
+  it('rejects formats outside the native vocabulary', () => {
+    expect(evaluateMetadataReadiness(product({ format: 'video/unknown' })).reasons).toContain('resource_format_unsupported')
+  })
+})
 
 describe('strict SPDX readiness independent of native publishing', () => {
   it.each(['MIT', 'CC0-1.0', 'MIT OR Apache-2.0', '(MIT OR Apache-2.0) AND BSD-3-Clause', 'GPL-2.0-only WITH Classpath-exception-2.0', 'GPL-2.0+'])('parses real SPDX: %s', license_spdx => {

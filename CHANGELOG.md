@@ -16,6 +16,28 @@ referenced in [`README.md`](README.md).
 
 ---
 
+## Unreleased - Metadata Phase 0 review fixes
+
+- `metadata-audit` drains piped JSON before exiting, including strict failure
+  reports. Snapshot output adds a source-quality remediation worklist without
+  relaxing identity validation or strict readiness.
+- Publisher saves show all validation/conflict messages in a focused summary;
+  errors without a form input no longer silently jump to Identity.
+- Timestamp ordering preserves sub-millisecond precision. Readiness shares the
+  native format vocabulary, retaining presentation/tour exclusions.
+- Fresh `import-snapshot` runs withhold **both** rows named
+  `INTERNAL_SOS_766_ONLINE`; the old importer kept the first one. Resolve the
+  source duplicate by retaining the authoritative record, or assign distinct
+  operational IDs if they are genuinely separate products. Then review/update
+  the explicit crosswalk and rerun validation. Existing imported rows are not
+  deleted by this change.
+- `init-node` now preserves omitted description/contact values. Use
+  `--clear-description` / `--clear-contact` to clear explicitly; API clients send
+  `null`. Upgrade the server and CLI together: older servers clear omissions,
+  and older CLIs send explicit nulls. See [upgrade instructions](docs/SELF_HOSTING.md#91-existing-nodes-review-descriptions-before-stac-publication).
+- Header checking and repair handle CRLF consistently; repairs preserve the
+  first newline style. The lockfile is pinned to LF in repository attributes.
+
 ## Phase 3pu — Admin user administration + two-tier roles
 
 **Branch:** `claude/eager-brahmagupta-ahym0t`

@@ -7,6 +7,7 @@
  * and mutation timestamps are never interpreted as represented scientific time.
  */
 import parseSpdx from 'spdx-expression-parse'
+import { FORMAT_VALUES } from './validators'
 import type { BboxProvenance, ResourceKind, TemporalSemantics } from './validators'
 
 export type MetadataDecision = 'item_candidate' | 'collection_candidate' |
@@ -256,7 +257,7 @@ export function evaluateMetadataReadiness(input: MetadataReadinessInput): Metada
   if (resource === 'presentation') reasons.push('resource_presentation_excluded')
   if (body === 'non_earth') reasons.push('resource_non_earth_excluded')
   if (body === 'unknown') reasons.push('celestial_body_invalid')
-  const formatKnown = ['image/png', 'image/jpeg', 'image/webp', 'video/mp4'].includes(input.format ?? '')
+  const formatKnown = input.format !== 'tour/json' && FORMAT_VALUES.has(input.format ?? '')
   if (!formatKnown && resource !== 'presentation') reasons.push('resource_format_unsupported')
   let decision: MetadataDecision = 'needs_review'
   if (resource === 'presentation' || body === 'non_earth') decision = 'excluded'

@@ -40,7 +40,7 @@ const RESERVED_SLUGS = new Set([
 ])
 
 const VISIBILITY_VALUES = new Set(['public', 'federated', 'restricted', 'private'])
-const FORMAT_VALUES = new Set([
+export const FORMAT_VALUES: ReadonlySet<string> = new Set([
   'video/mp4',
   'image/png',
   'image/jpeg',
@@ -678,9 +678,9 @@ function validateTimeRange(body: DatasetDraftBody, errors: ValidationError[]): v
   validateIsoDate('start_time', body.start_time, errors)
   validateIsoDate('end_time', body.end_time, errors)
   if (
-    body.start_time &&
-    body.end_time &&
-    Date.parse(body.start_time) > Date.parse(body.end_time)
+    typeof body.start_time === 'string' && ISO_DATE_RE.test(body.start_time) &&
+    typeof body.end_time === 'string' && ISO_DATE_RE.test(body.end_time) &&
+    utcTimestampKey(body.start_time) > utcTimestampKey(body.end_time)
   ) {
     errors.push(err('end_time', 'before_start', 'end_time must be ≥ start_time.'))
   }

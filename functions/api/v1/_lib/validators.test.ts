@@ -21,6 +21,30 @@ import {
   validateTourDraft,
 } from './validators'
 
+describe('native timestamp ordering', () => {
+  it.each([
+    ['.0002Z', '.0001Z', true],
+    ['.12Z', '.123Z', false],
+    ['.123Z', '.12Z', true],
+    ['Z', '.000Z', false],
+    ['.000Z', 'Z', false],
+    ['.1000Z', '.1Z', false],
+  ])('orders %s to %s without losing precision', (start, end, reversed) => {
+    const body = { start_time: `2026-09-12T00:00:00${start}`, end_time: `2026-09-12T00:00:00${end}` }
+    for (const errors of [validateDraftUpdate(body), validateDraftCreate({ title: 'Dataset', format: 'image/png', ...body })]) {
+      expect(errors.some(error => error.code === 'before_start')).toBe(reversed)
+    }
+  })
+  it('does not add ordering errors to malformed or missing endpoints', () => {
+    for (const start_time of ['garbage', '', undefined]) {
+      expect(validateDraftUpdate({ start_time, end_time: '2026-09-12T00:00:00Z' }).some(error => error.code === 'before_start')).toBe(false)
+    }
+    expect(validateDraftUpdate({ start_time: '2026-09-12T00:00:00Z', end_time: 'garbage' })).toEqual([
+      expect.objectContaining({ field: 'end_time', code: 'invalid_iso_date' }),
+    ])
+  })
+})
+
 describe('metadata annotations', () => {
   const draft = { title: 'A dataset', format: 'image/png' }
   const world = { n: 90, s: -90, w: -180, e: 180 }

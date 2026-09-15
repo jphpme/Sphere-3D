@@ -20,7 +20,8 @@
  * Usage:
  *   terraviz init-node --display-name="Terraviz — My Org" \
  *     --base-url=https://terraviz.my-org.org \
- *     [--contact=ops@my-org.org] [--description="..."] \
+ *     [--contact=ops@my-org.org | --clear-contact] \
+ *     [--description="..." | --clear-description] \
  *     [--public-key=ed25519:... | --public-key-file=node-public-key.txt]
  *
  * The public key defaults to `node-public-key.txt` (written by
@@ -30,8 +31,8 @@
  *
  * Description is intended public metadata for the future STAC
  * Catalog, not private authoring context. Until that route ships,
- * it remains on the authenticated publisher API only. Omitting
- * --description clears the stored value (unlike --public-key).
+ * it remains on the authenticated publisher API only. Omitted
+ * description/contact fields are preserved; clearing requires an explicit flag.
  */
 
 import { readFileSync } from 'node:fs'
@@ -73,20 +74,27 @@ export async function runInitNode(ctx: CommandContext): Promise<number> {
   if (!displayName || !baseUrl) {
     ctx.stderr.write(
       'Usage: terraviz init-node --display-name=<name> --base-url=<url> ' +
-        '[--contact=<email>] [--description=<text>] ' +
+        '[--contact=<email> | --clear-contact] [--description=<text> | --clear-description] ' +
         '[--public-key=<ed25519:...> | --public-key-file=<path>]\n',
     )
     return 2
   }
 
-  // A bare --description (or --no-description) parses as a boolean.
-  // Do not mistake it for omission and silently clear existing prose.
-  if (ctx.args.options.description !== undefined && description === undefined) {
-    ctx.stderr.write(
-      '--description requires a text value. Use --description="public text" ' +
-        'to replace it, or omit --description to clear it.\n',
-    )
-    return 2
+  for (const field of ['description', 'contact'] as const) {
+    const supplied = ctx.args.options[field]
+    const clear = ctx.args.options[`clear-${field}`]
+    if (supplied !== undefined && typeof supplied !== 'string') {
+      ctx.stderr.write(`--${field} requires a text value; use --clear-${field} to clear it.\n`)
+      return 2
+    }
+    if (clear !== undefined && clear !== true) {
+      ctx.stderr.write(`--clear-${field} is a boolean flag without a value.\n`)
+      return 2
+    }
+    if (clear === true && supplied !== undefined) {
+      ctx.stderr.write(`Use either --${field} or --clear-${field}, not both.\n`)
+      return 2
+    }
   }
 
   // Resolve the public key: explicit flag wins; otherwise read the
@@ -124,14 +132,16 @@ export async function runInitNode(ctx: CommandContext): Promise<number> {
       'Review existing values before upgrading to a release that exposes STAC.\n',
   )
   if (description === undefined) {
-    ctx.stderr.write('Notice: omitting --description clears any stored node description.\n')
+    ctx.stderr.write(ctx.args.options['clear-description'] === true
+      ? 'Notice: explicitly clearing the stored node description.\n'
+      : 'Notice: omitted description/contact fields are preserved; use --clear-description or --clear-contact to clear them.\n')
   }
 
   const result = await ctx.client.setNodeIdentity<IdentityEnvelope>({
     display_name: displayName,
     base_url: baseUrl,
-    description: description ?? null,
-    contact_email: contact ?? null,
+    description: ctx.args.options['clear-description'] === true ? null : description,
+    contact_email: ctx.args.options['clear-contact'] === true ? null : contact,
     public_key: publicKey,
   })
 

@@ -103,6 +103,22 @@ describe('matched by position, not searched for', () => {
 // ---------------------------------------------------------------------------
 
 describe('prologues — lines that must stay first', () => {
+  it.each([
+    ['x.ts', '#!/usr/bin/env node'],
+    ['x.py', '#!/usr/bin/env python3\r\n# -*- coding: utf-8 -*-'],
+    ['Package.swift', '// swift-tools-version:5.9'],
+    ['x.html', '<?xml version="1.0"?>\r\n<!doctype html>'],
+  ])('preserves CRLF and header offsets when repairing %s', (file, prologue) => {
+    const original = `${prologue}\r\nbody\r\n`
+    const style = commentStyle(file)!
+    const fixed = addHeader(file, original, style)
+    expect(prologueLines(file, fixed)).toBe(prologue.split('\r\n').length)
+    expect(fixed.startsWith(`${prologue}\r\n`)).toBe(true)
+    expect(fixed.replace(/\r\n/g, '')).not.toContain('\n')
+    expect(hasHeader(file, fixed, style)).toBe(true)
+    expect(addHeader(file, fixed, style)).toBe(fixed)
+  })
+
   const cases: Array<[name: string, file: string, text: string, expected: number]> = [
     ['shebang in a shell script', 'x.sh', '#!/usr/bin/env bash\nset -e\n', 1],
     ['shebang in a node script', 'x.mjs', '#!/usr/bin/env node\nimport x from "y"\n', 1],

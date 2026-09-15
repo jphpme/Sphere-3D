@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { runMetadataAudit } from './metadata-audit'
 import { HELP_TEXT } from './commands'
 import { BOOLEAN_FLAGS, parseArgs } from './lib/args'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { resolve } from 'node:path'
 
 function invoke(argv: string[], text: string) {
@@ -59,5 +59,27 @@ describe('offline metadata-audit CLI', () => {
       cwd: resolve('.'), encoding: 'utf8', env: { ...process.env, TERRAVIZ_SERVER: 'not-a-url', TERRAVIZ_ACCESS_CLIENT_ID: '', TERRAVIZ_ACCESS_CLIENT_SECRET: '' },
     })
     expect(JSON.parse(output)).toMatchObject({ schema_version: 1, input_scope: 'bundled_snapshot_mapping' })
+  })
+  it.each([false, true])('drains the complete piped report (strict=%s)', strict => {
+    let expected = ''
+    const code = runMetadataAudit({
+      args: { positional: [], options: { snapshot: true, strict } },
+      stdout: { write: chunk => { expected += chunk; return true } },
+    })
+    expect(Buffer.byteLength(expected)).toBeGreaterThan(65_536)
+    const child = spawnSync(process.execPath, ['--import', 'tsx', resolve('cli/terraviz.ts'), 'metadata-audit', '--snapshot', ...(strict ? ['--strict'] : [])], {
+      encoding: 'utf8', maxBuffer: 4 * 1024 * 1024, timeout: 15_000,
+    })
+    expect(child.error).toBeUndefined()
+    expect(child.status).toBe(code)
+    expect(child.stdout).toBe(expected)
+    expect(JSON.parse(child.stdout).counts.total).toBe(194)
+  })
+  it('drains invalid-input JSON before exiting with code 2', () => {
+    const child = spawnSync(process.execPath, ['--import', 'tsx', resolve('cli/terraviz.ts'), 'metadata-audit'], {
+      encoding: 'utf8', timeout: 15_000,
+    })
+    expect(child.status).toBe(2)
+    expect(JSON.parse(child.stdout).input_scope).toBe('invalid_input')
   })
 })

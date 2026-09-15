@@ -2,6 +2,9 @@
 
 **Status:** Implementation decision for review; effective when PR merged
 **Decision date:** 2026-09-11
+**Last reviewed:** 2026-09-15
+**Revisit when:** Phase 1 adds a policy consumer, Phase 2 exposes metadata,
+or operator permissions, extension ownership, or vocabulary requirements change.
 **Scope:** Phase 0 step 7 — public-profile selection and permissions,
 node-owned extensions, and node-local vocabulary declarations (issue #428).
 
@@ -16,6 +19,14 @@ in the [metadata design](README.md#node-owned-extensions), including its
 federation handshake, feed, signing, or native wire protocol.
 
 ## 1. Authorization and approval evidence
+
+The executable policy module currently has no production consumers. It is a
+tested specification of input contracts, not deployed enforcement. The first
+Phase 1 consumer must import these contracts and add integration tests covering
+unapproved fields, owner identity, scope, revocation, and unknown fields. Before
+Phase 2 exposes richer metadata, route tests must also prove authenticated
+approval provenance and the cache/revocation bounds below. Do not duplicate
+the rules in a serializer and rely on the isolated contract tests to catch drift.
 
 Use the existing **`operator.manage`** capability, via `roleCan`, for authoring,
 approving, replacing, or revoking these node-level policy records. There is no

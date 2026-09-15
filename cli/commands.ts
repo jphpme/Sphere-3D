@@ -715,7 +715,7 @@ Commands:
   tour preview <id> [--ttl=<seconds>] Mint a short-lived preview URL
 
   init-node --display-name=<name> --base-url=<url> [--contact=<email>]
-            [--description=<text>]
+            [--description=<text> | --clear-description] [--clear-contact]
             [--public-key=<ed25519:...> | --public-key-file=<path>]
                                       Provision (or update) this node's identity
                                       row on the deploy. Run ONCE before
@@ -732,9 +732,10 @@ Commands:
                                       No secrets or internal prose. This release
                                       does not publish it; review existing values
                                       before upgrading to one that does.
-                                      Omitting --description clears the stored
-                                      description; omitting --contact clears the
-                                      contact email. See SELF_HOSTING Phase 9.1.
+                                      Omitting --description or --contact preserves
+                                      stored values. Use --clear-description or
+                                      --clear-contact to clear explicitly.
+                                      Upgrade the server first; see SELF_HOSTING Phase 9.1.
 
   metadata-audit <catalog-export.json> [--strict]
                                       Offline JSON readiness census of canonical

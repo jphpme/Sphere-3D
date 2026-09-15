@@ -3,6 +3,9 @@
 **Status:** Implemented for review in [PR #433](https://github.com/zyra-project/terraviz/pull/433);
 deployment and scientific remediation are not claimed complete.
 **Implementation inventory date:** 2026-09-11
+**Last reviewed:** 2026-09-15
+**Revisit when:** the importer/crosswalk changes, audit output changes, source
+lifecycle writers are added, or Phase 1/2 consumes these contracts.
 **Scope:** [Phase 0 steps 1–8](README.md#phase-0-policy-and-remediation), retaining
 the existing step 8 notices. This is not a fresh review of STAC standards or
 the full historical source census in the parent design.
@@ -154,6 +157,20 @@ not source evidence by themselves. Source-bound sidecar automation needs future
 lifecycle coordination; do not add unsupported template keys as a workaround.
 
 ## Offline audit contract
+
+Snapshot reports start with an additive `remediation` section: source-quality
+reason counts and per-source findings, with missing persisted identity stated
+once under `scope_limitations`. Start there for curation instead of scanning
+the repeated identity failures in the full readiness results. This is explicitly
+`source_quality_only_not_readiness`; canonical results, candidate counts, and
+`--strict` exit rules are unchanged. An absence of source-quality findings is
+not proof of a persisted identity or permission to publish.
+
+`spdx-expression-parse` intentionally remains in runtime `dependencies`: the
+installed publisher CLI needs it even with development dependencies omitted.
+It is not imported by the SPA. Future Workers consumers must test bundling and
+runtime compatibility when adopting readiness; its current location alone does
+not mean a public route enforces these checks.
 
 With dependencies already installed, run from the repository root:
 

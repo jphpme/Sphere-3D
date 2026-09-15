@@ -64,5 +64,16 @@ describe('pure metadata census', () => {
     expect(report).toMatchObject({ input_scope: 'bundled_snapshot_mapping', strict_failure: true, counts: { total: 1 }, snapshot: { source_rows: 2, mapped: 1, skipped: [{ source_id: 'INTERNAL_SOS_2', reason: 'snapshot_missing_data_link' }] } })
     expect(report.results[0]).toMatchObject({ id: null, source_id: 'INTERNAL_SOS_1', identity: { collection_id: null, item_id: null } })
     expect(report.results[0].reasons).toEqual(expect.arrayContaining(['identity_dataset_ulid_invalid', 'identity_origin_node_invalid', 'temporal_unknown', 'spatial_imported_requires_review']))
+    expect(report.remediation).toMatchObject({
+      assessment: 'source_quality_only_not_readiness',
+      scope_limitations: ['snapshot_has_no_persisted_dataset_identity'],
+      reason_counts: { temporal_unknown: 1, spatial_imported_requires_review: 1, resource_kind_unknown: 1 },
+      skipped: report.snapshot.skipped,
+    })
+    expect(Object.keys(report.remediation.reason_counts).some(reason => reason.startsWith('identity_'))).toBe(false)
+    expect(report.remediation.rows[0].reasons.some(reason => reason.startsWith('identity_'))).toBe(false)
+    expect(report.results[0].identity.ready).toBe(false)
+    expect(report.strict_failure).toBe(true)
+    expect(buildMetadataAudit([{ ...base, id: undefined }]).reason_counts.identity_dataset_ulid_invalid).toBe(1)
   })
 })

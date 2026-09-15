@@ -126,7 +126,20 @@ export function buildSnapshotMetadataAudit(sos: RawSosEntry[], enriched: RawEnri
     })
   }
   const report = buildMetadataAudit(rows, 'bundled_snapshot_mapping')
+  const sourceReasonCounts = Object.fromEntries(
+    Object.entries(report.reason_counts).filter(([reason]) => !reason.startsWith('identity_')),
+  )
   return {
+    remediation: {
+      assessment: 'source_quality_only_not_readiness' as const,
+      scope_limitations: ['snapshot_has_no_persisted_dataset_identity'],
+      reason_counts: sourceReasonCounts,
+      rows: report.results.map(result => ({
+        index: result.index, source_id: result.source_id,
+        reasons: result.reasons.filter(reason => !reason.startsWith('identity_')),
+      })),
+      skipped,
+    },
     ...report,
     snapshot: {
       source_rows: sos.length, enrichment_rows: enriched.length, mapped: rows.length, skipped,

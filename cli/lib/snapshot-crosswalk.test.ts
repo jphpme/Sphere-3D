@@ -22,11 +22,11 @@ const fixture: SnapshotCrosswalk = { ...baseline, mappings: [[row.id, source.url
 describe('committed baseline', () => {
   it('reproduces the checked-in text through the stdout-only offline CLI (LF normalized)', () => {
     const output = execFileSync(process.execPath,
-      [resolve('node_modules/tsx/dist/cli.mjs'), 'scripts/snapshot-crosswalk.ts', '--bootstrap'],
+      ['--import', 'tsx', 'scripts/snapshot-crosswalk.ts', '--bootstrap'],
       { encoding: 'utf8' })
     expect(output).toBe(read('sos-enrichment-crosswalk.json'))
     const report = JSON.parse(execFileSync(process.execPath,
-      [resolve('node_modules/tsx/dist/cli.mjs'), 'scripts/snapshot-crosswalk.ts', '--validate'],
+      ['--import', 'tsx', 'scripts/snapshot-crosswalk.ts', '--validate'],
       { encoding: 'utf8' }))
     expect(report).toMatchObject({ matched: 137, unmapped: 67, ambiguous: 0, invalid: 0 })
   })

@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest'
 import Database from 'better-sqlite3'
 import { onRequestGet, onRequestPut } from './node-identity'
 import { asD1, makeKV } from '../_lib/test-helpers'
+import { upsertNodeIdentity } from '../_lib/catalog-store'
 import type { PublisherRow } from '../_lib/publisher-store'
 
 // A real ed25519 wire key: 32 raw bytes, standard base64. The route
@@ -140,7 +141,7 @@ describe('PUT /api/v1/publish/node-identity', () => {
 
   it.each([
     { label: 'replace', fields: { description: 'Public ocean-science catalog.' }, expected: 'Public ocean-science catalog.' },
-    { label: 'clear by omission', fields: {}, expected: null },
+    { label: 'preserve by omission', fields: {}, expected: 'Internal legacy prose' },
     { label: 'clear by null', fields: { description: null }, expected: null },
     { label: 'store an explicitly empty string', fields: { description: '' }, expected: '' },
   ])('lets an operator $label before public exposure', async ({ fields, expected }) => {
@@ -176,6 +177,27 @@ describe('PUT /api/v1/publish/node-identity', () => {
     } finally {
       db.close()
     }
+  })
+
+  it('preserves omitted optional fields atomically after a concurrent update', async () => {
+    const sqlite = freshDb()
+    try {
+      await onRequestPut(putCtx(sqlite, ADMIN, { display_name: 'Node', base_url: 'https://node.example.org', public_key: VALID_KEY, description: 'Old', contact_email: 'old@example.org' }))
+      const db = asD1(sqlite)
+      const interleaved = {
+        ...db,
+        prepare(sql: string) {
+          if (sql.startsWith('UPDATE node_identity')) {
+            sqlite.prepare('UPDATE node_identity SET description = ?, contact_email = ?, public_key = ?').run('Newer description', 'new@example.org', 'ed25519:newer')
+          }
+          return db.prepare(sql)
+        },
+      } as unknown as D1Database
+      const result = await upsertNodeIdentity(interleaved, { display_name: 'Renamed', base_url: 'https://new.example.org' })
+      expect(result).toMatchObject({ description: 'Newer description', contact_email: 'new@example.org', public_key: 'ed25519:newer' })
+      const cleared = await onRequestPut(putCtx(sqlite, ADMIN, { display_name: 'Renamed', base_url: 'https://new.example.org', description: null, contact_email: null }))
+      expect((await bodyOf(cleared)).identity).toMatchObject({ description: null, contact_email: null })
+    } finally { sqlite.close() }
   })
 
   it('rejects an overlong replacement without erasing the existing description', async () => {

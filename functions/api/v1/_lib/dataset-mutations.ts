@@ -533,6 +533,16 @@ export async function createDataset(
   return { ok: true, dataset: row! }
 }
 
+function resolveMetadataEvidence(
+  current: string | null, supplied: string | null | undefined,
+  reset: boolean, changed: boolean, assertion: string | null | undefined,
+): string | null {
+  if (reset) return null
+  if (supplied !== undefined) return normalizeOptionalString(supplied)
+  if (changed || assertion === null || assertion === 'unknown') return null
+  return current
+}
+
 /**
  * Patch an existing draft (or published) dataset. The handler
  * pre-checks ownership via `getDatasetForPublisher`; this function
@@ -616,17 +626,19 @@ export async function updateDataset(
       } : null,
     bbox_provenance: resetBbox ? 'unknown' : body.bbox_provenance !== undefined
       ? body.bbox_provenance ?? 'unknown' : currentMetadata.bbox_provenance,
-    bbox_evidence: resetBbox ? null : body.bbox_evidence !== undefined
-      ? normalizeOptionalString(body.bbox_evidence)
-      : bboxChanged || sourceChanged || body.bbox_provenance === null || body.bbox_provenance === 'unknown' ? null : currentMetadata.bbox_evidence,
+    bbox_evidence: resolveMetadataEvidence(
+      currentMetadata.bbox_evidence, body.bbox_evidence, resetBbox,
+      bboxChanged || sourceChanged, body.bbox_provenance,
+    ),
     start_time: body.start_time !== undefined ? body.start_time : currentMetadata.start_time,
     end_time: body.end_time !== undefined ? body.end_time : currentMetadata.end_time,
     period: body.period !== undefined ? body.period : currentMetadata.period,
     temporal_semantics: resetTime ? 'unknown' : body.temporal_semantics !== undefined
       ? body.temporal_semantics ?? 'unknown' : currentMetadata.temporal_semantics,
-    temporal_evidence: resetTime ? null : body.temporal_evidence !== undefined
-      ? normalizeOptionalString(body.temporal_evidence)
-      : timeChanged || sourceChanged || body.temporal_semantics === null || body.temporal_semantics === 'unknown' ? null : currentMetadata.temporal_evidence,
+    temporal_evidence: resolveMetadataEvidence(
+      currentMetadata.temporal_evidence, body.temporal_evidence, resetTime,
+      timeChanged || sourceChanged, body.temporal_semantics,
+    ),
     resource_kind: body.resource_kind !== undefined ? body.resource_kind ?? 'unknown' : sourceChanged ? 'unknown' : currentMetadata.resource_kind,
   }
   const metadataErrors = validateMetadataAnnotations(mergedMetadata)
