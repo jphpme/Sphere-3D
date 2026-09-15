@@ -83,6 +83,7 @@ import { TourEngine, type TourTelemetryMeta } from './services/tourEngine'
 import { showTourControls, hideTourControls, hideAllTourTextBoxes, hideAllTourImages, hideAllTourVideos, hideAllTourPopups, hideAllTourQuestions } from './ui/tourUI'
 import { initLegendForDataset, clearLegendCache, loadConfig, readCurrentTime } from './services/docentService'
 import { isMobile, IS_MOBILE_NATIVE, getCloudTextureUrl } from './utils/deviceCapability'
+import { hasWebGL2 } from './utils/webglSupport'
 import { initDeepLinks } from './services/deepLinkService'
 import {
   buildDatasetPath,
@@ -2201,20 +2202,21 @@ class InteractiveSphere {
     })
   }
 
-  /** Detect WebGL support. If unavailable, display troubleshooting instructions and return false. */
+  /** Detect WebGL 2 support. If unavailable, display troubleshooting instructions and return false. */
   private checkWebGLSupport(): boolean {
-    const canvas = document.createElement('canvas')
-    const gl = canvas.getContext('webgl2') || canvas.getContext('webgl')
-    if (gl) return true
+    // The predicate, and why it is WebGL 2 with no WebGL 1 fallback, lives
+    // in `utils/webglSupport` — reachable from a test, which this method is
+    // not. What stays here is the screen that follows from a `false`.
+    if (hasWebGL2()) return true
 
     const screen = document.getElementById('loading-screen')
     if (screen) {
       screen.innerHTML = `
         <div style="max-width:480px;padding:2rem;text-align:center;color:#e0e0e0;font-family:system-ui,sans-serif;">
           <div style="font-size:2.5rem;margin-bottom:0.75rem;" aria-hidden="true">&#x1F30D;</div>
-          <h1 style="font-size:1.1rem;margin:0 0 0.75rem;color:#fff;">WebGL is not available</h1>
+          <h1 style="font-size:1.1rem;margin:0 0 0.75rem;color:#fff;">WebGL 2 is not available</h1>
           <p style="font-size:0.8rem;line-height:1.5;color:#aaa;margin:0 0 1.25rem;">
-            This application requires WebGL to render the interactive globe.
+            This application requires WebGL 2 to render the interactive globe.
             Your browser's GPU acceleration appears to be disabled.
           </p>
           <details style="text-align:start;font-size:0.75rem;color:#999;line-height:1.6;">
@@ -2226,7 +2228,7 @@ class InteractiveSphere {
             </ol>
             <p style="margin:0.75rem 0 0.25rem;color:#888;">Alternatively, launch Chrome from the terminal with:</p>
             <code style="display:block;background:#1a1a2e;padding:0.5rem 0.75rem;border-radius:4px;color:#4da6ff;font-size:0.7rem;overflow-x:auto;">
-              google-chrome --enable-webgl --ignore-gpu-blocklist
+              google-chrome --ignore-gpu-blocklist --enable-unsafe-swiftshader
             </code>
             <p style="margin:0.75rem 0 0;color:#888;">
               If the problem persists, check <strong style="color:#fff;">chrome://gpu</strong>

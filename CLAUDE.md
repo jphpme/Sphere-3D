@@ -351,6 +351,7 @@ npm run screenshots:smoke   # gating interaction tests (search, Orbit, nav)
 | `src/utils/time.ts` | Time parsing / formatting utilities |
 | `src/utils/frames.ts` | Frame-query resolution shared by Orbit (marker parsing) + the dataset loader |
 | `src/utils/deviceCapability.ts` | Device-capability detection for adaptive performance tuning |
+| `src/utils/webglSupport.ts` | `hasWebGL2()` — the globe's hard prerequisite, behind `main.ts`'s troubleshooting screen. Split out because `main.ts` exports nothing and boots on import, so the predicate was otherwise reachable only by driving the whole `DOMContentLoaded` path — which is why the test named for it re-implemented the expression and asserted against its own copy, passing for any implementation including the one it was meant to pin. **WebGL 2 with no WebGL 1 fallback:** MapLibre 6 dropped WebGL 1 (`contextType` is the literal `'webgl2'`) and `glLumaSampler` always needed 2, so accepting a WebGL-1-only context clears the preflight and then fails inside the renderer — costing the user the one screen that explains what to do. The canvas arrives through a factory so a test needs no document and a stubbed `getContext` cannot leak between cases; creation is guarded because some drivers throw instead of returning null |
 | `src/utils/fetchProgress.ts` | Fetch a URL as a Blob with byte-level progress reporting |
 | `src/utils/captionProxy.ts` | Caption-URL proxying helper |
 | `src/utils/catalogFilters.ts` | URL round-trip for catalog filter state |
