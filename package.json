@@ -68,7 +68,7 @@
     "refresh:sos-snapshot": "tsx scripts/refresh-sos-snapshot.ts",
     "tauri": "tauri",
     "dev:desktop": "tauri dev",
-    "build:desktop": "tsc && vite build && tauri build",
+    "build:desktop": "npm run tokens && npm run locales && tsc && tauri build",
     "dev:ios": "tauri ios dev",
     "dev:android": "tauri android dev",
     "build:ios": "tsc && vite build && tauri ios build",
