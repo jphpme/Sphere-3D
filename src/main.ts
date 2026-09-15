@@ -83,6 +83,7 @@ import { TourEngine, type TourTelemetryMeta } from './services/tourEngine'
 import { showTourControls, hideTourControls, hideAllTourTextBoxes, hideAllTourImages, hideAllTourVideos, hideAllTourPopups, hideAllTourQuestions } from './ui/tourUI'
 import { initLegendForDataset, clearLegendCache, loadConfig, readCurrentTime } from './services/docentService'
 import { isMobile, IS_MOBILE_NATIVE, getCloudTextureUrl } from './utils/deviceCapability'
+import { hasWebGL2 } from './utils/webglSupport'
 import { initDeepLinks } from './services/deepLinkService'
 import {
   buildDatasetPath,
@@ -2203,15 +2204,10 @@ class InteractiveSphere {
 
   /** Detect WebGL 2 support. If unavailable, display troubleshooting instructions and return false. */
   private checkWebGLSupport(): boolean {
-    const canvas = document.createElement('canvas')
-    // WebGL 2 specifically, with no WebGL 1 fallback: MapLibre 6 dropped
-    // WebGL 1 support outright, and the value readout (`glLumaSampler`)
-    // has always needed 2. Accepting a WebGL-1-only context here would
-    // pass the preflight and then fail inside the renderer, which costs
-    // the user this screen — the one place the app explains what to do
-    // about it — and leaves a blank globe instead.
-    const gl = canvas.getContext('webgl2')
-    if (gl) return true
+    // The predicate, and why it is WebGL 2 with no WebGL 1 fallback, lives
+    // in `utils/webglSupport` — reachable from a test, which this method is
+    // not. What stays here is the screen that follows from a `false`.
+    if (hasWebGL2()) return true
 
     const screen = document.getElementById('loading-screen')
     if (screen) {
@@ -2232,7 +2228,7 @@ class InteractiveSphere {
             </ol>
             <p style="margin:0.75rem 0 0.25rem;color:#888;">Alternatively, launch Chrome from the terminal with:</p>
             <code style="display:block;background:#1a1a2e;padding:0.5rem 0.75rem;border-radius:4px;color:#4da6ff;font-size:0.7rem;overflow-x:auto;">
-              google-chrome --enable-webgl --ignore-gpu-blocklist
+              google-chrome --ignore-gpu-blocklist --enable-unsafe-swiftshader
             </code>
             <p style="margin:0.75rem 0 0;color:#888;">
               If the problem persists, check <strong style="color:#fff;">chrome://gpu</strong>
