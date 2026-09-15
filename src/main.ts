@@ -2201,10 +2201,16 @@ class InteractiveSphere {
     })
   }
 
-  /** Detect WebGL support. If unavailable, display troubleshooting instructions and return false. */
+  /** Detect WebGL 2 support. If unavailable, display troubleshooting instructions and return false. */
   private checkWebGLSupport(): boolean {
     const canvas = document.createElement('canvas')
-    const gl = canvas.getContext('webgl2') || canvas.getContext('webgl')
+    // WebGL 2 specifically, with no WebGL 1 fallback: MapLibre 6 dropped
+    // WebGL 1 support outright, and the value readout (`glLumaSampler`)
+    // has always needed 2. Accepting a WebGL-1-only context here would
+    // pass the preflight and then fail inside the renderer, which costs
+    // the user this screen — the one place the app explains what to do
+    // about it — and leaves a blank globe instead.
+    const gl = canvas.getContext('webgl2')
     if (gl) return true
 
     const screen = document.getElementById('loading-screen')
@@ -2212,9 +2218,9 @@ class InteractiveSphere {
       screen.innerHTML = `
         <div style="max-width:480px;padding:2rem;text-align:center;color:#e0e0e0;font-family:system-ui,sans-serif;">
           <div style="font-size:2.5rem;margin-bottom:0.75rem;" aria-hidden="true">&#x1F30D;</div>
-          <h1 style="font-size:1.1rem;margin:0 0 0.75rem;color:#fff;">WebGL is not available</h1>
+          <h1 style="font-size:1.1rem;margin:0 0 0.75rem;color:#fff;">WebGL 2 is not available</h1>
           <p style="font-size:0.8rem;line-height:1.5;color:#aaa;margin:0 0 1.25rem;">
-            This application requires WebGL to render the interactive globe.
+            This application requires WebGL 2 to render the interactive globe.
             Your browser's GPU acceleration appears to be disabled.
           </p>
           <details style="text-align:start;font-size:0.75rem;color:#999;line-height:1.6;">

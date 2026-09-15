@@ -8,10 +8,14 @@
  * raster tile sources, day/night custom layer, and vector labels/boundaries.
  */
 
-import maplibregl from 'maplibre-gl'
+// Namespace import, not a default one: MapLibre 6 is ESM-only and ships no
+// default export, so `import maplibregl from` resolves to `undefined` and
+// every `new maplibregl.Map(...)` below fails at construction rather than
+// at build time.
+import * as maplibregl from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 
-import type { Map as MaplibreMap, StyleSpecification, CustomLayerInterface } from 'maplibre-gl'
+import type { Map as MaplibreMap, StyleSpecification, CustomLayerInterface, VisibilitySpecification } from 'maplibre-gl'
 import { createEarthTileLayer, computeSunLightPosition, type EarthTileLayerControl } from './earthTileLayer'
 import { isEarthBody } from './datasetOverlayOptions'
 import type {
@@ -932,7 +936,11 @@ export class MapRenderer implements GlobeRenderer {
   /** Show or hide label layers only (country, city, ocean names). */
   toggleLabels(visible?: boolean): boolean {
     if (!this.map || !this.map.isStyleLoaded()) return false
-    let firstLayer: string | undefined
+    // Not `string`: MapLibre 6 types `getLayoutProperty` as the property's
+    // real type, and `visibility` can be an expression as well as
+    // 'visible' / 'none'. The comparison below is unchanged — an
+    // expression is simply not 'none', which is the existing behaviour.
+    let firstLayer: VisibilitySpecification | undefined
     try { firstLayer = this.map.getLayoutProperty('country-labels', 'visibility') } catch { /* style not ready */ }
     const show = visible ?? (firstLayer === 'none' || firstLayer === undefined)
     const vis = show ? 'visible' : 'none'
@@ -945,7 +953,7 @@ export class MapRenderer implements GlobeRenderer {
   /** Show or hide boundary + coastline lines. */
   toggleBoundaries(visible?: boolean): boolean {
     if (!this.map || !this.map.isStyleLoaded()) return false
-    let current: string | undefined
+    let current: VisibilitySpecification | undefined
     try { current = this.map.getLayoutProperty('boundaries', 'visibility') } catch { /* style not ready */ }
     const show = visible ?? (current === 'none' || current === undefined)
     const vis = show ? 'visible' : 'none'
