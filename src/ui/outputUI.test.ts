@@ -15,6 +15,7 @@ import {
   monitorKey,
   openOutputUI,
   resetOutputUIForTests,
+  monitorLayout,
   type OutputPanelManager,
 } from './outputUI'
 
@@ -32,11 +33,16 @@ function record(label: string, on: OutputMonitor): OutputRecord {
   return {
     label,
     mode: 'sos-equirect',
-    view: { trackCamera: true, split: false },
+    view: { trackCamera: true, split: false, rotationOffsetDeg: 0 },
     render: defaultRenderConfig(),
     monitor: on,
     ready: false,
+    lastHealthCheckAtMs: null,
+  gpuLost: false,
+    health: 'starting' as const,
     lastEvent: null,
+    departing: false,
+    announcedClosing: false,
   }
 }
 
@@ -48,13 +54,22 @@ function record(label: string, on: OutputMonitor): OutputRecord {
  * private fields is typed nominally, so satisfying that type would mean
  * constructing a real manager, which needs a host, which needs Tauri.
  */
-function fakeManager(monitors: OutputMonitor[] = [monitor()]) {
+function fakeManager(
+  monitors: OutputMonitor[] = [monitor()],
+  /** What the platform calls primary. Omit for "the first enumerated
+   *  display"; pass `null` for a platform that will not say. */
+  primary: OutputMonitor | null | undefined = undefined,
+) {
   const records: OutputRecord[] = []
+  const changeListeners = new Set<() => void>()
   let restoreOnLaunch = false
   let decoderBudget: number | null = null
   const mgr = {
     start: vi.fn(async () => {}),
     listMonitors: vi.fn(async () => monitors),
+    primaryMonitor: vi.fn(async () =>
+      primary === undefined ? (monitors[0] ?? null) : primary,
+    ),
     outputs: vi.fn(() => [...records]),
     addOutput: vi.fn(async ({ monitorIndex }: { monitorIndex: number }) => {
       const target = monitors[monitorIndex]
@@ -82,12 +97,25 @@ function fakeManager(monitors: OutputMonitor[] = [monitor()]) {
     setDecoderBudget: vi.fn((budget: number | null) => {
       decoderBudget = budget
     }),
+    onOutputsChanged: vi.fn((listener: () => void) => {
+      changeListeners.add(listener)
+      return () => changeListeners.delete(listener)
+    }),
     isRestoreOnLaunch: vi.fn(() => restoreOnLaunch),
     setRestoreOnLaunch: vi.fn((enabled: boolean) => {
       restoreOnLaunch = enabled
     }),
   }
-  return { mgr: mgr as unknown as OutputPanelManager, raw: mgr, records }
+  return {
+    mgr: mgr as unknown as OutputPanelManager,
+    raw: mgr,
+    records,
+    /** Fire what the real manager fires on a crash or a health change. */
+    notifyChanged: () => {
+      for (const listener of [...changeListeners]) listener()
+    },
+    liveListeners: () => changeListeners.size,
+  }
 }
 
 function mount(mgr: OutputPanelManager | null): void {
@@ -105,8 +133,32 @@ function painted(): boolean {
 const $ = <T extends Element>(sel: string): T | null => document.querySelector<T>(sel)
 const $$ = (sel: string): Element[] => [...document.querySelectorAll(sel)]
 
+/**
+ * A row's switch, found by its label rather than its position.
+ *
+ * Index-based lookup was here first and its own comment predicted how
+ * it would fail — "an unscoped index would silently start meaning a
+ * different control the next time a section moves" — which is exactly
+ * what rung 14b's fourth toggle did. Scoping to the row was not the
+ * fix; the ordinal was. A test asserting on the *debug overlay* switch
+ * should say so, and then adding a control above it is not a test
+ * change at all.
+ */
+const toggle = (labelText: string): HTMLInputElement => {
+  const found = $$('.output-item .output-toggle').find(
+    el => el.querySelector('.output-toggle-label')?.textContent === labelText,
+  )
+  if (!found) throw new Error(`no toggle labelled "${labelText}"`)
+  return found.querySelector('.output-toggle-box') as HTMLInputElement
+}
+
 beforeEach(() => {
-  document.body.innerHTML = ''
+  // The SPA's app-wide live region (`src/index.html`). The panel
+  // announces health transitions through it rather than through a
+  // region of its own, because `refresh` replaces the whole panel body
+  // and a region swapped out with its content never announces.
+  document.body.innerHTML =
+    '<div id="a11y-announcer" aria-live="polite" aria-atomic="true"></div>'
 })
 
 afterEach(() => {
@@ -141,16 +193,14 @@ describe('the Outputs panel', () => {
   })
 
   it('lists every detected display', async () => {
-    const { mgr } = fakeManager([
-      monitor({ name: 'LEFT', position: { x: -1680, y: 0 } }),
-      monitor({ name: 'RIGHT' }),
-    ])
+    const left = monitor({ name: 'LEFT', position: { x: -1680, y: 0 } })
+    const { mgr } = fakeManager([left, monitor({ name: 'RIGHT' })], left)
     mount(mgr)
 
     await until(painted, 'the panel body')
     const options = $$('.output-monitor-select option')
     expect(options.map(o => o.textContent)).toEqual([
-      'LEFT — 1920×1080',
+      'LEFT — 1920×1080 (primary)',
       'RIGHT — 1920×1080',
     ])
   })
@@ -326,13 +376,7 @@ describe('the Outputs panel', () => {
     $<HTMLButtonElement>('.output-add-btn')!.click()
     await until(() => $('.output-item') !== null, 'the new output row')
 
-    // Scoped to the row: the launch opt-in wears the same class, and an
-    // unscoped index would silently start meaning a different control
-    // the next time a section moves.
-    const boxes = $$('.output-item .output-toggle-box') as HTMLInputElement[]
-    // Three switches on a row now, and the HUD is the third.
-    expect(boxes).toHaveLength(3)
-    const overlay = boxes[2]
+    const overlay = toggle('Debug overlay (drawn on the output)')
     expect(overlay.checked).toBe(false)
 
     overlay.checked = true
@@ -348,6 +392,49 @@ describe('the Outputs panel', () => {
     expect(raw.setOutputView).not.toHaveBeenCalled()
   })
 
+  it('pushes the calibration pattern on the config channel, beside the debug HUD', async () => {
+    const { mgr, raw } = fakeManager()
+    mount(mgr)
+    await until(painted, 'the panel body')
+    $<HTMLButtonElement>('.output-add-btn')!.click()
+    await until(() => $('.output-item') !== null, 'the new output row')
+
+    const pattern = toggle('Calibration pattern')
+    expect(pattern.checked).toBe(false)
+
+    pattern.checked = true
+    pattern.dispatchEvent(new Event('change'))
+
+    await until(() => raw.setOutputRenderConfig.mock.calls.length === 1, 'the config push')
+    expect(raw.setOutputRenderConfig).toHaveBeenCalledWith('output-1', { calibration: true })
+    // The same reason the debug HUD goes here: it is a property of one
+    // window, and routing it through the view would put it inside the
+    // sequence the aggregator diffs — and would put a test pattern on
+    // every output when the operator is aligning one sphere.
+    expect(raw.setOutputView).not.toHaveBeenCalled()
+  })
+
+  it('sits directly above the rotation it is used with', async () => {
+    const { mgr } = fakeManager()
+    mount(mgr)
+    await until(painted, 'the panel body')
+    $<HTMLButtonElement>('.output-add-btn')!.click()
+    await until(() => $('.output-item') !== null, 'the new output row')
+
+    // Not decoration: the pattern is what the rotation is turned
+    // *against*, and an operator doing that job reaches for the two in
+    // this order. Pinned so a later control cannot quietly land between
+    // them.
+    const row = $('.output-item')!
+    const kids = [...row.children]
+    const pattern = kids.findIndex(
+      el => el.querySelector('.output-toggle-label')?.textContent === 'Calibration pattern',
+    )
+    const rotation = kids.findIndex(el => el.querySelector('.output-rotation-number') !== null)
+    expect(pattern).toBeGreaterThan(-1)
+    expect(rotation).toBe(pattern + 1)
+  })
+
   it('puts the debug checkbox back when the output refuses it', async () => {
     const { mgr, raw } = fakeManager()
     raw.setOutputRenderConfig.mockRejectedValue(new Error('output is gone'))
@@ -357,7 +444,7 @@ describe('the Outputs panel', () => {
     $<HTMLButtonElement>('.output-add-btn')!.click()
     await until(() => $('.output-item') !== null, 'the new output row')
 
-    const overlay = ($$('.output-item .output-toggle-box') as HTMLInputElement[])[2]
+    const overlay = toggle('Debug overlay (drawn on the output)')
     overlay.checked = true
     overlay.dispatchEvent(new Event('change'))
 
@@ -464,7 +551,8 @@ describe('the Outputs panel', () => {
     $<HTMLButtonElement>('.output-add-btn')!.click()
     await until(() => $('.output-item') !== null, 'the new output row')
 
-    const [track, split] = $$('.output-toggle-box') as HTMLInputElement[]
+    const track = toggle('Track operator camera')
+    const split = toggle('Split sphere')
     expect(track.checked).toBe(true)
     expect(split.checked).toBe(false)
 
@@ -488,7 +576,7 @@ describe('the Outputs panel', () => {
     $<HTMLButtonElement>('.output-add-btn')!.click()
     await until(() => $('.output-item') !== null, 'the new output row')
 
-    const split = ($$('.output-toggle-box') as HTMLInputElement[])[1]
+    const split = toggle('Split sphere')
     split.checked = true
     split.dispatchEvent(new Event('change'))
 
@@ -631,5 +719,528 @@ describe('the Outputs panel', () => {
 
     await until(painted, 'the second body')
     expect($$('.output-panel')).toHaveLength(1)
+  })
+})
+
+/**
+ * The position diagram's arithmetic.
+ *
+ * Kept pure and tested here because the thing it gets wrong is silent:
+ * a diagram drawn from a bad layout still looks like a diagram, and an
+ * operator reads it as the truth about their desk right up to the
+ * moment a fullscreen window opens on the wrong display.
+ */
+describe('the health badge', () => {
+  it('shows nothing for a healthy output', async () => {
+    // A row of green "OK" chips trains an operator to stop reading
+    // them, and this panel is where someone goes when they suspect a
+    // problem. The steady state should look exactly as it did before
+    // the badge existed.
+    const fake = fakeManager()
+    mount(fake.mgr)
+    await until(painted, 'the panel to settle')
+    await fake.mgr.addOutput({ monitorIndex: 0 })
+    fake.records[0].ready = true
+    fake.records[0].health = 'live'
+    fake.notifyChanged()
+    await until(() => $$('.output-item').length === 1, 'the row')
+
+    expect($('.output-item-health')).toBeNull()
+  })
+
+  it('badges a stale link, and says what that means', async () => {
+    const fake = fakeManager()
+    mount(fake.mgr)
+    await until(painted, 'the panel to settle')
+    await fake.mgr.addOutput({ monitorIndex: 0 })
+    fake.records[0].health = 'stale'
+    fake.notifyChanged()
+
+    await until(() => $('.output-item-health') !== null, 'the badge')
+    const badge = $<HTMLElement>('.output-item-health')
+    expect(badge?.classList.contains('is-stale')).toBe(true)
+    // The label is two words; the accessible name has to carry the part
+    // that is not obvious — that the sphere still shows a picture.
+    expect(badge?.textContent ?? '').toMatch(/last frame/i)
+    // And it has to carry it as *content*. `aria-label` shipped here
+    // first and is discarded: ARIA forbids naming an element whose role
+    // is `generic`, which is what a bare `<span>` is, so the whole
+    // explanation was dropped and only "Link stale" announced.
+    expect(badge?.hasAttribute('aria-label')).toBe(false)
+    // The visible chip stays two words — the explanation is for AT.
+    expect($('.output-item-health-label')?.textContent).toBe('Link stale')
+  })
+
+  it('badges a lost GPU context, and says the sphere is blank rather than stale', async () => {
+    // The distinction is the entire value of the badge. A stale output
+    // is showing an old picture; this one is showing nothing at all,
+    // and on a projector both look like "something on the wall" until
+    // someone reads the row.
+    const fake = fakeManager()
+    mount(fake.mgr)
+    await until(painted, 'the panel to settle')
+    await fake.mgr.addOutput({ monitorIndex: 0 })
+    fake.records[0].health = 'gpu-lost'
+    fake.notifyChanged()
+
+    await until(() => $('.output-item-health') !== null, 'the badge')
+    const badge = $<HTMLElement>('.output-item-health')
+    expect(badge?.classList.contains('is-gpu-lost')).toBe(true)
+    expect($('.output-item-health-label')?.textContent).toBe('Display lost')
+    expect(badge?.textContent ?? '').toMatch(/nothing at all/i)
+    expect(badge?.hasAttribute('aria-label')).toBe(false)
+  })
+
+  it('announces a transition, because the repaint itself is silent', async () => {
+    // `onOutputsChanged` repaints the panel so an operator does not
+    // have to close and reopen the one surface that would tell them an
+    // output went quiet. A screen-reader operator gets nothing from
+    // that: the body is replaced wholesale and a swapped-out subtree
+    // says nothing. Without this the badge solves the problem for
+    // people who can see it and reproduces it for people who cannot.
+    const fake = fakeManager()
+    mount(fake.mgr)
+    await until(painted, 'the panel to settle')
+    await fake.mgr.addOutput({ monitorIndex: 0 })
+    fake.notifyChanged()
+    await until(() => $$('.output-item').length === 1, 'the row')
+
+    fake.records[0].health = 'stale'
+    fake.notifyChanged()
+
+    const live = document.getElementById('a11y-announcer')!
+    await until(() => (live.textContent ?? '') !== '', 'the announcement')
+    expect(live.textContent).toMatch(/DISPLAY1/)
+    expect(live.textContent).toMatch(/stale/i)
+    expect(live.textContent).toMatch(/last frame/i)
+  })
+
+  it('says nothing about the state the panel opened on', async () => {
+    // An operator who just opened the panel is about to read it. Being
+    // told what is already on screen is the noise that teaches people
+    // to stop listening to the channel.
+    const fake = fakeManager()
+    await fake.mgr.addOutput({ monitorIndex: 0 })
+    fake.records[0].health = 'stale'
+
+    mount(fake.mgr)
+    await until(() => $$('.output-item').length === 1, 'the row')
+    // One frame — the exact delay `announcePolite` schedules on — so
+    // an announcement that was going to happen has happened.
+    await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+
+    expect(document.getElementById('a11y-announcer')!.textContent).toBe('')
+  })
+
+  it('folds a whole installation going quiet into one utterance', async () => {
+    // The announcer is atomic and each write replaces the last, so a
+    // control window that stops talking — taking every output stale in
+    // the same tick — has to arrive as one string or every output but
+    // the last is silently dropped.
+    const second = monitor({ name: 'DISPLAY2', position: { x: 1920, y: 0 } })
+    const fake = fakeManager([monitor(), second])
+    mount(fake.mgr)
+    await until(painted, 'the panel to settle')
+    await fake.mgr.addOutput({ monitorIndex: 0 })
+    await fake.mgr.addOutput({ monitorIndex: 1 })
+    fake.notifyChanged()
+    await until(() => $$('.output-item').length === 2, 'both rows')
+
+    for (const r of fake.records) r.health = 'stale'
+    fake.notifyChanged()
+
+    const live = document.getElementById('a11y-announcer')!
+    await until(() => (live.textContent ?? '') !== '', 'the announcement')
+    expect(live.textContent).toMatch(/DISPLAY1/)
+    expect(live.textContent).toMatch(/DISPLAY2/)
+  })
+
+  it('repaints on a change the panel did not cause', async () => {
+    // The manager has fired `onOutputsChanged` since rung 13a and
+    // nothing subscribed, so a crash stayed on screen until the panel
+    // was reopened — the one moment an operator is least likely to
+    // reach for.
+    const fake = fakeManager()
+    mount(fake.mgr)
+    await until(painted, 'the panel to settle')
+    await fake.mgr.addOutput({ monitorIndex: 0 })
+    fake.notifyChanged()
+    await until(() => $$('.output-item').length === 1, 'the row')
+
+    fake.records.length = 0
+    fake.notifyChanged()
+
+    await until(() => $$('.output-item').length === 0, 'the row to go')
+  })
+
+  it('drops its subscription when the panel closes', async () => {
+    const fake = fakeManager()
+    mount(fake.mgr)
+    await until(painted, 'the panel to settle')
+    expect(fake.liveListeners()).toBe(1)
+
+    closeOutputUI()
+
+    expect(fake.liveListeners()).toBe(0)
+  })
+
+  it('keeps exactly one subscription across repaints', async () => {
+    // Every refresh re-subscribes, so without dropping the previous one
+    // a panel left open through a few changes would repaint once per
+    // listener and grow from there.
+    const fake = fakeManager()
+    mount(fake.mgr)
+    await until(painted, 'the panel to settle')
+    fake.notifyChanged()
+    await until(() => fake.raw.outputs.mock.calls.length >= 2, 'a repaint')
+    fake.notifyChanged()
+    await until(() => fake.raw.outputs.mock.calls.length >= 3, 'another repaint')
+
+    expect(fake.liveListeners()).toBe(1)
+  })
+})
+
+describe('monitorLayout', () => {
+  it('places a negative origin inside the box instead of off its edge', () => {
+    // The arrangement the hardware spike behind this feature actually
+    // found: primary on the right, secondary at x = -1680. A layout
+    // that assumed a non-negative origin would put LEFT at a negative
+    // fraction, which CSS renders outside the container.
+    const layout = monitorLayout([
+      monitor({ name: 'LEFT', position: { x: -1680, y: 0 }, size: { width: 1680, height: 1050 } }),
+      monitor({ name: 'RIGHT', position: { x: 0, y: 0 }, size: { width: 1920, height: 1080 } }),
+    ])
+
+    expect(layout).not.toBeNull()
+    const [left, right] = layout!.boxes
+    expect(left.x).toBe(0)
+    expect(right.x).toBeCloseTo(1680 / 3600)
+    // And left really is to the left, which is the one thing the
+    // diagram exists to say.
+    expect(left.x).toBeLessThan(right.x)
+  })
+
+  it('is to scale, so a 4K beside a 1080p reads as the bigger panel', () => {
+    const layout = monitorLayout([
+      monitor({ position: { x: 0, y: 0 }, size: { width: 3840, height: 2160 } }),
+      monitor({ position: { x: 3840, y: 0 }, size: { width: 1920, height: 1080 } }),
+    ])!
+
+    const [big, small] = layout.boxes
+    expect(big.width).toBeCloseTo(3840 / 5760)
+    expect(small.width).toBeCloseTo(1920 / 5760)
+    expect(big.height).toBeCloseTo(1)
+    expect(small.height).toBeCloseTo(0.5)
+    expect(layout.aspect).toBeCloseTo(5760 / 2160)
+  })
+
+  it('stacks vertically when that is how the desk is arranged', () => {
+    const layout = monitorLayout([
+      monitor({ position: { x: 0, y: -1080 }, size: { width: 1920, height: 1080 } }),
+      monitor({ position: { x: 0, y: 0 }, size: { width: 1920, height: 1080 } }),
+    ])!
+
+    expect(layout.boxes[0].y).toBe(0)
+    expect(layout.boxes[1].y).toBeCloseTo(0.5)
+    expect(layout.aspect).toBeCloseTo(1920 / 2160)
+  })
+
+  it('drops an undrawable display without losing the others or their indices', () => {
+    // One bad entry must not cost the diagram — the same per-entry
+    // tolerance rung 10's persistence parse uses. The surviving box
+    // still has to point at its own option, so the index is the one
+    // from the array passed in, not a position in the filtered list.
+    const layout = monitorLayout([
+      monitor({ name: 'BROKEN', size: { width: 0, height: 0 } }),
+      monitor({ name: 'REAL', position: { x: 0, y: 0 }, size: { width: 1920, height: 1080 } }),
+    ])!
+
+    expect(layout.boxes).toHaveLength(1)
+    expect(layout.boxes[0].index).toBe(1)
+  })
+
+  it('refuses to draw when there is no arrangement', () => {
+    // An empty framed box reads as a failure; no diagram reads as a
+    // machine with nothing to show, which is what it is.
+    expect(monitorLayout([])).toBeNull()
+    expect(monitorLayout([monitor({ size: { width: 0, height: 0 } })])).toBeNull()
+    expect(
+      monitorLayout([monitor({ size: { width: Number.NaN, height: Number.NaN } })]),
+    ).toBeNull()
+    expect(
+      monitorLayout([monitor({ position: { x: Number.POSITIVE_INFINITY, y: 0 } })]),
+    ).toBeNull()
+  })
+})
+
+describe('the position diagram', () => {
+  const boxes = (): HTMLElement[] => $$('.output-monitor-box') as HTMLElement[]
+
+  it('draws one box per display, in the order the desk has them', async () => {
+    const left = monitor({ name: 'LEFT', position: { x: -1920, y: 0 } })
+    const { mgr } = fakeManager([left, monitor({ name: 'RIGHT' })], left)
+    mount(mgr)
+
+    await until(painted, 'the panel body')
+    const drawn = boxes()
+    expect(drawn).toHaveLength(2)
+    expect(parseFloat(drawn[0].style.left)).toBeCloseTo(0)
+    expect(parseFloat(drawn[1].style.left)).toBeCloseTo(50)
+    expect(parseFloat(drawn[0].style.width)).toBeCloseTo(50)
+  })
+
+  it('is hidden from assistive technology, because the picker already says it', async () => {
+    // Not an oversight: every fact the diagram draws is in the option
+    // text below it, and a second reading of one choice — or worse, a
+    // second control for it — is noise in a screen reader.
+    const { mgr } = fakeManager()
+    mount(mgr)
+
+    await until(painted, 'the panel body')
+    expect($('.output-monitor-map')?.getAttribute('aria-hidden')).toBe('true')
+  })
+
+  it('marks the primary display the platform named, not the first one', async () => {
+    const first = monitor({ name: 'FIRST' })
+    const second = monitor({ name: 'SECOND', position: { x: 1920, y: 0 } })
+    const { mgr } = fakeManager([first, second], second)
+    mount(mgr)
+
+    await until(painted, 'the panel body')
+    expect(boxes()[0].classList.contains('is-primary')).toBe(false)
+    expect(boxes()[1].classList.contains('is-primary')).toBe(true)
+    const options = $$('.output-monitor-select option')
+    expect(options[1].textContent).toContain('primary')
+    expect(options[0].textContent).not.toContain('primary')
+  })
+
+  it('marks nothing when the platform will not say which is primary', async () => {
+    // X11 can leave no display marked, and a guess that is usually
+    // right and silently wrong is the failure the name-only monitor
+    // match was rejected for.
+    const { mgr } = fakeManager([monitor({ name: 'A' }), monitor({ name: 'B', position: { x: 1920, y: 0 } })], null)
+    mount(mgr)
+
+    await until(painted, 'the panel body')
+    expect(boxes().some(b => b.classList.contains('is-primary'))).toBe(false)
+    expect($$('.output-monitor-select option').some(o => o.textContent?.includes('primary'))).toBe(
+      false,
+    )
+  })
+
+  it('keeps the panel when the primary lookup rejects', async () => {
+    // A marker is worth less than the panel. The enumeration failing is
+    // fatal to it; this is not.
+    const { mgr, raw } = fakeManager()
+    raw.primaryMonitor.mockRejectedValue(new Error('no'))
+    mount(mgr)
+
+    await until(painted, 'the panel body')
+    expect($('.output-monitor-map')).not.toBeNull()
+    expect(boxes().some(b => b.classList.contains('is-primary'))).toBe(false)
+  })
+
+  it('dims a display that already has an output rather than hiding it', async () => {
+    const a = monitor({ name: 'A' })
+    const b = monitor({ name: 'B', position: { x: 1920, y: 0 } })
+    const { mgr } = fakeManager([a, b], a)
+    mount(mgr)
+    await until(painted, 'the panel body')
+
+    const select = $<HTMLSelectElement>('.output-monitor-select')!
+    select.value = '1'
+    $<HTMLButtonElement>('.output-add-btn')!.click()
+    await until(() => boxes().some(box => box.classList.contains('is-occupied')), 'the add')
+
+    // Still two boxes: a display with an output on it is part of the
+    // arrangement, and a hole where it sits would misdescribe the desk.
+    expect(boxes()).toHaveLength(2)
+    expect(boxes()[0].classList.contains('is-occupied')).toBe(false)
+    expect(boxes()[1].classList.contains('is-occupied')).toBe(true)
+  })
+
+  it('moves the highlight when the picker changes', async () => {
+    const a = monitor({ name: 'A' })
+    const { mgr } = fakeManager([a, monitor({ name: 'B', position: { x: 1920, y: 0 } })], a)
+    mount(mgr)
+    await until(painted, 'the panel body')
+
+    expect(boxes()[0].classList.contains('is-selected')).toBe(true)
+    const select = $<HTMLSelectElement>('.output-monitor-select')!
+    select.value = '1'
+    select.dispatchEvent(new Event('change'))
+
+    expect(boxes()[0].classList.contains('is-selected')).toBe(false)
+    expect(boxes()[1].classList.contains('is-selected')).toBe(true)
+  })
+
+  it('omits the diagram rather than drawing an empty frame', async () => {
+    const { mgr } = fakeManager([monitor({ size: { width: 0, height: 0 } })])
+    mount(mgr)
+
+    await until(painted, 'the panel body')
+    expect($('.output-monitor-map')).toBeNull()
+    // The display is still listed: it can be picked even if it cannot
+    // be drawn to scale.
+    expect($$('.output-monitor-select option')).toHaveLength(1)
+  })
+})
+
+describe('the rotation offset control (rung 14)', () => {
+  const slider = () => $<HTMLInputElement>('.output-field-slider')
+  const number = () => $<HTMLInputElement>('.output-rotation-number')
+
+  const withOutput = async () => {
+    const fake = fakeManager()
+    mount(fake.mgr)
+    await until(painted, 'the panel to settle')
+    await fake.mgr.addOutput({ monitorIndex: 0 })
+    fake.notifyChanged()
+    await until(() => slider() !== null, 'the rotation control')
+    return fake
+  }
+
+  it('offers a slider and a number showing the same value', async () => {
+    // Two controls for one job: finding the rotation is a drag while
+    // watching the sphere, reproducing a known one is typing it.
+    const fake = await withOutput()
+    fake.records[0].view.rotationOffsetDeg = 0
+
+    expect(slider()!.value).toBe('0')
+    expect(number()!.value).toBe('0')
+  })
+
+  it('commits a drag live, because the operator is looking at the sphere', async () => {
+    // `input`, not `change`. A rotation that only lands on mouse-up
+    // makes calibration a drag-release-look loop instead of a turn.
+    const fake = await withOutput()
+
+    slider()!.value = '90'
+    slider()!.dispatchEvent(new Event('input'))
+
+    await until(() => fake.raw.setOutputView.mock.calls.length > 0, 'the commit')
+    expect(fake.raw.setOutputView).toHaveBeenCalledWith('output-1', { rotationOffsetDeg: 90 })
+    // And the other control follows, so neither can show a value the
+    // output is not running at.
+    expect(number()!.value).toBe('90')
+  })
+
+  it('wraps a typed value into range instead of rejecting it', async () => {
+    const fake = await withOutput()
+
+    number()!.value = '370'
+    number()!.dispatchEvent(new Event('change'))
+
+    await until(() => fake.raw.setOutputView.mock.calls.length > 0, 'the commit')
+    expect(fake.raw.setOutputView).toHaveBeenCalledWith('output-1', { rotationOffsetDeg: 10 })
+    expect(slider()!.value).toBe('10')
+  })
+
+  it('ignores a half-typed value rather than snapping the sphere to zero', async () => {
+    // `Number('')` is 0, not NaN — so a lone `Number.isFinite` guard
+    // reads a field cleared for retyping as a deliberate zero and spins
+    // the picture back to the prime meridian between keystrokes. This
+    // test failed against exactly that, on the first version.
+    const fake = await withOutput()
+
+    for (const halfTyped of ['', '   ', '-']) {
+      number()!.value = halfTyped
+      number()!.dispatchEvent(new Event('change'))
+    }
+
+    expect(fake.raw.setOutputView).not.toHaveBeenCalled()
+  })
+
+  it('puts the value back when the commit fails', async () => {
+    // Same posture as every other control here: one that reports a
+    // state the output is not in is worse than one that refuses.
+    const fake = await withOutput()
+    fake.raw.setOutputView.mockRejectedValueOnce(new Error('no such window'))
+
+    slider()!.value = '120'
+    slider()!.dispatchEvent(new Event('input'))
+
+    await until(() => slider()!.value === '0', 'the value to be put back')
+    expect(number()!.value).toBe('0')
+  })
+})
+
+describe('announcing a GPU recovery (rung 13, case 5 — review)', () => {
+  it('says the display recovered, not that the link is in contact', async () => {
+    // `live` from any other state says "in contact with the control
+    // window" — true the whole time a GPU was lost, since the link was
+    // never what failed. A screen-reader operator would be told the one
+    // fact that was never in doubt and not the one that changed.
+    const fake = fakeManager()
+    mount(fake.mgr)
+    await until(painted, 'the panel to settle')
+    await fake.mgr.addOutput({ monitorIndex: 0 })
+    fake.records[0].health = 'gpu-lost'
+    fake.notifyChanged()
+    await until(() => $('.output-item-health') !== null, 'the badge')
+    document.getElementById('a11y-announcer')!.textContent = ''
+
+    fake.records[0].health = 'live'
+    fake.notifyChanged()
+
+    const live = document.getElementById('a11y-announcer')!
+    await until(() => (live.textContent ?? '') !== '', 'the announcement')
+    expect(live.textContent).toMatch(/recovered/i)
+    expect(live.textContent).not.toMatch(/in contact/i)
+  })
+
+  it('still says "in contact" when a stale link recovers', async () => {
+    // The special case is keyed on where the transition came *from*, so
+    // the ordinary stale→live recovery is untouched.
+    const fake = fakeManager()
+    mount(fake.mgr)
+    await until(painted, 'the panel to settle')
+    await fake.mgr.addOutput({ monitorIndex: 0 })
+    fake.records[0].health = 'stale'
+    fake.notifyChanged()
+    await until(() => $('.output-item-health') !== null, 'the badge')
+    document.getElementById('a11y-announcer')!.textContent = ''
+
+    fake.records[0].health = 'live'
+    fake.notifyChanged()
+
+    const live = document.getElementById('a11y-announcer')!
+    await until(() => (live.textContent ?? '') !== '', 'the announcement')
+    expect(live.textContent).toMatch(/in contact/i)
+  })
+})
+
+describe('the rotation slider under a fast drag (review)', () => {
+  it('does not let an older commit overwrite a newer one', async () => {
+    // `input` fires per drag event, so several commits are in flight at
+    // once and settle in whatever order IPC returns them. Without a
+    // generation guard a slow early commit resolving last rewrites the
+    // baseline to its own stale value.
+    const fake = fakeManager()
+    mount(fake.mgr)
+    await until(painted, 'the panel to settle')
+    await fake.mgr.addOutput({ monitorIndex: 0 })
+    fake.notifyChanged()
+    await until(() => $('.output-field-slider') !== null, 'the rotation control')
+    const slider = $<HTMLInputElement>('.output-field-slider')!
+
+    // The first commit hangs; the second resolves straight away.
+    let releaseFirst: (() => void) | undefined
+    fake.raw.setOutputView.mockImplementationOnce(
+      async () => new Promise<void>(resolve => { releaseFirst = () => resolve() }),
+    )
+    slider.value = '30'
+    slider.dispatchEvent(new Event('input'))
+    slider.value = '200'
+    slider.dispatchEvent(new Event('input'))
+    await until(() => fake.raw.setOutputView.mock.calls.length === 2, 'both commits')
+
+    // Now let the stale one finish, and fail it — the worst case, since
+    // its catch would otherwise repaint both controls.
+    releaseFirst?.()
+    await new Promise(r => setTimeout(r, 0))
+
+    expect(slider.value).toBe('200')
+    expect($<HTMLInputElement>('.output-rotation-number')!.value).toBe('200')
   })
 })

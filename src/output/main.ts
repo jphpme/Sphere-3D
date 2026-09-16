@@ -27,10 +27,12 @@
  */
 
 import './output.css'
+import { CALIBRATION_OVERLAY, createCalibrationCache } from './calibrationPattern'
 import { createDatasetMirror } from './datasetMirror'
 import { OVERLAY_REFRESH_MS, createDebugOverlay, createFpsMeter } from './debugOverlay'
 import {
   STATE_KEYS,
+  changesPicture,
   connectOutputLink,
   createTauriLinkHost,
   type StateKey,
@@ -41,6 +43,7 @@ import {
   shouldRenderFrame,
   type OutputLayerInput,
 } from './outputScene'
+import type { LinkHealth } from './linkWatchdog'
 import type { SyncOutcome } from './outputSync'
 import { createFullscreenController, resolveChromeHost } from '../services/windowChrome'
 import type { OutputGlobeState, OutputRenderConfig } from '../services/multiOutput/protocol'
@@ -82,6 +85,36 @@ async function boot(): Promise<void> {
    *  the GL context, and `undefined` — not `null` — is the "not asked
    *  yet" marker, so a driver that *refuses* the query is not re-asked
    *  twice a second for the life of the installation. */
+  /**
+   * The link's health, read by the HUD before the link exists.
+   *
+   * The overlay is mounted unconditionally and the link attaches on
+   * desktop only, inside a `try` that is allowed to fail — so the HUD
+   * outlives every case where there is no link to ask. `live` is the
+   * honest default rather than a hedge: the static fixture page and a
+   * failed attach both have no control window to have gone quiet on
+   * them, and reporting `orphaned` there would put a fault on screen
+   * for a window that is working exactly as intended.
+   */
+  let readLinkHealth: () => LinkHealth = () => 'live'
+
+  /**
+   * Whether the calibration pattern is what is on the glass.
+   *
+   * Hoisted and defaulted for `readLinkHealth`'s reason — the HUD is
+   * mounted before the link exists and outlives a failed attach — and
+   * `false` is honest there, since a window with no manager has nobody
+   * to have turned it on.
+   *
+   * The HUD needs it because its `dataset` field answers *what is on
+   * the glass*, not what was mirrored, and calibration is the one state
+   * where the mirror still holds a dataset that is not being shown.
+   * Without this the HUD names a dataset over a test pattern, which is
+   * the precise thing its "mirror, not link" rule exists to prevent,
+   * arriving from the other side.
+   */
+  let readCalibration: () => boolean = () => false
+
   let gpu: string | null | undefined
   const gpuName = (): string | null => {
     if (gpu === undefined) gpu = scene.rendererName()
@@ -95,13 +128,33 @@ async function boot(): Promise<void> {
   const overlay = createDebugOverlay(() => ({
     // The mirror, not the link: what this window decoded, not what the
     // control window last said. During a load those differ, and the
-    // useful answer is what is on the glass.
-    datasetId: mirror.currentDataset()?.id ?? null,
+    // useful answer is what is on the glass — which is also why
+    // calibration wins over both.
+    datasetId: readCalibration()
+      ? (CALIBRATION_OVERLAY.datasetId ?? null)
+      : (mirror.currentDataset()?.id ?? null),
     driftS: lastSync?.driftS ?? null,
+    syncKind: lastSync?.kind ?? null,
     fps,
+    // Read, never evaluated: `linkHealth()` is the pure getter, so
+    // painting the HUD cannot itself send a health-check ping. The
+    // evaluation happens once per frame in the loop below.
+    link: readLinkHealth(),
     gpu: gpuName(),
+    gpuState: scene.gpuState(),
     framebuffer: scene.size,
   }))
+
+  // The picture cannot survive a context loss, so the first frame after
+  // one must not wait out the 1 Hz static floor — that is up to a
+  // second of blank projector after the GPU has already come back.
+  // Only the restore edge needs this: while the context is *lost* the
+  // loop below declines to draw at all, which is what keeps `dirty`
+  // set across the outage rather than being cleared by a frame that
+  // never reached the glass.
+  scene.onGpuStateChange(state => {
+    if (state === 'restored') dirty = true
+  })
 
   if (isDesktop()) {
     // F11 as the escape hatch (§3.6 mechanism 4). An output is spawned
@@ -116,6 +169,50 @@ async function boot(): Promise<void> {
 
     try {
       const link = await connectOutputLink(await createTauriLinkHost())
+      readLinkHealth = () => link.linkHealth()
+      readCalibration = () => link.renderConfig().calibration
+
+      // The manager cannot find this out any other way (rung 13, case
+      // 5). Its other detectors all read an *absence* — a destroy with
+      // no `output_closing`, a window that never answers a poke — and
+      // a GPU loss defeats every one of them: this window stays up, the
+      // channel stays healthy, the heartbeat keeps being answered, and
+      // the sphere is black. Subscribed after the link exists rather
+      // than beside the dirty-flag subscription above, because a
+      // report before there is anywhere to send it is not a report;
+      // the current state is pushed once immediately for the same
+      // reason `link.renderConfig()` is read once — a context lost
+      // during boot, which on a crowded machine is exactly when
+      // eviction happens, would otherwise never be mentioned.
+      //
+      // **The initial push replays the incident, not just its
+      // outcome**, and that is a fix rather than a flourish. The gap
+      // between the scene being built and the link attaching is
+      // awaited twice (`createTauriLinkHost`, then
+      // `connectOutputLink`), so a loss *and* its restore can both land
+      // inside it — and reporting only `restored` then tells the
+      // manager a context came back that it never heard leave. It
+      // latches nothing and the incident is never counted. `restored`
+      // implies a loss happened, so saying both is the honest replay.
+      // Found in review.
+      const initial = scene.gpuState()
+      if (initial === 'restored') link.reportGpuState('lost')
+      link.reportGpuState(initial)
+
+      // A poke comes only from a manager that booted after a control
+      // window reload, so it has heard nothing this window ever said —
+      // and GPU state travels on edges with no heartbeat to re-state
+      // it, unlike `view` or `dataset`. Without this an output sitting
+      // in `lost` is adopted with `gpuLost: false` and no badge, which
+      // is precisely the invisible failure the badge exists for.
+      //
+      // The *current* state alone, never the replay above: the fresh
+      // manager needs this window's standing condition, while the
+      // incident itself was already reported to — and counted by — the
+      // manager that saw it happen.
+      link.onReannounce(() => link.reportGpuState(scene.gpuState()))
+
+      scene.onGpuStateChange(state => link.reportGpuState(state))
 
       /**
        * Rebuild the composite from whatever the mirror currently holds.
@@ -128,12 +225,32 @@ async function boot(): Promise<void> {
        * an incoming dataset's bbox and palette over the outgoing
        * dataset's pixels for the length of a load.
        */
+      // The pattern's whole lifecycle — when it is rebuilt, when a
+      // failure is retried, why it is not thrown away when calibration
+      // goes off — lives in `calibrationPattern.ts`, where it is
+      // testable. What is left here is the substitution.
+      const calibrationCache = createCalibrationCache()
+      const calibrationLayer = (): OutputLayerInput | null => {
+        const canvas = calibrationCache.canvasFor(link.renderConfig().framebufferWidth)
+        return canvas ? { kind: 'image', element: canvas, overlay: CALIBRATION_OVERLAY } : null
+      }
+
       const recomposite = (): void => {
         const state = link.state()
         const media = mirror.current()
         const primary = mirror.currentDataset()
         const layers: OutputLayerInput[] = []
-        if (media && primary) {
+        // Instead of the mirrored dataset, never over it. A graticule
+        // composited on top of data leaves neither legible, and what is
+        // being checked here is geometry — so the pattern wants the
+        // sphere to itself. The mirror is untouched underneath: the
+        // decoder keeps running and keeps being steered, so turning
+        // calibration off puts the dataset back in step rather than
+        // reloading it.
+        const pattern = link.renderConfig().calibration ? calibrationLayer() : null
+        if (pattern) {
+          layers.push(pattern)
+        } else if (media && primary) {
           layers.push({
             kind: media.kind,
             element: media.element,
@@ -167,10 +284,17 @@ async function boot(): Promise<void> {
           // is looking, `dayNight` is whether the Earth is lit.
           scene.setDayNight(state.view.dayNight)
         }
-        // Anything that changed is worth a frame — including the keys
-        // this loop does not yet composite, so the 1 Hz floor never
-        // holds a change back once they are wired.
-        dirty = true
+        // Anything that changed the *picture* is worth a frame —
+        // including the keys this loop does not yet composite, so the
+        // 1 Hz floor never holds a change back once they are wired.
+        // `playback` and `primary` are not among them: they say where
+        // the control window's playhead is, they arrive on every frame
+        // the operator's globe plays, and nothing here draws from them.
+        // This output's own frame advance is paced by `contentKindFor`
+        // and its seeks are caught below by comparing `currentTime`
+        // across the steer, so drawing on the diff as well was double
+        // the GPU for an identical picture.
+        if (changesPicture(changed)) dirty = true
       }
       link.onChange(applyState)
       // The same race the render config below handles, and a worse
@@ -197,6 +321,15 @@ async function boot(): Promise<void> {
       const applyConfig = (config: OutputRenderConfig): void => {
         scene.setFramebufferWidth(config.framebufferWidth)
         overlay.setVisible(config.debugOverlay)
+        // After the width is applied, not before: `calibrationLayer()`
+        // reads the config's width to decide whether its cached canvas
+        // is still the right size, and a pattern rebuilt against the
+        // old rung would be replaced again on the very next
+        // recomposite. Unconditional because this runs only on an
+        // operator action, and `setLayers` no-ops on an identical
+        // element — so a config change that touched neither the width
+        // nor the toggle costs one array build.
+        recomposite()
         dirty = true
       }
       link.onRenderConfig(applyConfig)
@@ -218,6 +351,16 @@ async function boot(): Promise<void> {
         })
         // A seek changes the decoded frame without the scene knowing.
         if (before !== mirror.current()?.video?.currentTime) dirty = true
+        // Rides this loop rather than starting a timer (rung 13, case
+        // 3). The loop runs every frame and the loop's *draw* floors at
+        // 1 Hz, either of which is ample against a five-second
+        // threshold — and the watchdog rations its own pings, so
+        // calling it at the frame rate costs an integer compare.
+        // Deliberately **not** flagging the scene dirty on a health
+        // transition: the picture does not change when the link does,
+        // and a stale link that forced a redraw would spend GPU
+        // announcing that nothing is arriving.
+        link.checkHealth()
       }
       steerers.push(steer)
     } catch (err) {
@@ -239,7 +382,20 @@ async function boot(): Promise<void> {
     // changes when the operator pauses without any state key changing
     // shape. See `contentKindFor`.
     const kind = contentKindFor(mirror.current())
-    if (shouldRenderFrame({ kind, sinceLastFrameMs: now - lastFrame, dirty })) {
+    // A lost context draws nothing — Three's renderer returns from
+    // `render()` immediately once it has seen `webglcontextlost`. The
+    // call is therefore harmless and the *bookkeeping after it* is not:
+    // ticking the fps meter, clearing `dirty` and advancing `lastFrame`
+    // for a frame that reached no pixels makes the HUD report a healthy
+    // 30 fps over a black projector, which is the precise shape of
+    // invisible failure this whole rung exists to remove. So the frame
+    // is skipped rather than drawn-and-counted: fps falls to 0 on the
+    // next sample, `dirty` survives the outage, and the restore above
+    // paints immediately.
+    if (
+      scene.gpuState() !== 'lost' &&
+      shouldRenderFrame({ kind, sinceLastFrameMs: now - lastFrame, dirty })
+    ) {
       scene.render()
       // Counted on drawn frames, not on rAF callbacks: the question the
       // HUD answers is whether this output is painting, and for static

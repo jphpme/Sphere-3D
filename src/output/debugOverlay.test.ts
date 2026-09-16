@@ -24,14 +24,48 @@ function reading(over: Partial<DebugOverlayReading> = {}): DebugOverlayReading {
   return {
     datasetId: 'SST',
     driftS: 0,
+    syncKind: 'playing',
     fps: 30,
+    link: 'live',
     gpu: 'NVIDIA GeForce RTX 4090 Laptop GPU',
+    gpuState: 'live',
     framebuffer: { width: 4096, height: 2048 },
     ...over,
   }
 }
 
 describe('formatOverlay', () => {
+  it('says why there is no number, when there is no number', () => {
+    // A bare dash cannot separate "this is a still image, which has no
+    // playhead" from "this element has been seeking for ten seconds".
+    // The first hardware pass recorded exactly that ambiguity — "sync
+    // just shows a dash" — against a dataset that turned out to be in a
+    // seek loop, and the HUD is the only place an operator can ask.
+    const image = formatOverlay(reading({ driftS: null, syncKind: 'not-ready' }))
+    const stuck = formatOverlay(reading({ driftS: null, syncKind: 'seeking' }))
+
+    expect(image.find(l => l.startsWith('sync'))).toContain('not-ready')
+    expect(stuck.find(l => l.startsWith('sync'))).toContain('seeking')
+    expect(image).not.toEqual(stuck)
+  })
+
+  it('still shows a bare dash before the correction has ever run', () => {
+    // No link attached — the static fixture page, or a launch where the
+    // host failed. There is no outcome to name and inventing one would
+    // be worse than the dash.
+    const line = formatOverlay(reading({ driftS: null, syncKind: null })).find(l =>
+      l.startsWith('sync'),
+    )
+    expect(line?.trim()).toBe('sync  —')
+  })
+
+  it('prints the number, not the kind, once there is one', () => {
+    const line = formatOverlay(reading({ driftS: 0.25, syncKind: 'playing' })).find(l =>
+      l.startsWith('sync'),
+    )
+    expect(line).not.toContain('playing')
+  })
+
   it('signs the drift so ahead and behind are distinguishable', () => {
     // The field an operator acts on. Getting the sign backwards sends
     // someone hunting a lead output that is actually late.
@@ -72,6 +106,34 @@ describe('formatOverlay', () => {
     expect(formatOverlay(reading({ gpu: null })).find(l => l.startsWith('gpu'))).toContain(
       'unreported',
     )
+  })
+
+  it('leaves the gpu line undecorated while the context is live', () => {
+    // Same rule as the Outputs panel's health badge: nothing is drawn
+    // for the healthy case. A line that carries "(live)" on every
+    // output of every installation is a line an operator stops
+    // reading, and this HUD is read at a glance from a few metres.
+    const line = formatOverlay(reading({ gpuState: 'live' })).find(l => l.startsWith('gpu'))
+    expect(line).toBe('gpu   NVIDIA GeForce RTX 4090 Laptop GPU')
+  })
+
+  it('names a lost context beside the renderer, not on a line of its own', () => {
+    // Beside it because it is the same subject, and because the HUD is
+    // six lines over a sphere — a seventh for a field that is empty
+    // almost always is the wrong trade.
+    expect(
+      formatOverlay(reading({ gpuState: 'lost' })).find(l => l.startsWith('gpu')),
+    ).toContain('context lost')
+  })
+
+  it('keeps saying so after a restore', () => {
+    // A restore is not silence. Three rebuilds its GL state, but this
+    // window has still had a GPU event this session, and that is worth
+    // knowing when someone is working out why a sphere looked wrong
+    // ten minutes ago.
+    expect(
+      formatOverlay(reading({ gpuState: 'restored' })).find(l => l.startsWith('gpu')),
+    ).toContain('context restored')
   })
 
   it('reports the framebuffer, which is not the window', () => {

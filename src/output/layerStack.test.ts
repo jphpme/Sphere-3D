@@ -703,7 +703,9 @@ describe('EARTH_ATMOSPHERE_GLSL', () => {
 })
 
 describe('the composed shader runs the passes in earthTileLayer\'s order', () => {
-  const src = buildOutputFragmentShader(1)
+  // Read at zero layers, which is the only shader that carries the
+  // treatment at all — see "the Earth treatment is idle-only" below.
+  const src = buildOutputFragmentShader(0)
   // Order has to be read inside `main()`. Every helper is *defined*
   // above it — GLSL ES 1.00 has no forward declarations — so searching
   // the whole source finds definitions, not call sites, and compares
@@ -718,15 +720,12 @@ describe('the composed shader runs the passes in earthTileLayer\'s order', () =>
     )
   })
 
-  it('applies the atmosphere after the decoration and before the layers', () => {
-    // Pass 5 is drawn last over there, over the clouds — and it must
-    // land under the dataset, or a blue wash reads as a value.
+  it('applies the atmosphere after the decoration', () => {
+    // Pass 5 is drawn last over there, over the clouds.
     const decorate = body.indexOf('colour = decorateEarth(')
     const atmosphere = body.indexOf('colour = applyEarthAtmosphere(')
-    const layer = body.indexOf('sampleOverlayLayer(')
     expect(decorate).toBeGreaterThan(0)
     expect(decorate).toBeLessThan(atmosphere)
-    expect(atmosphere).toBeLessThan(layer)
   })
 
   it('declares the atmosphere uniforms it samples', () => {
@@ -736,5 +735,69 @@ describe('the composed shader runs the passes in earthTileLayer\'s order', () =>
 
   it('defines the helper before main, as GLSL ES 1.00 requires', () => {
     expect(src.indexOf('vec3 applyEarthAtmosphere(')).toBeLessThan(src.indexOf('void main()'))
+  })
+})
+
+describe('the Earth treatment is idle-only', () => {
+  // `earthTileLayer` gates its whole pass chain on `datasetActive` and
+  // returns before any of it, so a control globe showing a dataset
+  // shows an unlit, ungraded sphere — and a bbox dataset reveals raw
+  // Blue Marble tiles outside its box. This path used to composite the
+  // decoration *under* the layers instead, on the reasoning that
+  // under-compositing meant day/night could never tint a dataset. That
+  // holds only for opaque global coverage: a data-encoded overlay is
+  // translucent by construction, so the terminator showed through the
+  // smoke plume the argument used as its own example. Found on
+  // hardware, rung 9 step 13.
+  const withLayer = buildOutputFragmentShader(1)
+
+  it('emits no grade, decoration or atmosphere once a layer exists', () => {
+    for (const call of [
+      'gradeEarthBase(',
+      'earthNightFactor(',
+      'decorateEarth(',
+      'applyEarthAtmosphere(',
+      'earthCloudZoomFade(',
+    ]) {
+      expect(withLayer).not.toContain(call)
+    }
+  })
+
+  it('samples the sphere raw, the way the control globe leaves it', () => {
+    const body = withLayer.slice(withLayer.indexOf('void main()'))
+    expect(body).toContain('vec3 colour = texture2D(uSphereTexture, sphereUv).rgb;')
+  })
+
+  it('declares none of the decoration uniforms it no longer reads', () => {
+    // Not cosmetic: a declared-but-unread sampler is the shape of a
+    // pass someone reinstates by wiring a uniform back up, which is
+    // exactly the regression this guards.
+    for (const u of [
+      'uSunDir',
+      'uNightLightsMap',
+      'uHasNightLights',
+      'uCloudMap',
+      'uHasCloud',
+      'uAtmosphereLut',
+      'uHasAtmosphere',
+    ]) {
+      expect(withLayer).not.toContain(`uniform sampler2D ${u};`)
+      expect(withLayer).not.toContain(`uniform int ${u};`)
+      expect(withLayer).not.toContain(`uniform vec3 ${u};`)
+    }
+  })
+
+  it('still carries the whole treatment at zero layers', () => {
+    // The idle output is the case the decoration exists for, and the
+    // gate must not cost it anything.
+    const idle = buildOutputFragmentShader(0)
+    for (const call of [
+      'gradeEarthBase(',
+      'decorateEarth(',
+      'applyEarthAtmosphere(',
+      'earthCloudZoomFade(',
+    ]) {
+      expect(idle).toContain(call)
+    }
   })
 })

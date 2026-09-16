@@ -269,6 +269,21 @@ export interface MirroredEquirectParams {
   /** Mirror the area of focus to the antipodal hemisphere — matches
    *  existing SOS sphere-split behaviour. Per-output. */
   split: boolean
+  /**
+   * Per-installation longitude rotation, **radians** (rung 14).
+   *
+   * Per-output rather than shared, and that is the whole reason it is
+   * in `params`: two spheres in two rooms are mounted differently, and
+   * a globally-broadcast offset would turn both when the operator
+   * aligns one.
+   *
+   * Radians on the wire though the operator types degrees, because
+   * this object *is* `equirectRtt`'s `EquirectParams` — a narrowed
+   * output hands it straight to `setParams` — so a degree value here
+   * would need converting inside the output too, which is a second
+   * conversion free to disagree with `projectView`'s.
+   */
+  rotationOffsetRad: number
 }
 
 /** What every arm of `MirroredView` carries, whatever its geometry. */
@@ -473,6 +488,23 @@ export interface OutputRenderConfig {
   framebufferWidth: number
   /** Whether to draw the debug HUD over the projection. */
   debugOverlay: boolean
+  /**
+   * Show the calibration test pattern **instead of** whatever this
+   * output is mirroring (rung 14b).
+   *
+   * It rides this channel rather than `GlobeState` for the reason the
+   * channel exists: it is a property of one *window*, and calibration
+   * is done one sphere at a time — a rig with four outputs is four
+   * differently-mounted spheres, and putting a pattern on all of them
+   * to align one is the opposite of what the operator asked for.
+   * Routing it through the mirrored `dataset` would do exactly that,
+   * and would also replace the control window's own globe, which is
+   * where the operator is reading the rotation they are turning.
+   *
+   * Instead-of rather than over: a pattern is for checking *geometry*,
+   * and a graticule composited over a dataset leaves neither legible.
+   */
+  calibration: boolean
 }
 
 /**
@@ -494,7 +526,7 @@ export interface OutputRenderConfig {
  * indistinguishable from a real failure.
  */
 export function defaultRenderConfig(): OutputRenderConfig {
-  return { framebufferWidth: DEFAULT_FRAMEBUFFER_WIDTH, debugOverlay: false }
+  return { framebufferWidth: DEFAULT_FRAMEBUFFER_WIDTH, debugOverlay: false, calibration: false }
 }
 
 // --- Manager → output ---
@@ -557,6 +589,34 @@ export function isFullState<S>(
  * channel is another name to audit. The manager discriminates on
  * `type`.
  */
+/**
+ * Manager → one output: *are you still there, and please say so.*
+ *
+ * The boot scan for orphaned windows (`docs/MULTI_MONITOR_PLAN.md` §3
+ * "Failure recovery", case 6). A control window whose webview reloaded
+ * or crashed leaves its `output-*` windows alive and rendering, with a
+ * fresh manager that has never heard of them — so the manager finds
+ * them with `existingOutputs()` and pokes each one here.
+ *
+ * **It carries nothing, and the reply is `output_ready`, not a
+ * dedicated pong.** Both choices are the same choice: an output that
+ * re-announces is served by the one path that already serves a first
+ * announcement and a health-check ping, so a reattached window gets its
+ * render config before its first snapshot exactly like every other
+ * window does. A bespoke reply would need a second serve path, and the
+ * config-before-state ordering in it is load-bearing.
+ *
+ * Targeted with `emitTo`, so the payload needs no label: the window
+ * that receives it is the window being asked.
+ *
+ * The 60-second `IPC_ORPHAN_MS` is why this exists at all. Inside that
+ * window an out-of-contact output is still pinging, and a fresh manager
+ * hears it the moment it registers a record — no poke required. Past
+ * it the output has stopped talking, by design, and nothing would ever
+ * arrive again unless the manager spoke first.
+ */
+export const OUTPUT_REATTACH_EVENT = 'output_reattach'
+
 export const OUTPUT_EVENT = 'output_event'
 
 /**
@@ -594,7 +654,30 @@ export interface OutputDatasetStalledEvent extends OutputEventBase {
   datasetId: string | null
 }
 
-/** A lost WebGL context came back and the scene was rebuilt. */
+/**
+ * This window's WebGL context went away (rung 13, case 5).
+ *
+ * It exists because the manager has no other way to learn this. The
+ * window is alive, the link is fine, the heartbeat is answered — and
+ * the sphere is black. Every other failure signal the manager has is
+ * an *absence*, and this one is the opposite: a healthy channel
+ * reporting an unhealthy picture, which is exactly the case the
+ * absence-based detectors are blind to.
+ */
+export interface OutputGpuLostEvent extends OutputEventBase {
+  type: 'output_gpu_lost'
+}
+
+/**
+ * A lost WebGL context came back.
+ *
+ * Deliberately **not** a claim that the picture did. Three rebuilds its
+ * GL state on restore and re-uploads on the next draw, which for the
+ * output's scene should be the whole of it — but that is read from
+ * Three's source rather than observed on hardware, and the two states
+ * are reported separately so the difference stays visible if it turns
+ * out not to hold.
+ */
 export interface OutputGpuRecoveredEvent extends OutputEventBase {
   type: 'output_gpu_recovered'
 }
@@ -626,6 +709,7 @@ export type OutputEvent =
   | OutputReadyEvent
   | OutputHealthCheckEvent
   | OutputDatasetStalledEvent
+  | OutputGpuLostEvent
   | OutputGpuRecoveredEvent
   | OutputFrameStaleEvent
   | OutputClosingEvent
@@ -647,6 +731,26 @@ export const STATE_TICK_MS = 1000
  *  Outputs panel badges it. The output keeps rendering its last known
  *  state; the audience sees frozen content, not a black screen. */
 export const IPC_STALE_MS = 5000
+
+/**
+ * How often a stale output pings while it waits to be heard.
+ *
+ * **Moved here from `linkWatchdog.ts`, where it was first written with
+ * an argument that this slice falsified.** That argument was: only the
+ * output sends these and the manager answers whatever arrives, so a
+ * shared constant would imply a coupling that does not exist. True
+ * until the Outputs panel needed a stale *badge* — because deciding
+ * that an output has *stopped* complaining means knowing how long a
+ * silence has to be before the last complaint is out of date, and that
+ * is the ping cadence. A manager holding its own guess would flicker
+ * the badge whenever the two numbers disagreed, which is precisely the
+ * "both ends must agree" test this block exists for.
+ *
+ * Twice the broadcast tick: frequent enough that a manager which comes
+ * back mid-window resyncs within a couple of seconds, sparse enough
+ * that the whole stale period costs about 27 pings rather than 55.
+ */
+export const LINK_PING_INTERVAL_MS = 2000
 
 /**
  * Silence after which the output considers itself orphaned and stops

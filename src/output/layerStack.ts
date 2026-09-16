@@ -614,21 +614,44 @@ vec4 sampleOverlayLayer(
 export function buildOutputFragmentShader(layerCount: number): string {
   const count = Math.max(0, Math.min(layerCount, MAX_OUTPUT_LAYERS))
 
-  // Always composed, including at zero layers. It used to hand back the
-  // projection pass untouched there — but the Earth decoration is not a
-  // layer, it is what the sphere looks like, and the idle output with
-  // no dataset at all is the case it matters most for.
+  // **The Earth treatment is for the idle globe only**, and that is a
+  // correction of what shipped rather than a preference.
+  //
+  // `earthTileLayer` gates its whole pass chain on `datasetActive` and
+  // returns before any of it — the comment on that return says "no
+  // earth effects when dataset is active" — so a control globe showing
+  // a dataset shows an unlit, ungraded sphere, and a bbox dataset
+  // `discard`s to raw Blue Marble tiles outside the box. This path used
+  // to composite the decoration *under* the layers instead, on the
+  // reasoning that under-compositing meant "day/night never tints a
+  // dataset". That is true only of opaque global coverage. A
+  // bbox-clipped, data-encoded overlay is translucent by construction —
+  // its alpha is the measurement — so the terminator showed *through*
+  // the very smoke plume the argument used as its example, and outside
+  // the box the output was decorated while the control globe was not.
+  // Found on hardware, rung 9 step 13.
+  //
+  // So the gate is the slot count, decided at build time because the
+  // shader text is already a function of it: no layers means the idle
+  // Earth and its full treatment, any layer means the raw sample and
+  // nothing on top. `main.ts` fills a slot only when the mirror holds
+  // *decoded* media for a dataset, which makes this a tighter test than
+  // the control side's — `datasetActive` is set when the dataset is
+  // assigned, this when its pixels exist.
+  const idleEarth = count === 0
   const D = DECORATION_UNIFORMS
-  const declarations: string[] = [
-    `uniform vec3 ${D.sunDir};`,
-    `uniform int ${D.dayNight};`,
-    `uniform sampler2D ${D.lightsMap};`,
-    `uniform int ${D.hasLights};`,
-    `uniform sampler2D ${D.cloudMap};`,
-    `uniform int ${D.hasCloud};`,
-    `uniform sampler2D ${D.atmosphereLut};`,
-    `uniform int ${D.hasAtmosphere};`,
-  ]
+  const declarations: string[] = idleEarth
+    ? [
+        `uniform vec3 ${D.sunDir};`,
+        `uniform int ${D.dayNight};`,
+        `uniform sampler2D ${D.lightsMap};`,
+        `uniform int ${D.hasLights};`,
+        `uniform sampler2D ${D.cloudMap};`,
+        `uniform int ${D.hasCloud};`,
+        `uniform sampler2D ${D.atmosphereLut};`,
+        `uniform int ${D.hasAtmosphere};`,
+      ]
+    : []
   const composites: string[] = []
   for (let slot = 0; slot < count; slot++) {
     const n = overlayUniformNames(slot)
@@ -662,32 +685,46 @@ export function buildOutputFragmentShader(layerCount: number): string {
     )
   }
 
+  // The idle Earth, in `earthTileLayer`'s pass order. None of it is
+  // emitted once a layer exists — see the note on `idleEarth` above.
+  const earthTreatment = idleEarth
+    ? [
+        // Pass 0 first, on the raw sample, exactly where the raster path
+        // runs it — everything below composites onto the graded base.
+        '  vec3 colour = gradeEarthBase(texture2D(uSphereTexture, sphereUv).rgb);',
+        // `hit` is the ray-march's landing point on the *unit* sphere, so
+        // it is already the surface normal — the one line the plan's
+        // decoration table promised the terminator would cost.
+        `  float night = earthNightFactor(hit, ${D.sunDir}, ${D.dayNight});`,
+        `  vec3 nightLights = ${D.hasLights} == 1`,
+        `    ? texture2D(${D.lightsMap}, sphereUv).rgb : vec3(0.0);`,
+        // Raw luminance, the same quantity earthTileLayer's cloud pass
+        // reads, so the gamma below is the one that asset was tuned with.
+        `  float cloudLuma = ${D.hasCloud} == 1`,
+        `    ? dot(texture2D(${D.cloudMap}, sphereUv).rgb, vec3(0.299, 0.587, 0.114))`,
+        '    : 0.0;',
+        // `t` is the ray-march's hit distance, so the fade is per fragment:
+        // clouds dissolve where the projection magnifies and stay where it
+        // does not, which is the same "vanish on the way in" the control
+        // globe does — just applied to a frame that holds several zooms at
+        // once.
+        '  float cloudFade = earthCloudZoomFade(t);',
+        '  colour = decorateEarth(colour, nightLights, cloudLuma, night, cloudFade);',
+        // Pass 5 last, over the clouds.
+        `  colour = applyEarthAtmosphere(colour, hit, ${D.sunDir}, ${D.atmosphereLut},`,
+        `    ${D.hasAtmosphere}, ${D.dayNight});`,
+      ]
+    : [
+        // Raw, exactly as the control globe leaves it: its dataset branch
+        // returns before pass 0, so the tiles a bbox dataset reveals
+        // outside its box are ungraded and unlit. Grading only this side
+        // would put a contrast curve on one of two globes showing the
+        // same field.
+        '  vec3 colour = texture2D(uSphereTexture, sphereUv).rgb;',
+      ]
+
   const tail = [
-    // Pass 0 first, on the raw sample, exactly where the raster path
-    // runs it — everything below composites onto the graded base.
-    '  vec3 colour = gradeEarthBase(texture2D(uSphereTexture, sphereUv).rgb);',
-    // `hit` is the ray-march's landing point on the *unit* sphere, so
-    // it is already the surface normal — the one line the plan's
-    // decoration table promised the terminator would cost.
-    `  float night = earthNightFactor(hit, ${D.sunDir}, ${D.dayNight});`,
-    `  vec3 nightLights = ${D.hasLights} == 1`,
-    `    ? texture2D(${D.lightsMap}, sphereUv).rgb : vec3(0.0);`,
-    // Raw luminance, the same quantity earthTileLayer's cloud pass
-    // reads, so the gamma below is the one that asset was tuned with.
-    `  float cloudLuma = ${D.hasCloud} == 1`,
-    `    ? dot(texture2D(${D.cloudMap}, sphereUv).rgb, vec3(0.299, 0.587, 0.114))`,
-    '    : 0.0;',
-    // `t` is the ray-march's hit distance, so the fade is per fragment:
-    // clouds dissolve where the projection magnifies and stay where it
-    // does not, which is the same "vanish on the way in" the control
-    // globe does — just applied to a frame that holds several zooms at
-    // once.
-    '  float cloudFade = earthCloudZoomFade(t);',
-    '  colour = decorateEarth(colour, nightLights, cloudLuma, night, cloudFade);',
-    // Pass 5 last, over the clouds, before any dataset layer — a blue
-    // wash over a measured field would read as a value.
-    `  colour = applyEarthAtmosphere(colour, hit, ${D.sunDir}, ${D.atmosphereLut},`,
-    `    ${D.hasAtmosphere}, ${D.dayNight});`,
+    ...earthTreatment,
     // Emitted only when something samples them, so a zero-layer shader
     // does not declare two unread floats.
     ...(count > 0
@@ -706,7 +743,7 @@ export function buildOutputFragmentShader(layerCount: number): string {
   // fails only on a GPU, which is nowhere this repo's tests run — so
   // the ordering is asserted in `layerStack.test.ts`.
   const decoration = `${EARTH_DECORATION_GLSL}\n\n${EARTH_ATMOSPHERE_GLSL}`
-  const helpers = count > 0 ? `${decoration}\n\n${OVERLAY_SAMPLE_GLSL}` : decoration
+  const helpers = idleEarth ? decoration : OVERLAY_SAMPLE_GLSL
   const preamble = `${declarations.join('\n')}\n\n${helpers}\n`
   return body.replace('void main() {', `${preamble}\nvoid main() {`)
 }

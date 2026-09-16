@@ -54,9 +54,11 @@
  */
 
 import { IDENTITY_PARAMS } from './equirectRtt'
+import type { GpuContextState } from './outputScene'
 import { sameValue } from '../services/multiOutput/stateEquality'
 import {
   OUTPUT_EVENT,
+  OUTPUT_REATTACH_EVENT,
   OUTPUT_RENDER_CONFIG_EVENT,
   OUTPUT_STATE_EVENT,
   defaultRenderConfig,
@@ -65,6 +67,7 @@ import {
   type OutputRenderConfig,
   type OutputStateMessage,
 } from '../services/multiOutput/protocol'
+import { createLinkWatchdog, type LinkHealth, type LinkWatchdog } from './linkWatchdog'
 import { logger } from '../utils/logger'
 
 /**
@@ -98,6 +101,33 @@ export interface OutputLinkHost {
   monitorName(): Promise<string | null>
   listen(event: string, handler: (payload: unknown) => void): Promise<() => void>
   emit(event: string, payload: unknown): Promise<void>
+  /**
+   * Called when this window is *about* to close — Alt+F4, a window
+   * manager's close button, the title bar an operator got back with
+   * F11 — with a chance to speak before it goes (rung 13).
+   *
+   * This is the only thing that separates an operator closing an output
+   * by hand from that output crashing. The manager classifies a destroy
+   * it did not ask for as a crash unless an `output_closing` arrived
+   * first, because a killed process cannot report its own death — so
+   * without this hook every deliberate close is logged as a crash, and
+   * three of them in a minute blocklist a perfectly good monitor.
+   *
+   * Optional, and its absence degrades exactly that far: the link still
+   * works, closes are merely misread. That is the right failure for a
+   * host that has no such notion (the static fixture page has none).
+   */
+  onCloseRequested?(handler: () => void): Promise<void>
+
+  /**
+   * The clock the link-health watchdog reads (rung 13, case 3).
+   *
+   * Optional and defaulting to `Date.now`, because a real output has
+   * no reason to supply one and a test has every reason to: case 3's
+   * thresholds are five and sixty seconds, and driving those through a
+   * real clock is a minute-long test that fails on a loaded runner.
+   */
+  nowMs?(): number
 }
 
 /** What one accepted (or rejected) message did to the held state. */
@@ -142,7 +172,11 @@ export function outputInitialState(mode: OutputMode = OUTPUT_MODE): OutputGlobeS
       dayNight: true,
       // Copied, not aliased: `IDENTITY_PARAMS` is module-scoped and a
       // later in-place write would edit the shader's own constant.
-      params: { cameraOffset: { ...IDENTITY_PARAMS.cameraOffset }, split: IDENTITY_PARAMS.split },
+      params: {
+        cameraOffset: { ...IDENTITY_PARAMS.cameraOffset },
+        split: IDENTITY_PARAMS.split,
+        rotationOffsetRad: IDENTITY_PARAMS.rotationOffsetRad,
+      },
     },
   }
 }
@@ -171,6 +205,66 @@ type AssertNoneMissing<T extends never> = T
 type _StateKeysAreExhaustive = AssertNoneMissing<
   Exclude<keyof OutputGlobeState, (typeof STATE_KEYS)[number]>
 >
+
+/**
+ * The keys whose change can put a different pixel on the glass.
+ *
+ * Everything the output composites: the dataset's own media, the
+ * operator's palette, the stacked layers, the camera and illumination,
+ * and the simulation clock the sun will one day be read from. `layers`
+ * and `simulationDate` are listed even though nothing composites them
+ * yet — a key that arrives wired but unlisted would be applied and then
+ * held back by the 1 Hz static floor, which reads as "that setting
+ * takes a moment" rather than as a bug.
+ */
+export const PICTURE_KEYS = [
+  'dataset',
+  'display',
+  'layers',
+  'simulationDate',
+  'view',
+] as const satisfies readonly StateKey[]
+
+/**
+ * The keys read only by the playhead correction.
+ *
+ * These two describe where the *control window's* video is, and they
+ * change on every frame the operator's globe plays — sixty diffs a
+ * second, each one previously worth a redraw of a 4096x2048
+ * ray-marched sphere. Neither one changes a pixel here. What this
+ * output shows moves when its own decoder advances, which
+ * `contentKindFor` already paces at 30 fps, or when the correction
+ * seeks, which the render loop notices by comparing `currentTime`
+ * across the call. Redrawing on the diff as well doubled the output's
+ * GPU load for the exact content the 30 fps cap exists to bound — on a
+ * machine whose webview may be on the iGPU, and whose control window is
+ * decoding the same video in the next process.
+ */
+export const PLAYHEAD_KEYS = ['primary', 'playback'] as const satisfies readonly StateKey[]
+
+/** Compile-time proof the two lists above partition `StateKey`: every
+ *  key is classified, and none is classified twice. A key added to the
+ *  schema and left out of both would silently never earn a frame. */
+type _EveryKeyIsClassified = AssertNoneMissing<
+  Exclude<StateKey, (typeof PICTURE_KEYS)[number] | (typeof PLAYHEAD_KEYS)[number]>
+>
+type _NoKeyIsClassifiedTwice = AssertNoneMissing<
+  Extract<(typeof PICTURE_KEYS)[number], (typeof PLAYHEAD_KEYS)[number]>
+>
+
+/**
+ * Did this diff change anything the output draws?
+ *
+ * Exported as a predicate rather than leaving the call site to test the
+ * list, because the answer decides whether a frame is drawn and the
+ * wrong answer is invisible in both directions: too eager burns a GPU
+ * budget silently, too lazy leaves a stale picture that looks like a
+ * dropped upload.
+ */
+export function changesPicture(changed: readonly StateKey[]): boolean {
+  const picture: readonly StateKey[] = PICTURE_KEYS
+  return changed.some(key => picture.includes(key))
+}
 
 export function createOutputStateStore(mode: OutputMode = OUTPUT_MODE): OutputStateStore {
   let held = outputInitialState(mode)
@@ -290,6 +384,52 @@ export interface OutputLink {
    *  the keys that differ. Never called with an empty list — a
    *  heartbeat that changed nothing is not news. */
   onChange(listener: (changed: StateKey[], state: Readonly<OutputGlobeState>) => void): () => void
+  /**
+   * Evaluate the link's health and ping if one is due (rung 13, case
+   * 3). Ride an existing loop rather than starting a timer — the
+   * output's render loop already runs at ≥1 Hz, which is ample against
+   * a five-second threshold, and a second timer is a second thing to
+   * tear down. Same shape `playbackSettle` uses over
+   * `playbackController`'s rAF loop.
+   */
+  checkHealth(nowMs?: number): LinkHealth
+  /** What the last `checkHealth` concluded. A pure read for the debug
+   *  HUD, so painting the field cannot itself send a ping. */
+  linkHealth(): LinkHealth
+  /**
+   * Tell the manager this window's GPU context changed (rung 13, case
+   * 5).
+   *
+   * The one report that travels *because* the link is healthy rather
+   * than to say it is not. Every other failure the manager detects is
+   * an absence — a destroy with no `output_closing`, a window that
+   * never answers a poke — and a GPU loss is invisible to all of them:
+   * the window is up, the channel is fine, the heartbeat is answered,
+   * and the sphere is black.
+   *
+   * Fired, never awaited, for `checkHealth`'s reason: this is called
+   * from a DOM event handler on the render loop's thread, and a report
+   * that cannot be delivered is a worse link, not a reason to throw
+   * inside a `webglcontextlost` handler.
+   */
+  reportGpuState(state: GpuContextState): void
+  /**
+   * Called after this window re-announces itself to a manager that
+   * poked it (case 6's `OUTPUT_REATTACH_EVENT`).
+   *
+   * A poke only ever comes from a manager that booted *after* a control
+   * window reload, so it has never heard anything this window said —
+   * including its GPU state, which travels on its own edges and has no
+   * heartbeat to re-state it. Without this hook an output sitting in
+   * `lost` is adopted into a fresh record with `gpuLost: false` and no
+   * **Display lost** badge, which is the invisible-failure shape this
+   * whole rung is written against.
+   *
+   * Not fired for the *first* announcement: that one happens inside
+   * `connectOutputLink`, before any caller could have subscribed, so
+   * the composition pushes the initial state itself.
+   */
+  onReannounce(listener: () => void): () => void
   /** Detach the listener. Idempotent. */
   stop(): Promise<void>
 }
@@ -308,7 +448,22 @@ export async function connectOutputLink(
   const configListeners = new Set<(config: Readonly<OutputRenderConfig>) => void>()
   let currentConfig = defaultRenderConfig()
 
+  // Armed before the listeners, so its clock starts when the link was
+  // asked for rather than when something first arrived — an output
+  // nobody ever broadcasts to is the case worth detecting, and a
+  // watchdog started by the first message never fires in it.
+  const watchdog: LinkWatchdog = createLinkWatchdog(host.nowMs?.() ?? Date.now())
+  let health: LinkHealth = 'live'
+
   const unlisten = await host.listen(OUTPUT_STATE_EVENT, payload => {
+    // Contact recorded before the payload is judged. A message that
+    // fails to parse, or one the store discards as stale or
+    // unchanged, is still proof the control window is alive — which is
+    // the only question this watchdog asks. Recording it after the
+    // early returns below would let a perfectly healthy idle link,
+    // whose heartbeat repeats an unchanged snapshot every second, go
+    // stale in five.
+    watchdog.sawMessage(host.nowMs?.() ?? Date.now())
     if (!isStateMessage(payload)) {
       logger.warn('[output] dropping a payload that is not a state message')
       return
@@ -329,6 +484,10 @@ export async function connectOutputLink(
   })
 
   const unlistenConfig = await host.listen(OUTPUT_RENDER_CONFIG_EVENT, payload => {
+    // The other channel counts the same. Proof of life is proof of
+    // life, and a manager that only had a config change to send is
+    // still there.
+    watchdog.sawMessage(host.nowMs?.() ?? Date.now())
     if (!isRenderConfig(payload)) {
       logger.warn('[output] dropping a payload that is not a config message')
       return
@@ -343,15 +502,79 @@ export async function connectOutputLink(
     }
   })
 
-  // After both listeners, never before: the manager answers this by
+  /**
+   * Say who and where this window is.
+   *
+   * One function rather than two call sites, because the manager routes
+   * on `label` and checks `mode` against the geometry it spawned — a
+   * reattachment that announced a different shape from the first
+   * announcement would be a window the manager drives as something it
+   * is not.
+   */
+  async function announce(): Promise<void> {
+    await host.emit(OUTPUT_EVENT, {
+      type: 'output_ready',
+      label: host.label,
+      monitorName: await host.monitorName(),
+      mode,
+    })
+  }
+
+  // The manager's boot scan found this window and is asking whether
+  // anyone is home (case 6). Installed with the other two and before
+  // the announcement below, because a manager that is scanning is a
+  // manager that has *already* registered a record and may poke inside
+  // this window's own boot.
+  //
+  // Recording contact is not a formality: a window past `IPC_ORPHAN_MS`
+  // has stopped pinging, so this event is the only thing that can
+  // return it to `live`, and the HUD's link field would otherwise read
+  // `orphaned` over a window that is being actively driven again.
+  const reannounceListeners = new Set<() => void>()
+  const unlistenReattach = await host.listen(OUTPUT_REATTACH_EVENT, () => {
+    watchdog.sawMessage(host.nowMs?.() ?? Date.now())
+    logger.warn('[output] reattach requested — re-announcing')
+    // Fired rather than awaited, for the reason the ping is: this is an
+    // IPC callback, and a rejection escaping it surfaces as an
+    // unhandled rejection in a window nobody is looking at. The manager
+    // treats an unanswered poke as a dead window and closes it, which
+    // is the correct outcome when the emit genuinely failed.
+    void announce()
+      .then(() => {
+        // After the announcement, never before: the manager drops an
+        // event whose label has no record, and on a *poke* the record
+        // exists — but the ordering is kept the same as the first
+        // announcement's so there is one rule to remember rather than
+        // two. Isolated for `globeStateEvents`' reason: this runs from
+        // an IPC callback, and one listener throwing must not stop the
+        // rest.
+        for (const listener of [...reannounceListeners]) {
+          try {
+            listener()
+          } catch (err) {
+            logger.warn('[output] a reannounce listener threw:', err)
+          }
+        }
+      })
+      .catch(err => logger.warn('[output] could not answer the reattach poke:', err))
+  })
+
+  // Announce the close before announcing readiness, so a window torn
+  // down during a slow boot still says so. `emit` is fired and not
+  // awaited: the window is closing underneath it and there is no later
+  // point at which awaiting could help — the manager either receives it
+  // before the destroy or classifies a crash, which is the documented
+  // failure direction.
+  await host.onCloseRequested?.(() => {
+    void host
+      .emit(OUTPUT_EVENT, { type: 'output_closing', label: host.label })
+      .catch(err => logger.warn('[output] could not announce the close:', err))
+  })
+
+  // After every listener, never before: the manager answers this by
   // sending the first full snapshot and this window's config straight
   // away.
-  await host.emit(OUTPUT_EVENT, {
-    type: 'output_ready',
-    label: host.label,
-    monitorName: await host.monitorName(),
-    mode,
-  })
+  await announce()
 
   let stopped = false
   return {
@@ -365,13 +588,62 @@ export async function connectOutputLink(
       listeners.add(listener)
       return () => listeners.delete(listener)
     },
+    checkHealth(nowMs = host.nowMs?.() ?? Date.now()) {
+      // A stopped link is not a silent one — it is a link nobody is
+      // listening on by choice, and reporting it stale would put a
+      // wrong word on the HUD during teardown.
+      if (stopped) return health
+      const { health: next, shouldPing, silentMs } = watchdog.check(nowMs)
+      if (next !== health) {
+        logger.warn(`[output] link ${health} → ${next} after ${Math.round(silentMs)} ms quiet`)
+        health = next
+      }
+      if (shouldPing) {
+        // Fired, never awaited: this runs from the render loop, and a
+        // ping that cannot be delivered is exactly the situation being
+        // reported — letting its rejection propagate would turn a
+        // degraded link into a dropped frame.
+        void host
+          .emit(OUTPUT_EVENT, {
+            type: 'output_health_check',
+            label: host.label,
+            silentMs: Math.round(silentMs),
+          })
+          .catch(() => {
+            // Nothing to do and nowhere to say it. The transition above
+            // has already been logged, and a failing ping is the same
+            // news as an unanswered one.
+          })
+      }
+      return health
+    },
+    linkHealth: () => health,
+    onReannounce(listener) {
+      reannounceListeners.add(listener)
+      return () => reannounceListeners.delete(listener)
+    },
+    reportGpuState(state) {
+      // `live` is the boot state, not a transition anyone reaches: the
+      // scene only ever leaves it, so there is no third message and no
+      // "recovered to healthy" the manager would have to interpret.
+      if (state === 'live') return
+      if (stopped) return
+      void host
+        .emit(OUTPUT_EVENT, {
+          type: state === 'lost' ? 'output_gpu_lost' : 'output_gpu_recovered',
+          label: host.label,
+        })
+        .catch(err => logger.warn('[output] could not report the GPU state:', err))
+    },
     async stop() {
       if (stopped) return
       stopped = true
       listeners.clear()
       configListeners.clear()
+      reannounceListeners.clear()
       unlisten()
       unlistenConfig()
+      unlistenReattach()
     },
   }
 }
@@ -390,11 +662,22 @@ export async function connectOutputLink(
  * `core:window:allow-current-monitor` for the placement check. `label`
  * needs no grant: it is a property Tauri sets on the window object,
  * not a command.
+ *
+ * `close_self` needs no grant either, and for a less comfortable
+ * reason: Tauri's ACL gates *plugin* commands, and app-defined ones
+ * only when the app ships a permission manifest of its own — which
+ * this app does not. So every `#[tauri::command]` in `lib.rs` is
+ * already reachable from here, `quit_app` and the keychain included,
+ * and `close_self` relies on that rather than on a grant. Narrowing it
+ * is `docs/MULTI_MONITOR_PLAN.md` §6's open item; what this file can
+ * do is not ask for a *window* permission that reaches every window
+ * when a self-only command reaches one.
  */
 export async function createTauriLinkHost(): Promise<OutputLinkHost> {
-  const [windowApi, eventApi] = await Promise.all([
+  const [windowApi, eventApi, coreApi] = await Promise.all([
     import('@tauri-apps/api/window'),
     import('@tauri-apps/api/event'),
+    import('@tauri-apps/api/core'),
   ])
   const self = windowApi.getCurrentWindow()
 
@@ -416,6 +699,37 @@ export async function createTauriLinkHost(): Promise<OutputLinkHost> {
     },
     async emit(event, payload) {
       await eventApi.emit(event, payload)
+    },
+    async onCloseRequested(handler) {
+      await self.onCloseRequested(async event => {
+        handler()
+        // `preventDefault()` here is not a veto — it takes the close
+        // away from the API helper, which completes it by calling
+        // `destroy()` on this window, and hands it to `close_self` on
+        // the next line instead. The helper's route is the one that
+        // needs `core:window:allow-destroy`, and that grant is not
+        // scoped to the calling window: it would let a compromised
+        // output tear down the control window or a sibling, and
+        // `destroy` skips a sibling's own `onCloseRequested`, so the
+        // manager would read that departure as a crash — three of
+        // which blocklist a working monitor for the session.
+        // `close_self` takes no label at all (Tauri supplies the
+        // calling window), so this window can only ever destroy itself.
+        //
+        // Still nothing that can block: a hook that could veto is a
+        // hook that can strand an undecorated window, so the only way
+        // out of here is the window going away.
+        event.preventDefault()
+        try {
+          await coreApi.invoke('close_self')
+        } catch (err) {
+          // Loud rather than swallowed: if this ever fails the window
+          // stays on the projector with no other way to close it —
+          // the exact bug `allow-destroy` was granted to fix, and that
+          // this replaces.
+          logger.error('[output] close_self failed; the window will not close:', err)
+        }
+      })
     },
   }
 }

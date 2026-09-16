@@ -15,17 +15,23 @@ import { describe, it, expect, vi } from 'vitest'
 
 import {
   OUTPUT_MODE,
+  PICTURE_KEYS,
+  PLAYHEAD_KEYS,
   connectOutputLink,
   STATE_KEYS,
+  changesPicture,
   createOutputStateStore,
   isRenderConfig,
   isStateMessage,
   outputInitialState,
   type OutputLinkHost,
+  type StateKey,
 } from './outputLink'
+import { IPC_ORPHAN_MS, IPC_STALE_MS } from '../services/multiOutput/protocol'
 import { IDENTITY_PARAMS } from './equirectRtt'
 import {
   OUTPUT_EVENT,
+  OUTPUT_REATTACH_EVENT,
   OUTPUT_RENDER_CONFIG_EVENT,
   OUTPUT_STATE_EVENT,
   defaultRenderConfig,
@@ -33,6 +39,7 @@ import {
   type OutputGlobeState,
   type OutputStateMessage,
 } from '../services/multiOutput/protocol'
+import { until } from '../test-utils'
 
 function dataset(id: string): MirroredDataset {
   return {
@@ -214,7 +221,7 @@ describe('the store: the mode check', () => {
     const view = {
       mode: OUTPUT_MODE,
       dayNight: false,
-      params: { cameraOffset: { x: 0.5, y: 0, z: 0 }, split: true },
+      params: { cameraOffset: { x: 0.5, y: 0, z: 0 }, split: true, rotationOffsetRad: 0 },
     }
 
     expect(store.accept(diff(1, { view })).changed).toEqual(['view'])
@@ -265,7 +272,12 @@ function fakeHost(): OutputLinkHost & {
   emit: ReturnType<typeof vi.fn>
   deliver: (payload: unknown) => void
   deliverConfig: (payload: unknown) => void
+  deliverReattach: () => void
   listenedBefore: () => boolean
+  /** Move the link's clock. Case 3's thresholds are 5 s and 60 s, so
+   *  a real clock would mean a minute-long test that fails on a
+   *  loaded runner. */
+  advance: (ms: number) => void
 } {
   // Keyed by event: the link listens on two channels now, and a fake
   // that kept one handler would silently route state to the config
@@ -281,8 +293,13 @@ function fakeHost(): OutputLinkHost & {
   const emit = vi.fn(async () => {
     emitted = true
   })
+  let clock = 0
   return {
     label: 'output-3',
+    nowMs: () => clock,
+    advance: (ms: number) => {
+      clock += ms
+    },
     monitorName: async () => '\\\\.\\DISPLAY2',
     listen: async (event, h) => {
       handlers.set(event, h)
@@ -294,12 +311,13 @@ function fakeHost(): OutputLinkHost & {
     emit,
     deliver: payload => handlers.get(OUTPUT_STATE_EVENT)?.(payload),
     deliverConfig: payload => handlers.get(OUTPUT_RENDER_CONFIG_EVENT)?.(payload),
+    deliverReattach: () => handlers.get(OUTPUT_REATTACH_EVENT)?.({}),
     listenedBefore: () => handlers.size > 0 && !listenedLate,
   }
 }
 
 describe('connectOutputLink', () => {
-  it('installs both listeners before announcing the window', async () => {
+  it('installs every listener before announcing the window', async () => {
     const host = fakeHost()
     const listen = vi.spyOn(host, 'listen')
 
@@ -312,8 +330,41 @@ describe('connectOutputLink', () => {
     // lose its resolution until the operator next changed it.
     expect(host.listenedBefore()).toBe(true)
     expect(listen.mock.calls.map(c => c[0]).sort()).toEqual(
-      [OUTPUT_RENDER_CONFIG_EVENT, OUTPUT_STATE_EVENT].sort(),
+      [OUTPUT_REATTACH_EVENT, OUTPUT_RENDER_CONFIG_EVENT, OUTPUT_STATE_EVENT].sort(),
     )
+  })
+
+  it('re-announces when the manager pokes it', async () => {
+    // Case 6: a control window whose page reloaded finds this window
+    // still alive and asks who it is. The reply is an ordinary
+    // `output_ready`, so the manager's one serve path does the rest —
+    // config, then the first snapshot, exactly as at boot.
+    const host = fakeHost()
+    await connectOutputLink(host)
+    host.emit.mockClear()
+
+    host.deliverReattach()
+    await until(() => host.emit.mock.calls.length > 0, 'the re-announcement')
+
+    const [event, payload] = host.emit.mock.calls[0]
+    expect(event).toBe(OUTPUT_EVENT)
+    expect(payload).toMatchObject({ type: 'output_ready', label: 'output-3' })
+  })
+
+  it('takes an orphaned link back to live on the poke alone', async () => {
+    // The reason the poke exists at all. Past `IPC_ORPHAN_MS` the
+    // output has stopped pinging by design, so nothing it does can
+    // recover the link — this event is the only thing that can, and
+    // recording contact is what makes it work rather than the
+    // re-announcement, which the manager may never even answer.
+    const host = fakeHost()
+    const link = await connectOutputLink(host)
+    host.advance(IPC_ORPHAN_MS + 1)
+    expect(link.checkHealth()).toBe('orphaned')
+
+    host.deliverReattach()
+
+    expect(link.checkHealth()).toBe('live')
   })
 
   it('announces itself with its label, monitor and mode', async () => {
@@ -554,5 +605,312 @@ describe('STATE_KEYS', () => {
     // difference that would only show at boot, which is the hardest
     // place to notice it.
     expect([...STATE_KEYS].sort()).toEqual(Object.keys(outputInitialState()).sort())
+  })
+})
+
+/**
+ * Which diffs are worth a frame.
+ *
+ * The wrong answer here is invisible in both directions and expensive
+ * in one: too eager burns a GPU budget on redrawing an identical
+ * 4096×2048 sphere sixty times a second, too lazy leaves a stale
+ * picture that looks exactly like a dropped texture upload.
+ */
+describe('changesPicture', () => {
+  it('classifies every state key, exactly once', () => {
+    // The compile-time partition proof beside the lists is the real
+    // guard; this is the runtime half of it, so a list that drifts from
+    // the type fails here rather than in front of an audience.
+    const classified = [...PICTURE_KEYS, ...PLAYHEAD_KEYS]
+    expect([...classified].sort()).toEqual([...STATE_KEYS].sort())
+    expect(new Set(classified).size).toBe(classified.length)
+  })
+
+  it('draws for anything composited', () => {
+    for (const key of PICTURE_KEYS) {
+      expect(changesPicture([key])).toBe(true)
+    }
+  })
+
+  it('does not draw for the playhead keys alone', () => {
+    // These arrive on every frame the operator's globe plays. Nothing
+    // here reads them except the correction, which reports its own
+    // pixel change by comparing `currentTime` across the steer.
+    expect(changesPicture(PLAYHEAD_KEYS)).toBe(false)
+    expect(changesPicture([])).toBe(false)
+  })
+
+  it('draws when a picture key rides along with a playhead one', () => {
+    // A dataset load publishes `dataset`, `primary` and `playback`
+    // together. Testing `some` rather than `every` is what keeps that
+    // load from being suppressed by the two keys beside it.
+    expect(changesPicture(['playback', 'dataset'] as StateKey[])).toBe(true)
+  })
+})
+
+describe('announcing a close (rung 13)', () => {
+  it('emits output_closing when the window is asked to close', async () => {
+    // The only thing separating an operator's Alt+F4 from a crash. A
+    // killed process cannot report its own death, so without this
+    // announcement every deliberate close is logged as a crash — and
+    // three in a minute blocklist a working monitor.
+    const host = fakeHost()
+    // A holder rather than a bare `let`: TypeScript narrows a variable
+    // assigned only inside a callback to its initialiser, and would
+    // reject the call below as unreachable.
+    const closer: { fire?: () => void } = {}
+    host.onCloseRequested = async handler => {
+      closer.fire = handler
+    }
+    await connectOutputLink(host)
+    const before = host.emit.mock.calls.length
+
+    closer.fire?.()
+    await until(
+      () => host.emit.mock.calls.length > before,
+      'the closing announcement',
+    )
+
+    expect(host.emit.mock.calls.at(-1)?.[1]).toMatchObject({
+      type: 'output_closing',
+      label: host.label,
+    })
+  })
+
+  it('connects on a host that has no close notion at all', async () => {
+    // The static fixture page. Losing the announcement costs a
+    // misclassified close, never the link.
+    const host = fakeHost()
+    delete host.onCloseRequested
+    await expect(connectOutputLink(host)).resolves.toBeTruthy()
+  })
+})
+
+
+describe('link health (rung 13, case 3)', () => {
+  it('starts live and stays live while the heartbeat lands', async () => {
+    const host = fakeHost()
+    const link = await connectOutputLink(host)
+
+    expect(link.checkHealth()).toBe('live')
+    host.advance(IPC_STALE_MS - 1)
+    host.deliver(diff(1, { simulationDate: '2026-01-01T00:00:00.000Z' }))
+    host.advance(IPC_STALE_MS - 1)
+
+    expect(link.checkHealth()).toBe('live')
+  })
+
+  it('goes stale and pings, carrying how long it has been quiet', async () => {
+    const host = fakeHost()
+    const link = await connectOutputLink(host)
+    host.emit.mockClear()
+
+    host.advance(IPC_STALE_MS)
+
+    expect(link.checkHealth()).toBe('stale')
+    expect(host.emit).toHaveBeenCalledWith(OUTPUT_EVENT, {
+      type: 'output_health_check',
+      label: 'output-3',
+      silentMs: IPC_STALE_MS,
+    })
+  })
+
+  it('counts an unchanged heartbeat as contact', async () => {
+    // The manager's idle heartbeat repeats a full snapshot every
+    // second, and the store discards it as changing nothing. Recording
+    // contact only for messages that changed something would take a
+    // perfectly healthy idle link stale in five seconds — which is the
+    // single most likely way to get this wrong.
+    const host = fakeHost()
+    const link = await connectOutputLink(host)
+    const idle = full(1, { simulationDate: '2026-01-01T00:00:00.000Z' })
+
+    for (let t = 0; t < IPC_STALE_MS * 3; t += 1000) {
+      host.advance(1000)
+      host.deliver(idle)
+    }
+
+    expect(link.checkHealth()).toBe('live')
+  })
+
+  it('counts a config message as contact too', async () => {
+    const host = fakeHost()
+    const link = await connectOutputLink(host)
+
+    host.advance(IPC_STALE_MS - 1)
+    host.deliverConfig({ framebufferWidth: 2048, debugOverlay: false })
+    host.advance(IPC_STALE_MS - 1)
+
+    expect(link.checkHealth()).toBe('live')
+  })
+
+  it('stops pinging once orphaned', async () => {
+    const host = fakeHost()
+    const link = await connectOutputLink(host)
+    host.advance(IPC_ORPHAN_MS)
+    host.emit.mockClear()
+
+    expect(link.checkHealth()).toBe('orphaned')
+    expect(host.emit).not.toHaveBeenCalled()
+  })
+
+  it('recovers when the manager comes back', async () => {
+    // The plan's recovery path: a relaunched control window finds the
+    // window through `getAll()` and sends a fresh snapshot, and the
+    // output "exits stale state on receipt".
+    const host = fakeHost()
+    const link = await connectOutputLink(host)
+    host.advance(IPC_ORPHAN_MS * 2)
+    expect(link.checkHealth()).toBe('orphaned')
+
+    host.deliver(full(9, { simulationDate: '2026-02-02T00:00:00.000Z' }))
+
+    expect(link.checkHealth()).toBe('live')
+  })
+
+  it('does not let a ping rejection escape into the render loop', async () => {
+    // `checkHealth` runs per frame. A ping that cannot be delivered is
+    // precisely the situation being reported, so letting its rejection
+    // propagate would turn a degraded link into a dropped frame.
+    const host = fakeHost()
+    const link = await connectOutputLink(host)
+    host.emit.mockRejectedValue(new Error('channel gone'))
+    host.advance(IPC_STALE_MS)
+
+    expect(() => link.checkHealth()).not.toThrow()
+    expect(link.linkHealth()).toBe('stale')
+  })
+
+  it('reports through linkHealth() without sending anything', async () => {
+    // The HUD paints twice a second off this reader; if it evaluated,
+    // opening the overlay would change the ping cadence.
+    const host = fakeHost()
+    const link = await connectOutputLink(host)
+    host.advance(IPC_STALE_MS)
+    host.emit.mockClear()
+
+    expect(link.linkHealth()).toBe('live')
+    expect(host.emit).not.toHaveBeenCalled()
+  })
+})
+
+describe('reporting the GPU context (rung 13, case 5)', () => {
+  it('emits a loss and a recovery on the shared event channel', async () => {
+    const host = fakeHost()
+    const link = await connectOutputLink(host)
+    host.emit.mockClear()
+
+    link.reportGpuState('lost')
+    link.reportGpuState('restored')
+
+    expect(host.emit.mock.calls).toEqual([
+      [OUTPUT_EVENT, { type: 'output_gpu_lost', label: 'output-3' }],
+      [OUTPUT_EVENT, { type: 'output_gpu_recovered', label: 'output-3' }],
+    ])
+  })
+
+  it('says nothing for live, which is the boot state and not a transition', async () => {
+    // The scene only ever *leaves* `live`, so there is no third
+    // message. `main.ts` pushes the current state once at connect —
+    // that push is the one that would otherwise announce a healthy
+    // window to the manager on every launch.
+    const host = fakeHost()
+    const link = await connectOutputLink(host)
+    host.emit.mockClear()
+
+    link.reportGpuState('live')
+
+    expect(host.emit).not.toHaveBeenCalled()
+  })
+
+  it('does not let a failed report escape into a DOM event handler', async () => {
+    // This is called from `webglcontextlost`. A report that cannot be
+    // delivered is a worse link, not a reason to throw inside the
+    // handler for the failure being reported.
+    const host = fakeHost()
+    const link = await connectOutputLink(host)
+    host.emit.mockRejectedValue(new Error('channel gone'))
+
+    expect(() => link.reportGpuState('lost')).not.toThrow()
+  })
+
+  it('stays quiet once the link is stopped', async () => {
+    const host = fakeHost()
+    const link = await connectOutputLink(host)
+    await link.stop()
+    host.emit.mockClear()
+
+    link.reportGpuState('lost')
+
+    expect(host.emit).not.toHaveBeenCalled()
+  })
+})
+
+describe('re-announcing on a poke (rung 13, case 6 + case 5)', () => {
+  it('notifies subscribers after the re-announcement, not before', async () => {
+    // The manager drops an event whose label has no record, so the
+    // announcement has to reach it first. Keeping the same order as the
+    // first announcement means one rule rather than two.
+    const host = fakeHost()
+    const link = await connectOutputLink(host)
+    const order: string[] = []
+    host.emit.mockImplementation(async () => {
+      order.push('announce')
+    })
+    link.onReannounce(() => order.push('reannounce'))
+
+    host.deliverReattach()
+    await until(() => order.includes('reannounce'), 'the reannounce hook')
+
+    expect(order).toEqual(['announce', 'reannounce'])
+  })
+
+  it('lets a subscriber report state a fresh manager has never heard', async () => {
+    // The gap this closes: a manager that booted after a control-window
+    // reload adopts the output with `gpuLost: false`, so an output
+    // sitting in `lost` gets no Display lost badge. GPU state travels on
+    // edges and has no heartbeat to re-state it.
+    const host = fakeHost()
+    const link = await connectOutputLink(host)
+    link.onReannounce(() => link.reportGpuState('lost'))
+    host.emit.mockClear()
+
+    host.deliverReattach()
+
+    await until(
+      () =>
+        host.emit.mock.calls.some(
+          c => (c[1] as { type?: string })?.type === 'output_gpu_lost',
+        ),
+      'the replayed GPU state',
+    )
+  })
+
+  it('keeps notifying the others when one subscriber throws', async () => {
+    const host = fakeHost()
+    const link = await connectOutputLink(host)
+    const seen: string[] = []
+    link.onReannounce(() => {
+      throw new Error('listener blew up')
+    })
+    link.onReannounce(() => seen.push('second'))
+
+    host.deliverReattach()
+
+    await until(() => seen.length > 0, 'the surviving listener')
+    expect(seen).toEqual(['second'])
+  })
+
+  it('unsubscribes, and goes quiet once the link stops', async () => {
+    const host = fakeHost()
+    const link = await connectOutputLink(host)
+    const seen: string[] = []
+    const off = link.onReannounce(() => seen.push('fired'))
+
+    off()
+    host.deliverReattach()
+    await new Promise(r => setTimeout(r, 0))
+
+    expect(seen).toEqual([])
   })
 })

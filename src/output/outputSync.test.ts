@@ -15,7 +15,9 @@ import { describe, it, expect } from 'vitest'
 
 import {
   OUTPUT_SEEK_SETTLE_MS,
+  SEEK_COST_MARGIN,
   createPlayheadSync,
+  seekCostFloorS,
   syncVideoToState,
   type SyncInputs,
   type SyncTarget,
@@ -470,5 +472,362 @@ describe('createPlayheadSync', () => {
 
     expect(controller.sync(aligned, inputs()).seeked).toBe(false)
     expect(controller.sync(target({ currentTime: 10 }), inputs()).seeked).toBe(true)
+  })
+})
+
+/**
+ * The seek loop, simulated.
+ *
+ * This is the one failure in this module that cannot be reasoned about
+ * from a single call: every individual correction is right, and the bug
+ * is what a sequence of right corrections does to an element that takes
+ * time to serve them. So the element here models the part that matters
+ * — a seek stalls it for a fixed cost, `currentTime` reads the target
+ * throughout, and the control window plays on the whole time — and the
+ * assertion is on the *count* of seeks over a run.
+ *
+ * Reported from hardware as a bbox forecast whose output "seems to
+ * struggle" with the debug HUD showing a permanent dash for sync, and
+ * whose control window returned to normal speed the moment the output
+ * was closed.
+ */
+describe('a seek must not manufacture the error it corrects', () => {
+  const SIM_START = '2026-01-01T00:00:00.000Z'
+  /** Ten minutes of video over ten minutes of world: one video second
+   *  per real second, which is what an output mirroring the control
+   *  window's own dataset actually has. */
+  const SIM_DURATION = 600
+  const SIM_RANGE_MS = SIM_DURATION * 1000
+  const SIM_END = new Date(Date.parse(SIM_START) + SIM_RANGE_MS).toISOString()
+  const FRAME_MS = 1000 / 60
+
+  function inputsAt(primaryTime: number): SyncInputs {
+    return {
+      dataset: dataset({ startTime: SIM_START, endTime: SIM_END }),
+      primary: { duration: SIM_DURATION, rangeMs: SIM_RANGE_MS },
+      playback: {
+        date: new Date(Date.parse(SIM_START) + primaryTime * 1000).toISOString(),
+        positionRatio: primaryTime / SIM_DURATION,
+        paused: false,
+        playbackRate: 1,
+      },
+    }
+  }
+
+  /**
+   * Run the correction for `seconds`, reporting how often it seeked.
+   *
+   * `steer` is the layer under test: the controller (which measures)
+   * or a bare `syncVideoToState` closure (which is what this module did
+   * before it measured). Passing it in is what lets one simulation show
+   * both behaviours without a second copy of the element model.
+   */
+  function simulate(opts: {
+    seekMs: number
+    initialDriftS: number
+    seconds: number
+    steer: (video: SyncTarget, state: SyncInputs, nowMs: number) => void
+  }): { seeks: number; finalDriftS: number; stalledFraction: number } {
+    let now = 0
+    let primaryTime = 60
+    let stalledFrames = 0
+    let frames = 0
+    const el = {
+      time: 60 + opts.initialDriftS,
+      paused: true,
+      seekTarget: null as number | null,
+      seekEndsAt: 0,
+      seeks: 0,
+    }
+    const video: SyncTarget = {
+      readyState: 4,
+      duration: SIM_DURATION,
+      playbackRate: 1,
+      get paused() {
+        return el.paused
+      },
+      // True from the write until the frame is served, exactly as an
+      // element reports it — and `currentTime` reads the *target* for
+      // that whole window, which is the trap the layer is built around.
+      get seeking() {
+        return el.seekTarget !== null
+      },
+      get currentTime() {
+        return el.seekTarget ?? el.time
+      },
+      set currentTime(t: number) {
+        el.seeks++
+        el.seekTarget = t
+        el.seekEndsAt = now + opts.seekMs
+      },
+      play() {
+        el.paused = false
+      },
+      pause() {
+        el.paused = true
+      },
+    }
+
+    for (let frame = 0; frame * FRAME_MS < opts.seconds * 1000; frame++) {
+      frames++
+      now += FRAME_MS
+      // The control window never stalls: it is playing its own copy.
+      primaryTime += FRAME_MS / 1000
+      if (el.seekTarget !== null && now >= el.seekEndsAt) {
+        el.time = el.seekTarget
+        el.seekTarget = null
+      } else if (el.seekTarget === null && !el.paused) {
+        // A stalled element does not advance; a playing one advances at
+        // whatever rate the trim last asked for.
+        el.time += (FRAME_MS / 1000) * video.playbackRate
+      }
+      // Counted after the element has been advanced and before it is
+      // steered, so this is the fraction of frames the glass spent
+      // showing a frame the decoder had already abandoned. It is also
+      // the fraction of HUD samples that can only read a dash, since a
+      // seeking element has no honest drift to report.
+      if (el.seekTarget !== null) stalledFrames++
+      opts.steer(video, inputsAt(primaryTime), now)
+    }
+
+    return {
+      seeks: el.seeks,
+      finalDriftS: (el.seekTarget ?? el.time) - primaryTime,
+      stalledFraction: stalledFrames / frames,
+    }
+  }
+
+  /**
+   * What this module did before it measured: the settle window alone.
+   *
+   * Written out rather than reached by passing 0 for the cost, because
+   * the contrast worth pinning is between two *controllers* — one that
+   * remembers only when it seeked and one that also remembers what
+   * that cost — and a literal 0 would read as an edge case rather than
+   * as the previous design.
+   */
+  function unmeasuredSteer(): (video: SyncTarget, state: SyncInputs, nowMs: number) => void {
+    let lastSeekAtMs = Number.NEGATIVE_INFINITY
+    return (video, state, nowMs) => {
+      if (syncVideoToState(video, state, nowMs - lastSeekAtMs).seeked) lastSeekAtMs = nowMs
+    }
+  }
+
+  it('loops forever on a seek slower than the settle window, without the measurement', () => {
+    // The regression this guards. A 1.2 s seek outlives
+    // OUTPUT_SEEK_SETTLE_MS, so the threshold is back to 150 ms by the
+    // time the element lands 1.2 s behind — which earns another seek,
+    // which lands it 1.2 s behind again. Twenty seconds of that is one
+    // seek roughly every seek-length, and never a frame of playback.
+    const run = simulate({
+      seekMs: 1200,
+      initialDriftS: -5,
+      seconds: 20,
+      steer: unmeasuredSteer(),
+    })
+
+    expect(run.seeks).toBeGreaterThan(10)
+    // And it never converges: the drift is still a seek-length out.
+    expect(Math.abs(run.finalDriftS)).toBeGreaterThan(SIBLING_HARD_SEEK_THRESHOLD_S)
+    // The symptom, which is the part that was reported: the element is
+    // mid-seek on almost every frame, so it is decoding from a keyframe
+    // over and over instead of playing, and the HUD has no honest drift
+    // to print on any of those frames.
+    expect(run.stalledFraction).toBeGreaterThan(0.9)
+  })
+
+  it('seeks once and then trims, when the cost is measured', () => {
+    const playhead = createPlayheadSync(() => clock)
+    let clock = 0
+    const run = simulate({
+      seekMs: 1200,
+      initialDriftS: -5,
+      seconds: 20,
+      steer: (video, state, nowMs) => {
+        clock = nowMs
+        playhead.sync(video, state)
+      },
+    })
+
+    // One seek to close the five seconds, and nothing after it: the
+    // floor says a 1.2 s seek cannot improve on a 1.2 s error.
+    expect(run.seeks).toBe(1)
+    // The trim does the rest, and gets inside the sibling threshold
+    // well within the run.
+    expect(Math.abs(run.finalDriftS)).toBeLessThan(SIBLING_HARD_SEEK_THRESHOLD_S)
+    // And the element spends the run playing rather than seeking — the
+    // one seek is the only stall in it.
+    expect(run.stalledFraction).toBeLessThan(0.1)
+  })
+
+  it('still seeks for a scrub, which is larger than any seek costs', () => {
+    const playhead = createPlayheadSync(() => clock)
+    let clock = 0
+    // Two minutes out — an operator dragging the scrubber. A floor that
+    // suppressed this would leave the output trimming at 25% for eight
+    // minutes to catch up, which is the failure mode opposite to the
+    // loop and just as wrong.
+    const run = simulate({
+      seekMs: 1200,
+      initialDriftS: -120,
+      seconds: 20,
+      steer: (video, state, nowMs) => {
+        clock = nowMs
+        playhead.sync(video, state)
+      },
+    })
+
+    expect(run.seeks).toBeGreaterThanOrEqual(1)
+    expect(Math.abs(run.finalDriftS)).toBeLessThan(SIBLING_HARD_SEEK_THRESHOLD_S)
+  })
+
+  it('leaves a cheap seek exactly where it was', () => {
+    const playhead = createPlayheadSync(() => clock)
+    let clock = 0
+    // 20 ms is a seek inside a buffered range. The floor it yields is
+    // below the sibling threshold, so `Math.max` discards it and this
+    // run must behave as it always did — which is the property that
+    // makes the change free everywhere it is not needed.
+    const run = simulate({
+      seekMs: 20,
+      initialDriftS: -5,
+      seconds: 10,
+      steer: (video, state, nowMs) => {
+        clock = nowMs
+        playhead.sync(video, state)
+      },
+    })
+
+    expect(run.seeks).toBe(1)
+    expect(Math.abs(run.finalDriftS)).toBeLessThan(SIBLING_HARD_SEEK_THRESHOLD_S)
+  })
+})
+
+describe('seekCostFloorS', () => {
+  it('is nothing until a seek has been measured', () => {
+    // The default, and the reason the change is inert on every asset
+    // that has not yet demonstrated a problem.
+    expect(seekCostFloorS(0, 1)).toBe(0)
+    expect(seekCostFloorS(Number.NaN, 1)).toBe(0)
+    expect(seekCostFloorS(-1, 1)).toBe(0)
+  })
+
+  it('scales with the primary rate, because that is how far the target moves', () => {
+    // The output stalls for the same wall-clock second either way; what
+    // differs is how much of the clip the control window got through in
+    // it. A tour running at 0.167x leaves six times less error behind
+    // the same seek, and a floor that ignored the rate would suppress
+    // seeks that were still worth issuing.
+    expect(seekCostFloorS(1, 1)).toBeCloseTo(SEEK_COST_MARGIN)
+    expect(seekCostFloorS(1, 4)).toBeCloseTo(4 * SEEK_COST_MARGIN)
+    expect(seekCostFloorS(1, 0.25)).toBeCloseTo(0.25 * SEEK_COST_MARGIN)
+  })
+
+  it('falls back to 1x for a rate that is not one', () => {
+    // `playbackFrom` already refuses a non-positive rate, but this
+    // function is reachable from the pure entry point too, and a NaN
+    // here would reach `Math.max` and make the threshold NaN — which
+    // compares false against everything, silently restoring the loop.
+    for (const rate of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(seekCostFloorS(2, rate)).toBeCloseTo(2 * SEEK_COST_MARGIN)
+    }
+  })
+})
+
+describe('the measurement belongs to one element', () => {
+  it('forgets an outstanding seek when the element is replaced', () => {
+    // `datasetMirror` builds a fresh element per load and disposes the
+    // last. A seek left outstanding on the old one would otherwise be
+    // closed against the first frame of the new one — recording the
+    // length of a dataset load as the cost of a seek, and pinning the
+    // floor at several seconds for the rest of the window.
+    let clock = 0
+    const playhead = createPlayheadSync(() => clock)
+
+    const first = target({ currentTime: 10 })
+    expect(playhead.sync(first, inputs()).seeked).toBe(true)
+    // ...and it is still being served when the dataset changes.
+    ;(first as { seeking: boolean }).seeking = true
+
+    // Thirty seconds pass loading the next dataset, then a fresh
+    // element arrives 40 s out — an ordinary first correction.
+    clock += 30_000
+    const second = target({ currentTime: 10 })
+    const out = playhead.sync(second, inputs())
+
+    // Closing the stale seek against this element would record a 30 s
+    // cost, whose floor is 45 s, and a 40 s error would not clear it —
+    // so the output would sit where it loaded and never be corrected.
+    expect(out.seeked).toBe(true)
+    expect(second.currentTime).toBeCloseTo(50)
+  })
+})
+
+/**
+ * A paused primary is a stationary target.
+ *
+ * Both raised bounds — the settle window and the seek-cost floor —
+ * exist because the target keeps moving while a seek is being served.
+ * Against a stationary one they are not merely unnecessary, they strand
+ * the output: the paused branch declines the seek and there is no rate
+ * trim to close what is left, so the sphere holds the wrong frame until
+ * someone presses play. Caught in review on this PR.
+ */
+describe('a paused primary is a stationary target', () => {
+  const pausedAt50: SyncInputs = inputs({
+    playback: { date: dateAt(50), positionRatio: 0.5, paused: true, playbackRate: 1 },
+  })
+
+  it('seeks a drift the seek-cost floor would otherwise strand', () => {
+    // A 1.2 s seek was measured while playing, so the floor is 1.8 s.
+    // The operator then pauses one second out. Nothing here can trim,
+    // so declining this seek leaves the output a second from the
+    // control globe — on a forecast, an hour of model time — with no
+    // event that will ever correct it.
+    const video = target({ paused: true, currentTime: 51 })
+
+    const out = syncVideoToState(video, pausedAt50, Number.POSITIVE_INFINITY, 1.2)
+
+    expect(out.kind).toBe('paused')
+    expect(out.seeked).toBe(true)
+    expect(video.currentTime).toBeCloseTo(50)
+  })
+
+  it('seeks a drift the settle window would otherwise strand', () => {
+    // Same argument, the other bound: 0.3 s sits under
+    // SETTLING_SEEK_THRESHOLD_S and over the sibling threshold. While
+    // playing that is right — the trim closes it inside the window.
+    // Paused, there is no trim.
+    const video = target({ paused: true, currentTime: 50.3 })
+
+    const out = syncVideoToState(video, pausedAt50, 100)
+
+    expect(out.seeked).toBe(true)
+    expect(video.currentTime).toBeCloseTo(50)
+  })
+
+  it('still leaves a paused output alone when it is already in step', () => {
+    // The positive anchor for the two above: dropping the bounds must
+    // not make every paused frame a seek. Inside the sibling threshold
+    // nothing is issued, which is what stops a paused sphere flickering.
+    const video = target({ paused: true, currentTime: 50.05 })
+
+    const out = syncVideoToState(video, pausedAt50, Number.POSITIVE_INFINITY, 1.2)
+
+    expect(out.seeked).toBe(false)
+    expect(video.currentTime).toBe(50.05)
+  })
+
+  it('converges in one seek, because the target does not move', () => {
+    // The fear that motivated both bounds is thrash, and it cannot
+    // happen here: the seek lands where it aimed, so the next call
+    // measures nothing to correct. One seek, not a loop.
+    let clock = 0
+    const playhead = createPlayheadSync(() => clock)
+    const video = target({ paused: true, currentTime: 55 })
+
+    expect(playhead.sync(video, pausedAt50).seeked).toBe(true)
+    clock += 1000
+    expect(playhead.sync(video, pausedAt50).seeked).toBe(false)
   })
 })

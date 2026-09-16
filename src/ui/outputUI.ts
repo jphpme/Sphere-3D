@@ -45,11 +45,13 @@
 
 import { t } from '../i18n'
 import { logger } from '../utils/logger'
+import { announcePolite } from './domUtils'
 import type {
   AddOutputOptions,
   OutputMonitor,
   OutputRecord,
 } from '../services/multiOutput/manager'
+import type { OutputHealth } from '../services/multiOutput/outputHealth'
 import type { OutputRenderConfig } from '../services/multiOutput/protocol'
 import type { OutputViewSettings } from '../services/multiOutput/stateAggregator'
 
@@ -66,7 +68,20 @@ import type { OutputViewSettings } from '../services/multiOutput/stateAggregator
 export interface OutputPanelManager {
   start(): Promise<void>
   listMonitors(): Promise<OutputMonitor[]>
+  /** Which of those the platform calls primary, or `null` when it will
+   *  not say. Asked rather than inferred — see `MultiOutputHost`. */
+  primaryMonitor(): Promise<OutputMonitor | null>
   outputs(): OutputRecord[]
+  /**
+   * Repaint trigger for changes the panel did not cause — a crash, or
+   * an output's link going stale and coming back.
+   *
+   * Optional so a fake need not implement it, but wired for real: the
+   * manager has fired this since rung 13a and **nothing subscribed**,
+   * so a crash stayed on screen until the panel was reopened, which is
+   * the opposite of what a health badge is for.
+   */
+  onOutputsChanged?(listener: () => void): () => void
   addOutput(options: AddOutputOptions): Promise<OutputRecord>
   removeOutput(label: string): Promise<void>
   setOutputView(label: string, view: Partial<OutputViewSettings>): Promise<void>
@@ -116,9 +131,99 @@ export interface OutputPanelSource {
  * two machines can both report `\\.\DISPLAY1` for different panels.
  *
  * Exported for the test, and for rung 10 to reuse rather than re-derive.
+ *
+ * **`outputHealth.monitorKeyOf` is the same function, deliberately
+ * duplicated** — read its docstring before "fixing" this. The panel
+ * needs this at runtime and every `multiOutput/` import here is
+ * type-only, so sharing one definition would put the IPC contract into
+ * the web entry chunk. Change both or neither.
  */
 export function monitorKey(monitor: OutputMonitor): string {
   return `${monitor.name ?? ''}@${monitor.position.x},${monitor.position.y}`
+}
+
+/** One monitor's place in the arrangement, as fractions of the whole. */
+export interface MonitorLayoutBox {
+  /** Index into the array passed in, so a box can be tied back to the
+   *  option that selects it. */
+  index: number
+  /** Left and top edges, 0..1 of the arrangement's bounding box. */
+  x: number
+  y: number
+  /** Extent, 0..1 of the same box. */
+  width: number
+  height: number
+}
+
+export interface MonitorLayout {
+  boxes: MonitorLayoutBox[]
+  /** Width over height of the whole arrangement, for the container. */
+  aspect: number
+}
+
+/**
+ * The monitor arrangement, normalised for drawing (rung 9 step 5).
+ *
+ * An operator adding an output is answering a question about *physical
+ * space* — which of these displays is the projector — and a list of
+ * names cannot answer it. `\\.\DISPLAY1` and `\\.\DISPLAY2` say nothing
+ * about which is on the left, and the resolution only helps when the
+ * panels differ. The diagram is the part that does, and it is why an
+ * output landing on the wrong display is something to notice before
+ * clicking Add rather than after a fullscreen window covers the screen
+ * the operator was reading.
+ *
+ * Pure and exported so the arithmetic is tested without a DOM, the same
+ * reason `monitorKey` is. Fractions rather than pixels because the
+ * element it fills has a size only the browser knows; the caller sets
+ * percentages and one aspect ratio, and CSS does the scaling.
+ *
+ * Signed origins are the whole difficulty and are handled by
+ * subtracting the minimum: the hardware spike behind this feature found
+ * a primary-left arrangement whose secondary sat at `x = -1680`, and a
+ * layout that assumed a non-negative origin would have drawn it off the
+ * left edge of its own container.
+ *
+ * Returns `null` rather than an empty layout when there is nothing to
+ * draw — no monitors, or an arrangement with no extent. A diagram of
+ * nothing is a broken-looking box, and the panel simply omits it.
+ */
+export function monitorLayout(monitors: readonly OutputMonitor[]): MonitorLayout | null {
+  const drawable = monitors
+    .map((monitor, index) => ({ monitor, index }))
+    // A monitor the platform describes with a zero, negative or
+    // non-finite extent cannot be drawn, and one bad entry must not
+    // cost the diagram: it is dropped and the rest are still placed,
+    // the same per-entry tolerance rung 10's persistence parse uses.
+    .filter(
+      ({ monitor }) =>
+        monitor.size.width > 0 &&
+        monitor.size.height > 0 &&
+        Number.isFinite(monitor.size.width) &&
+        Number.isFinite(monitor.size.height) &&
+        Number.isFinite(monitor.position.x) &&
+        Number.isFinite(monitor.position.y),
+    )
+  if (drawable.length === 0) return null
+
+  const left = Math.min(...drawable.map(d => d.monitor.position.x))
+  const top = Math.min(...drawable.map(d => d.monitor.position.y))
+  const right = Math.max(...drawable.map(d => d.monitor.position.x + d.monitor.size.width))
+  const bottom = Math.max(...drawable.map(d => d.monitor.position.y + d.monitor.size.height))
+  const spanX = right - left
+  const spanY = bottom - top
+  if (!(spanX > 0) || !(spanY > 0)) return null
+
+  return {
+    aspect: spanX / spanY,
+    boxes: drawable.map(({ monitor, index }) => ({
+      index,
+      x: (monitor.position.x - left) / spanX,
+      y: (monitor.position.y - top) / spanY,
+      width: monitor.size.width / spanX,
+      height: monitor.size.height / spanY,
+    })),
+  }
 }
 
 /** A monitor's display name, falling back to its 1-based position in the
@@ -162,6 +267,18 @@ function monitorRowName(
 let source: OutputPanelSource | null = null
 let root: HTMLElement | null = null
 let lastTrigger: HTMLElement | null = null
+/** Live subscription to manager-side changes, dropped on close. */
+let unsubscribeChanges: (() => void) | null = null
+/**
+ * Health per output label as of the last paint, or `null` for "the
+ * panel has not painted yet".
+ *
+ * The `null` is what stops the panel announcing the state it opened
+ * on: an operator who just opened it is about to read it, and being
+ * told what is already on screen is the noise that teaches people to
+ * ignore the channel. Cleared on close so a reopen is silent again.
+ */
+let lastHealth: Map<string, OutputHealth> | null = null
 /**
  * Guards against an older refresh finishing last.
  *
@@ -184,6 +301,7 @@ export function resetOutputUIForTests(): void {
   closeOutputUI()
   source = null
   refreshToken = 0
+  lastHealth = null
 }
 
 export function openOutputUI(triggeredBy?: HTMLElement | null): HTMLElement {
@@ -234,6 +352,11 @@ export function closeOutputUI(): void {
   root.remove()
   root = null
   document.removeEventListener('keydown', onEscape, true)
+  // Before the token bump, so a notification racing the close cannot
+  // schedule a refresh into a detached body.
+  unsubscribeChanges?.()
+  unsubscribeChanges = null
+  lastHealth = null
   // Bump so a refresh still in flight cannot paint into the detached
   // body — harmless to the DOM, but it would also clear the error a
   // reopen is about to show.
@@ -260,8 +383,20 @@ async function refresh(body: HTMLElement): Promise<void> {
   }
 
   let monitors: OutputMonitor[]
+  let primary: OutputMonitor | null
   try {
-    monitors = await mgr.listMonitors()
+    // Together, because they are two round trips to the same subsystem
+    // and the panel is already waiting. The primary is settled
+    // separately though: a platform that will not answer it costs a
+    // marker, while one that cannot enumerate at all costs the panel,
+    // so a rejection here must not take the enumeration down with it.
+    ;[monitors, primary] = await Promise.all([
+      mgr.listMonitors(),
+      mgr.primaryMonitor().catch(err => {
+        logger.warn('[outputUI] could not identify the primary monitor:', err)
+        return null
+      }),
+    ])
   } catch (err) {
     logger.warn('[outputUI] could not enumerate monitors:', err)
     if (token === refreshToken) {
@@ -271,10 +406,24 @@ async function refresh(body: HTMLElement): Promise<void> {
   }
   if (token !== refreshToken) return
 
+  // Subscribed on the first successful refresh rather than at open,
+  // because that is the first point a manager exists to subscribe to —
+  // and re-subscribing on every repaint would stack listeners, so the
+  // previous one goes first. What it buys: a crash or a link going
+  // stale repaints an open panel, instead of waiting for the operator
+  // to close and reopen it, which is the one moment they are least
+  // likely to.
+  unsubscribeChanges?.()
+  unsubscribeChanges =
+    mgr.onOutputsChanged?.(() => {
+      if (root) void refresh(body)
+    }) ?? null
+
   const records = mgr.outputs()
+  announceHealthChanges(records, monitors)
   replace(
     body,
-    buildAdder(mgr, monitors, records, body),
+    buildAdder(mgr, monitors, records, primary, body),
     buildList(mgr, records, monitors, body),
     buildLaunchSection(mgr),
   )
@@ -317,10 +466,129 @@ function buildLaunchSection(mgr: OutputPanelManager): HTMLElement {
   return section
 }
 
+/**
+ * One display's line in the picker.
+ *
+ * Four keys rather than one template plus composed fragments, because
+ * composition is where the punctuation and the word order stop being
+ * translatable: "(primary, already in use)" is one phrase in English
+ * and two clauses joined differently elsewhere. Each state is a
+ * sentence a translator can read whole.
+ *
+ * The primary marker lives **here**, in text, rather than only in the
+ * diagram: that is what makes it survive a screen reader, a colour
+ * vision deficiency and a monochrome projector preview, and the
+ * diagram's accent is reinforcement rather than the statement.
+ */
+function monitorOptionLabel(
+  monitor: OutputMonitor,
+  index: number,
+  state: { primary: boolean; inUse: boolean },
+): string {
+  const params = {
+    name: monitorName(monitor, index),
+    width: monitor.size.width,
+    height: monitor.size.height,
+  }
+  if (state.primary && state.inUse) return t('outputs.monitor.optionPrimaryInUse', params)
+  if (state.primary) return t('outputs.monitor.optionPrimary', params)
+  if (state.inUse) return t('outputs.monitor.optionInUse', params)
+  return t('outputs.monitor.option', params)
+}
+
+/**
+ * The position diagram (rung 9 step 5).
+ *
+ * A scale picture of the displays as the platform reports them, with
+ * the primary accented, the ones that already have an output dimmed,
+ * and the currently picked one highlighted. It answers the question a
+ * list of names cannot — *which* of these is the projector — and it is
+ * live: changing the picker moves the highlight, so the operator
+ * confirms the choice against the desk before a fullscreen window
+ * appears somewhere they were not expecting.
+ *
+ * **Presentational, deliberately.** Every fact it draws is already in
+ * the option text the select carries, so it is `aria-hidden` rather
+ * than a second reading of the same choice — and it is not a second
+ * *control*, which would be worse: two tab stops writing one value,
+ * one of them a grid of unlabelled rectangles.
+ *
+ * Returns `null` when there is nothing to draw. An empty framed box
+ * reads as a failure; an absent diagram reads as a machine with one
+ * display, which is what it is.
+ */
+function buildMonitorMap(
+  monitors: readonly OutputMonitor[],
+  occupied: ReadonlySet<string>,
+  primaryKey: string | null,
+  select: HTMLSelectElement,
+): HTMLElement | null {
+  const layout = monitorLayout(monitors)
+  if (!layout) return null
+
+  const map = document.createElement('div')
+  map.className = 'output-monitor-map'
+  map.setAttribute('aria-hidden', 'true')
+  // The one number the stylesheet cannot derive. Everything else about
+  // the sizing — how tall the diagram may get, and the width that keeps
+  // the ratio under that cap — stays in CSS, where it can be said in
+  // rem against the panel's own scale.
+  map.style.setProperty('--output-map-aspect', String(layout.aspect))
+
+  const boxes = layout.boxes.map(box => {
+    const monitor = monitors[box.index]
+    const el = document.createElement('div')
+    el.className = 'output-monitor-box'
+    el.dataset.index = String(box.index)
+    // Physical `left` / `top` / `width` / `height`, set here rather
+    // than in the stylesheet, and that is the point rather than an
+    // oversight: this is a picture of a desk. A display on the
+    // operator's left is on the left in every locale, so the diagram is
+    // the one part of this panel that must **not** flip under
+    // `dir="rtl"` — which is exactly what the logical properties the
+    // rest of the app uses would do to it.
+    el.style.left = `${box.x * 100}%`
+    el.style.top = `${box.y * 100}%`
+    el.style.width = `${box.width * 100}%`
+    el.style.height = `${box.height * 100}%`
+
+    const isPrimary = primaryKey !== null && monitorKey(monitor) === primaryKey
+    if (isPrimary) el.classList.add('is-primary')
+    if (occupied.has(monitorKey(monitor))) el.classList.add('is-occupied')
+    // The same sentence the option carries, for a hover. The element is
+    // `aria-hidden`, so this is for a pointer rather than for AT, which
+    // reads the option itself.
+    el.title = monitorOptionLabel(monitor, box.index, {
+      primary: isPrimary,
+      inUse: occupied.has(monitorKey(monitor)),
+    })
+
+    const size = document.createElement('span')
+    size.className = 'output-monitor-box-size'
+    size.textContent = t('outputs.monitor.mapSize', {
+      width: monitor.size.width,
+      height: monitor.size.height,
+    })
+    el.appendChild(size)
+    map.appendChild(el)
+    return el
+  })
+
+  const markSelected = (): void => {
+    for (const el of boxes) {
+      el.classList.toggle('is-selected', el.dataset.index === select.value)
+    }
+  }
+  markSelected()
+  select.addEventListener('change', markSelected)
+  return map
+}
+
 function buildAdder(
   mgr: OutputPanelManager,
   monitors: OutputMonitor[],
   records: OutputRecord[],
+  primary: OutputMonitor | null,
   body: HTMLElement,
 ): HTMLElement {
   const section = document.createElement('section')
@@ -344,6 +612,11 @@ function buildAdder(
   }
 
   const occupied = new Set(records.map(r => monitorKey(r.monitor)))
+  // Joined on the same identity the restore matching uses, rather than
+  // on the array index: `primaryMonitor()` is a second call and nothing
+  // guarantees the platform enumerates in a stable order between the
+  // two.
+  const primaryKey = primary ? monitorKey(primary) : null
 
   const row = document.createElement('div')
   row.className = 'output-add-row'
@@ -359,16 +632,11 @@ function buildAdder(
   monitors.forEach((monitor, index) => {
     const opt = document.createElement('option')
     opt.value = String(index)
-    const params = {
-      name: monitorName(monitor, index),
-      width: monitor.size.width,
-      height: monitor.size.height,
-    }
     const inUse = occupied.has(monitorKey(monitor))
-    opt.textContent = t(
-      inUse ? 'outputs.monitor.optionInUse' : 'outputs.monitor.option',
-      params,
-    )
+    opt.textContent = monitorOptionLabel(monitor, index, {
+      primary: primaryKey !== null && monitorKey(monitor) === primaryKey,
+      inUse,
+    })
     // Two fullscreen windows on one monitor means one of them is
     // invisible, and the operator has no way to tell which. The manager
     // does not refuse this — `addOutput` takes any index — so the guard
@@ -395,6 +663,11 @@ function buildAdder(
   addBtn.addEventListener('click', () => {
     void add(mgr, Number(select.value), addBtn, section, body)
   })
+
+  // Before the row, not after: the diagram is what the choice is made
+  // *from*, and the select is where it is recorded.
+  const map = buildMonitorMap(monitors, occupied, primaryKey, select)
+  if (map) section.appendChild(map)
 
   row.append(label, select, addBtn)
   section.appendChild(row)
@@ -537,6 +810,147 @@ function buildList(
   return section
 }
 
+/**
+ * Say out loud what the badge only draws.
+ *
+ * The badge exists because rung 13a's `onOutputsChanged` repaints an
+ * open panel when an output crashes or its link goes quiet, so an
+ * operator does not have to close and reopen the one surface that
+ * would tell them. For a screen-reader operator that repaint delivers
+ * nothing at all: `refresh` replaces the whole panel body, and a
+ * subtree swapped out from under someone is silent — which leaves the
+ * badge solving the problem for people who can see it and reproducing
+ * it, one layer down, for people who cannot.
+ *
+ * So the announcement goes through the app-wide `#a11y-announcer`,
+ * which lives outside this panel and therefore survives the swap. Two
+ * rules make it worth listening to:
+ *
+ * - **Only transitions.** `refresh` also runs after every toggle,
+ *   add and remove, and re-reading the same health each time is how a
+ *   live region becomes something people tune out.
+ * - **One utterance.** The announcer is `aria-atomic` and each write
+ *   replaces the last, so a control window that goes quiet — taking
+ *   every output stale in the same tick — has to arrive as one string
+ *   or all but the last output is silently dropped.
+ *
+ * A departing output is deliberately not announced. The row vanishing
+ * covers a crash and an operator's own Remove alike, and the panel
+ * cannot tell those apart from here; saying "gone" for the removal
+ * they just asked for is the noise this function is written against.
+ */
+function announceHealthChanges(
+  records: readonly OutputRecord[],
+  monitors: readonly OutputMonitor[],
+): void {
+  const next = new Map(records.map(r => [r.label, r.health]))
+  const previous = lastHealth
+  lastHealth = next
+  if (!previous) return
+
+  const said: string[] = []
+  for (const record of records) {
+    const was = previous.get(record.label)
+    if (was === undefined || was === record.health) continue
+    const monitor = monitorRowName(record.monitor, monitors)
+    // Recovery from a GPU loss is announced as *that*, not as the
+    // generic `live`, which says only "in contact with the control
+    // window" — true the whole time, since the link was never the thing
+    // that failed. A screen-reader operator would be told the one fact
+    // that was never in doubt and not the one that changed. It is the
+    // only transition where the destination alone is not enough to
+    // describe what happened, which is why this is a special case
+    // rather than a second table keyed on both ends. Found in review.
+    said.push(
+      record.health === 'live' && was === 'gpu-lost'
+        ? t('outputs.item.healthAnnounce.gpuRecovered', { monitor })
+        : t(HEALTH_ANNOUNCE[record.health], { monitor }),
+    )
+  }
+  if (said.length > 0) announcePolite(said.join(' '))
+}
+
+/**
+ * Health → message key, as tables rather than the nested ternaries
+ * these were.
+ *
+ * `satisfies Record<…, string>` over the union is the point: adding a
+ * state to `OutputHealth` fails to compile here instead of quietly
+ * falling through to whichever branch was last. A badge that silently
+ * reports the wrong condition is worse than no badge, and the whole
+ * reason this panel exists is that nothing else in the app can tell an
+ * operator what a projector is doing.
+ */
+const HEALTH_ANNOUNCE = {
+  'gpu-lost': 'outputs.item.healthAnnounce.gpuLost',
+  stale: 'outputs.item.healthAnnounce.stale',
+  starting: 'outputs.item.healthAnnounce.starting',
+  live: 'outputs.item.healthAnnounce.live',
+} as const satisfies Record<OutputHealth, string>
+
+/** The chip's two words. No entry for `live` — it draws nothing. */
+const HEALTH_LABEL = {
+  'gpu-lost': 'outputs.item.health.gpuLost',
+  stale: 'outputs.item.health.stale',
+  starting: 'outputs.item.health.starting',
+} as const satisfies Record<Exclude<OutputHealth, 'live'>, string>
+
+/** The visually-hidden half, which carries what two words cannot. */
+const HEALTH_DETAIL = {
+  'gpu-lost': 'outputs.item.healthAria.gpuLost',
+  stale: 'outputs.item.healthAria.stale',
+  starting: 'outputs.item.healthAria.starting',
+} as const satisfies Record<Exclude<OutputHealth, 'live'>, string>
+
+/**
+ * The health badge, or nothing at all when the output is fine.
+ *
+ * **`live` renders no element**, which is the decision worth stating.
+ * A row of green "OK" chips trains an operator to stop reading them,
+ * and the panel is a place someone goes when they suspect a problem —
+ * so the only thing worth drawing is the exception. That also keeps
+ * the steady state visually identical to what shipped before this,
+ * which is what a badge nobody needs should cost.
+ *
+ * The label carries the meaning and the colour only reinforces it: the
+ * capture-clean installations this feature exists for are also the
+ * ones most likely to be read over someone's shoulder on a projector,
+ * and the explanation says what a two-word chip cannot — that a stale
+ * output is still showing a picture, just not a current one, which is
+ * exactly why nobody would otherwise notice.
+ *
+ * **That explanation is visually-hidden text, not `aria-label`**, and
+ * the difference is the whole reason this function is documented.
+ * `aria-label` shipped here first and does nothing: ARIA forbids
+ * naming an element whose role is `generic`, which is what a bare
+ * `<span>` maps to, so the attribute is discarded and only the
+ * two-word chip is announced — the half a sighted operator already
+ * has. Naming from *content* is the one mechanism that needs no role
+ * and is honoured everywhere, so the chip and its explanation are both
+ * text and the badge reads as one phrase. Giving the span a role that
+ * supports author naming (`status`, say) would also expose the label,
+ * but `status` is a live region and this one could never announce:
+ * `refresh` rebuilds the whole panel body, so a region born with its
+ * content is never registered before the content changes. The
+ * announcing is done where it can work, in `announceHealthChanges`.
+ */
+function buildHealthBadge(health: OutputHealth): HTMLElement | null {
+  if (health === 'live') return null
+  const badge = document.createElement('span')
+  badge.className = `output-item-health is-${health}`
+
+  const label = document.createElement('span')
+  label.className = 'output-item-health-label'
+  label.textContent = t(HEALTH_LABEL[health])
+
+  const detail = document.createElement('span')
+  detail.className = 'sr-only'
+  detail.textContent = t(HEALTH_DETAIL[health])
+
+  badge.append(label, detail)
+  return badge
+}
+
 function buildRow(
   mgr: OutputPanelManager,
   record: OutputRecord,
@@ -578,7 +992,9 @@ function buildRow(
     void removeOutput(mgr, record.label, remove, body)
   })
 
-  head.append(name, meta, remove)
+  const badge = buildHealthBadge(record.health)
+  if (badge) head.append(name, meta, badge, remove)
+  else head.append(name, meta, remove)
   item.appendChild(head)
 
   item.appendChild(
@@ -602,7 +1018,153 @@ function buildRow(
     ),
   )
   item.appendChild(buildFramebufferPicker(mgr, record))
+  item.appendChild(
+    // Directly above the rotation offset, not beside the debug toggle
+    // it shares a channel with, because these two are used together:
+    // the pattern is what an operator turns the rotation *against*, so
+    // the switch that reveals the graticule sits over the control that
+    // moves it, in the order the job is done.
+    buildToggle(t('outputs.item.calibration'), record.render.calibration, next =>
+      mgr.setOutputRenderConfig(record.label, { calibration: next }),
+    ),
+  )
+  item.appendChild(buildRotationOffset(mgr, record))
   return item
+}
+
+/**
+ * The per-output rotation offset (rung 14).
+ *
+ * **A property of the room, not of the session.** An LED sphere is a
+ * physical object whose north-pole pin may not align with celestial
+ * north, or whose owner wants the prime meridian facing the main
+ * entrance. The operator turns this until the prime meridian lands
+ * where the building needs it, and never touches it again — which is
+ * why it is persisted per output rather than being a session control,
+ * and why two outputs on two spheres each carry their own.
+ *
+ * **What they align against is the toggle directly above** — rung 14b's
+ * calibration pattern, whose longitude scale turns with the sphere, so
+ * the operator reads the rotation off whichever label has reached the
+ * physical mark rather than off this field. That is the pairing, and it
+ * is why the two controls are adjacent.
+ *
+ * The pattern is a *per-output* switch on the render-config channel and
+ * this is a *per-output* view setting that persists, and the difference
+ * is the rule: what you calibrate persists, the act of calibrating does
+ * not. A rig that relaunches keeps its rotation and comes back showing
+ * data.
+ *
+ * **A slider and a number, both live**, because the two halves of the
+ * job want different controls: finding the right rotation is a drag
+ * while watching the sphere, and reproducing a known one next
+ * installation is typing 137.5. They write through the same commit, so
+ * neither can report a value the output is not running at.
+ *
+ * Committed on `input` rather than `change`, unlike the framebuffer
+ * picker beside it. That is the point of the control: the operator is
+ * looking at the sphere, not at this panel, and a rotation that only
+ * lands on mouse-up makes them drag-release-look-drag instead of just
+ * turning it. It costs a uniform write per event — `setParams` does not
+ * rebuild the shader for a scalar — so the live path is the cheap one.
+ */
+function buildRotationOffset(mgr: OutputPanelManager, record: OutputRecord): HTMLElement {
+  const field = document.createElement('div')
+  field.className = 'output-field'
+
+  const text = document.createElement('label')
+  text.className = 'output-field-label'
+  text.textContent = t('outputs.item.rotationOffset')
+
+  const slider = document.createElement('input')
+  slider.type = 'range'
+  slider.className = 'output-field-slider'
+  slider.min = '0'
+  // 359.9, not 360: the two ends are the same rotation, and an operator
+  // who drags to the stop should not land on a value that persists as 0
+  // and reads back at the other end of the track next launch.
+  slider.max = '359.9'
+  slider.step = '0.1'
+
+  const number = document.createElement('input')
+  number.type = 'number'
+  // Its own class beside the shared one: `.output-field-number` is
+  // also the decoder-budget field, and this one is wider and lives
+  // in a row a test has to be able to name.
+  number.className = 'output-field-number output-rotation-number'
+  number.min = '0'
+  number.max = '359.9'
+  number.step = '0.1'
+
+  // Labelled through the same `<label>` the slider is, so the number
+  // input is not an unnamed spinner to a screen reader. The unit is in
+  // the label text rather than repeated on each control.
+  const id = `output-rotation-${record.label}`
+  slider.id = id
+  text.htmlFor = id
+  number.setAttribute('aria-label', t('outputs.item.rotationOffset'))
+
+  let applied = record.view.rotationOffsetDeg
+  /**
+   * Which commit is the latest, so an older one cannot win.
+   *
+   * The framebuffer picker beside this needs no such thing because it
+   * fires on `change` — one commit per interaction. This one fires on
+   * `input`, so a drag starts a commit per event and they settle in
+   * whatever order the IPC returns them. Without the generation, a slow
+   * early commit resolving after a fast later one rewrites `applied` to
+   * the older value, and its failure path then puts *both* controls
+   * back to a number the output is no longer running at. Found in
+   * review, and it is a hazard the live-commit choice created.
+   */
+  let generation = 0
+  const show = (deg: number): void => {
+    slider.value = String(deg)
+    number.value = String(deg)
+  }
+  show(applied)
+
+  const commit = (raw: string): void => {
+    // The empty check is separate from the finite one and both are
+    // needed, which is not obvious and is why it is spelled out:
+    // `Number('')` is **0**, not `NaN`. A `type="number"` input reports
+    // an empty string while the operator is mid-edit — clearing the
+    // field to retype it — so a lone `Number.isFinite` guard would
+    // read that as a deliberate zero and spin the picture back to the
+    // prime meridian between keystrokes. The finite check still earns
+    // its place: a half-typed `-` does parse as NaN.
+    if (raw.trim() === '') return
+    const parsed = Number(raw)
+    if (!Number.isFinite(parsed)) return
+    const next = ((parsed % 360) + 360) % 360
+    show(next)
+    const mine = ++generation
+    void mgr
+      .setOutputView(record.label, { rotationOffsetDeg: next })
+      .then(() => {
+        // A stale success must not rewrite the baseline a newer commit
+        // has already moved past.
+        if (mine === generation) applied = next
+      })
+      .catch(err => {
+        // Same posture as every other control here: one that reports a
+        // state the output is not in is worse than one that refuses —
+        // but only the newest commit gets to say what that state is. An
+        // older rejection landing after a newer success would otherwise
+        // drag the sphere back to a value nobody asked for.
+        logger.warn('[outputUI] rotation offset change failed:', err)
+        if (mine === generation) show(applied)
+      })
+  }
+
+  slider.addEventListener('input', () => commit(slider.value))
+  // `change` on the number, not `input`: committing per keystroke turns
+  // "137" into a rotation to 1, then 13, then 137, which on a projector
+  // is the picture spinning while someone types.
+  number.addEventListener('change', () => commit(number.value))
+
+  field.append(text, slider, number)
+  return field
 }
 
 /**

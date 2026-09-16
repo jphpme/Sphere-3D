@@ -170,6 +170,58 @@ const SETTLING_SEEK_THRESHOLD_S =
   SIBLING_HARD_SEEK_THRESHOLD_S + SYNC_MAX_RATE_TRIM * (OUTPUT_SEEK_SETTLE_MS / 1000)
 
 /**
+ * How much slower than the last one the next seek is assumed to be.
+ *
+ * The floor below is built from a measurement of the *previous* seek,
+ * and the loop it prevents re-arms on a single under-estimate: one seek
+ * that runs slightly long lands the output back outside the threshold
+ * and earns another. An over-estimate costs only a slower convergence,
+ * which the rate trim still completes. The asymmetry is the whole
+ * argument for a margin, and 1.5 is enough to cover ordinary variance
+ * between two seeks on the same asset without making the floor a
+ * different kind of guess from the one it replaces.
+ */
+export const SEEK_COST_MARGIN = 1.5
+
+/**
+ * The smallest error a seek can still be expected to improve.
+ *
+ * A seek is not free and it is not instant: the element stalls while
+ * the decoder refills, and the primary plays on throughout. So a seek
+ * that costs `C` seconds of wall clock leaves the output roughly
+ * `C x rate` seconds behind the moment it lands — which means seeking
+ * to correct an error *smaller* than that is guaranteed to end further
+ * from the target than it started. Do it once per rendered frame and
+ * the correction becomes the fault: seek, stall, measure a fresh
+ * desync, seek again, forever, with the picture stuttering and the
+ * debug HUD reading a permanent dash because every sampled frame is
+ * mid-seek.
+ *
+ * `OUTPUT_SEEK_SETTLE_MS` was the first attempt at this and it only
+ * covers the case it assumed — a seek that finishes inside a second and
+ * leaves less than `SETTLING_SEEK_THRESHOLD_S` behind. A seek slower
+ * than that outlives the window, so the threshold falls back to 150 ms
+ * while the error is still measured in seconds, and the loop closes.
+ * The field case was a bbox data-encoded forecast published *as
+ * uploaded* rather than transcoded: sparse keyframes, so every seek
+ * decodes from a distant one, and none of them finished inside the
+ * window.
+ *
+ * Measured rather than assumed, so it costs nothing where seeks are
+ * cheap: an asset that seeks in 20 ms yields a floor below the sibling
+ * threshold and `Math.max` discards it. `rate` is the primary's, since
+ * that is how far the target moves during the stall — an output mirrors
+ * one dataset, so the primary's rate *is* the target's rate here rather
+ * than an approximation of it.
+ */
+export function seekCostFloorS(lastSeekCostS: number, primaryPlaybackRate: number): number {
+  if (!Number.isFinite(lastSeekCostS) || lastSeekCostS <= 0) return 0
+  const rate =
+    Number.isFinite(primaryPlaybackRate) && primaryPlaybackRate > 0 ? primaryPlaybackRate : 1
+  return lastSeekCostS * rate * SEEK_COST_MARGIN
+}
+
+/**
  * Steer one output's video toward the primary's real-world instant.
  *
  * Call it on every playback diff and once per rAF while playing. It is
@@ -184,11 +236,19 @@ const SETTLING_SEEK_THRESHOLD_S =
  * veto would have to invent that rate, and a second derivation of it is
  * the thing this module exists not to have. Defaults to "no seek in
  * living memory", which is the unsuppressed behaviour.
+ *
+ * `lastSeekCostS` is how long the previous seek took to be served, and
+ * it raises the threshold the same way — but permanently rather than
+ * for a window, because a seek that costs a second cannot improve an
+ * error of a tenth no matter how long ago the last one was. See
+ * `seekCostFloorS`. Defaults to 0, which is "nothing measured yet" and
+ * leaves the threshold exactly where the settle window puts it.
  */
 export function syncVideoToState(
   video: SyncTarget | null,
   state: SyncInputs,
   sinceLastSeekMs: number = Number.POSITIVE_INFINITY,
+  lastSeekCostS: number = 0,
 ): SyncOutcome {
   const { dataset, primary, playback } = state
   if (!video || !playback) return NOT_STEERING('not-ready')
@@ -202,10 +262,39 @@ export function syncVideoToState(
   // the glass is the old one, so any error computed here is fiction.
   if (video.seeking) return NOT_STEERING('seeking')
 
-  const hardSeekThresholdS =
-    sinceLastSeekMs < OUTPUT_SEEK_SETTLE_MS
-      ? SETTLING_SEEK_THRESHOLD_S
-      : SIBLING_HARD_SEEK_THRESHOLD_S
+  // Two independent reasons to tolerate more error than a sibling panel
+  // would, and the correction has to respect the larger of them. The
+  // settle window is a *timeout* — it expires whether or not the seek it
+  // was covering has been paid for — while the floor is a standing
+  // property of this asset on this machine, and the field case is
+  // precisely the one where the timeout runs out first.
+  //
+  // **Neither applies while the primary is paused,** and that is the
+  // premise rather than an exception. Both raised bounds exist because
+  // the target keeps moving: the floor because a seek costing `C`
+  // leaves the output `C x rate` behind by the time it lands, the
+  // settle window because the trim needs time to close what the last
+  // seek left. Against a *stationary* target a seek manufactures no
+  // error at all — it lands exactly where it aimed — and there is no
+  // trim to wait for, because a paused element has no rate to trim.
+  // Raising the bound there only strands the output: the paused branch
+  // below declines the seek, nothing converges it, and the sphere holds
+  // a frame up to a floor's width from the operator's until they press
+  // play. On a forecast that is an hour of model time on the wrong
+  // frame, in front of an audience, silently.
+  //
+  // Nor can the plain threshold thrash here, which is the fear that
+  // motivated both bounds: the seek lands on a target that has not
+  // moved, so the next call measures ~0 and issues nothing. One seek,
+  // converged.
+  const hardSeekThresholdS = playback.paused
+    ? SIBLING_HARD_SEEK_THRESHOLD_S
+    : Math.max(
+        sinceLastSeekMs < OUTPUT_SEEK_SETTLE_MS
+          ? SETTLING_SEEK_THRESHOLD_S
+          : SIBLING_HARD_SEEK_THRESHOLD_S,
+        seekCostFloorS(lastSeekCostS, playback.playbackRate),
+      )
 
   const date = instant(playback.date)
   const sibStart = instant(dataset?.startTime)
@@ -296,14 +385,22 @@ function syncByRatio(
 }
 
 /**
- * The stateful half: remembers when it last seeked.
+ * The stateful half: remembers when it last seeked, and what that cost.
  *
  * `syncVideoToState` stays pure — every wrong answer this module can
  * give is reachable from an object literal, which is the split
  * `playbackSettle` and `voiceVad` use and the reason this file has no
- * DOM in it. All the controller adds is the one fact a pure function
+ * DOM in it. All the controller adds are the facts a pure function
  * cannot hold across calls, and it reads the clock through an injected
- * `nowMs` so the settle window is testable without waiting one out.
+ * `nowMs` so both the settle window and the cost measurement are
+ * testable without waiting one out.
+ *
+ * The measurement is the whole reason this is not just a timestamp: a
+ * seek's cost is a property of the asset, the decoder and the machine,
+ * and no constant compiled into this file knows any of the three. The
+ * element reports it for free — `seeking` is true from the write until
+ * the frame is served — so the only thing needed is to notice when it
+ * goes false, which is a comparison on a loop that is already running.
  */
 export interface PlayheadSync {
   sync(video: SyncTarget | null, state: SyncInputs): SyncOutcome
@@ -311,12 +408,40 @@ export interface PlayheadSync {
 
 export function createPlayheadSync(nowMs: () => number = () => performance.now()): PlayheadSync {
   let lastSeekAtMs = Number.NEGATIVE_INFINITY
+  let awaitingSeek = false
+  let lastSeekCostS = 0
+  let steering: SyncTarget | null = null
 
   return {
     sync(video, state) {
       const now = nowMs()
-      const outcome = syncVideoToState(video, state, now - lastSeekAtMs)
-      if (outcome.seeked) lastSeekAtMs = now
+
+      // A different element is a different measurement. `datasetMirror`
+      // builds one per load and disposes the last, so a seek left
+      // outstanding on an element that went away would otherwise be
+      // closed against the *arrival of its replacement* — recording the
+      // length of a dataset load as the cost of a seek, and pinning the
+      // floor at several seconds for the life of the window.
+      if (video !== steering) {
+        steering = video
+        awaitingSeek = false
+        lastSeekCostS = 0
+        lastSeekAtMs = Number.NEGATIVE_INFINITY
+      }
+
+      // Closed *before* steering, not after: this call is the first one
+      // that can act on what the seek actually cost, and acting on it a
+      // frame later is one more seek the loop gets to issue.
+      if (awaitingSeek && video && !video.seeking) {
+        lastSeekCostS = (now - lastSeekAtMs) / 1000
+        awaitingSeek = false
+      }
+
+      const outcome = syncVideoToState(video, state, now - lastSeekAtMs, lastSeekCostS)
+      if (outcome.seeked) {
+        lastSeekAtMs = now
+        awaitingSeek = true
+      }
       return outcome
     },
   }
