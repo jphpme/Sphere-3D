@@ -17,6 +17,12 @@ design rationale in the `docs/CATALOG_*` plan docs.
 
 ## Publisher CLI (`cli/`)
 
+Phase 1 internal projection modules (no public routes):
+
+| File | Responsibility |
+|---|---|
+| `functions/api/v1/_lib/stac-types.ts` | Narrow STAC core 1.1 Catalog/Collection/Item contracts, explicit null geometry and complete temporal intervals; no API conformance claim |
+
 | File | Responsibility |
 |---|---|
 | `cli/commands.ts` | Command implementations for the `terraviz` CLI |
