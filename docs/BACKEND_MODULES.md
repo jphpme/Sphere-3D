@@ -22,6 +22,7 @@ Phase 1 internal projection modules (no public routes):
 | File | Responsibility |
 |---|---|
 | `functions/api/v1/_lib/stac-types.ts` | Narrow STAC core 1.1 Catalog/Collection/Item contracts, explicit null geometry and complete temporal intervals; no API conformance claim |
+| `functions/api/v1/_lib/stac-read-model.ts` | Internal canonical STAC input: public rows, batched decorations/media/renditions, separate identity context, optional supplied reviewed policy fixtures; never reads private profile drafts |
 
 | File | Responsibility |
 |---|---|
