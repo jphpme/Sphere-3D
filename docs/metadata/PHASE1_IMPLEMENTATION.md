@@ -10,7 +10,7 @@ This implements the five numbered steps in [the metadata plan](README.md#phase-1
 |---|---|---|
 | 1 | STAC core 1.1 TypeScript contracts | Implemented |
 | 2 | Canonical D1 read model and separate node context | Implemented |
-| 3 | Deterministic resource and mapping builders | Pending |
+| 3 | Deterministic resource and mapping builders | Implemented |
 | 4 | Local Terraviz extension schema and validation | Pending |
 | 5 | Table-driven eligibility and mapping coverage | Pending |
 
@@ -30,3 +30,18 @@ missing identity is explicit. Approved profile selections, custom values and
 vocabulary references are optional caller-supplied inputs, never private draft
 reads. The reader is not an atomic D1 snapshot: Phase 2 must provide a consistent
 read session and authoritative access/freshness rechecks before exposing output.
+
+Builders return structured exclusion/omission reasons. Asset resolution is an
+injected trust boundary: the caller attests to an anonymous, stable URL for the
+exact source reference, MIME type and (when supplied) delivered bytes/host.
+No builder fetches assets or treats URL syntax as proof of reachability. HLS
+bundle digests and source-upload digests are not emitted as file checksums.
+The reader joins workflow ownership; sequences and recurring outputs remain
+withheld without the immutable identities deferred to Phase 3.
+
+Optional policy fixtures explicitly assert `policyCurrent`; that assertion is
+not an authorization or cache implementation. Selected profile fields use the
+Phase 0 two-actor review contract. Custom values require registration, matching
+scope/owner, aggregate bounds, and a pinned local schema validator; unavailable
+optional fields are omitted, essential or invalid fields withhold the resource.
+Vocabulary projections retain owner and revision but exclude review evidence.

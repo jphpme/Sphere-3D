@@ -56,6 +56,7 @@ export interface StacNodeContext {
   publicOrgName?: string
   publicLogo?: { href: string; type: string }
   publicSelection?: StacPublicSelection
+  policyCurrent?: boolean
   extensions?: ExtensionRegistration[]
   vocabularies?: VocabularyDescriptor[]
   customFields?: StacCustomField[]
@@ -68,6 +69,7 @@ export interface StacDatasetReadModel {
   customFields?: StacCustomField[]
   vocabularyReferences?: VocabularyReference[]
   licenseReferenceEvidence?: Record<string, string>
+  publicationKind?: 'indivisible' | 'sequence' | 'workflow' | 'unknown'
 }
 export interface StacReadModel {
   node: StacNodeContext | null
@@ -79,16 +81,19 @@ export async function readStacModel(db: D1Database): Promise<StacReadModel> {
   const decorations = await getDecorations(db, rows.map(row => row.id))
   const media = new Map<string, StacMediaIntrinsics>()
   const renditions = new Map<string, StacRendition[]>()
+  const workflowDatasets = new Set<string>()
   for (let offset = 0; offset < rows.length; offset += 80) {
     const ids = rows.slice(offset, offset + 80).map(row => row.id)
     const placeholders = ids.map(() => '?').join(',')
-    const [mediaResult, renditionResult] = await Promise.all([
+    const [mediaResult, renditionResult, workflowResult] = await Promise.all([
       db.prepare(`SELECT id, width, height, render_width, render_height, color_space,
         bit_depth, hdr_transfer, has_alpha, alpha_encoding, primary_codec
         FROM datasets WHERE id IN (${placeholders})`).bind(...ids).all<StacMediaIntrinsics & { id: string }>(),
       db.prepare(`SELECT * FROM dataset_renditions WHERE dataset_id IN (${placeholders})
         ORDER BY dataset_id, rendition_id`).bind(...ids).all<StacRendition>(),
+      db.prepare(`SELECT DISTINCT target_dataset_id FROM workflows WHERE target_dataset_id IN (${placeholders})`).bind(...ids).all<{ target_dataset_id: string }>(),
     ])
+    for (const workflow of workflowResult.results) workflowDatasets.add(workflow.target_dataset_id)
     for (const { id, ...intrinsics } of mediaResult.results) media.set(id, intrinsics)
     for (const rendition of renditionResult.results) {
       const group = renditions.get(rendition.dataset_id)
@@ -101,7 +106,8 @@ export async function readStacModel(db: D1Database): Promise<StacReadModel> {
     datasets: rows.sort((first, second) => first.id < second.id ? -1 : first.id > second.id ? 1 : 0).map(row => {
       const intrinsics = media.get(row.id)
       if (!intrinsics) throw new Error('STAC read interrupted by dataset removal; retry the snapshot')
-      return { row, decorations: decorations.get(row.id)!, media: intrinsics, renditions: renditions.get(row.id) ?? [] }
+      return { row, decorations: decorations.get(row.id)!, media: intrinsics, renditions: renditions.get(row.id) ?? [],
+        publicationKind: workflowDatasets.has(row.id) ? 'workflow' as const : undefined }
     }),
   }
 }
