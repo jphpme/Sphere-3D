@@ -8,6 +8,7 @@ import {
   isImmersiveArSupported,
   getInputArchetype,
   classifyXrDevice,
+  isHandheldArUserAgent,
 } from './vrCapability'
 
 /**
@@ -383,5 +384,41 @@ describe('vrCapability', () => {
       expect(classifyXrDevice('', 'vr')).toBe('unknown')
       expect(classifyXrDevice('SomeNewDevice/1.0', 'ar')).toBe('unknown')
     })
+  })
+})
+
+describe('isHandheldArUserAgent', () => {
+  it('is true for an Android phone UA', () => {
+    expect(
+      isHandheldArUserAgent('Mozilla/5.0 (Linux; Android 14; Pixel 8) Chrome/120'),
+    ).toBe(true)
+  })
+
+  it('is false for Quest headsets even though their UA says Android', () => {
+    expect(
+      isHandheldArUserAgent(
+        'Mozilla/5.0 (Linux; Android 12; Quest 3) AppleWebKit/537.36 OculusBrowser/30.0 Chrome/120',
+      ),
+    ).toBe(false)
+    expect(
+      isHandheldArUserAgent(
+        'Mozilla/5.0 (Linux; Android 12; Quest 3S) AppleWebKit/537.36 OculusBrowser/34.0 Chrome/126',
+      ),
+    ).toBe(false)
+    expect(
+      isHandheldArUserAgent('Mozilla/5.0 (X11; Linux x86_64; Quest Pro) OculusBrowser/29.0'),
+    ).toBe(false)
+  })
+
+  it('is false for the Meta browser even without a model name', () => {
+    expect(
+      isHandheldArUserAgent('Mozilla/5.0 (Linux; Android 12) OculusBrowser/30.0 Chrome/120'),
+    ).toBe(false)
+  })
+
+  it('is false for other headsets and desktops', () => {
+    expect(isHandheldArUserAgent('Mozilla/5.0 (Linux; Android 10; Pico) Chrome/100')).toBe(false)
+    expect(isHandheldArUserAgent('Mozilla/5.0 (Windows NT 10.0) Chrome/120')).toBe(false)
+    expect(isHandheldArUserAgent('')).toBe(false)
   })
 })

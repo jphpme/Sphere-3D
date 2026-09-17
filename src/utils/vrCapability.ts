@@ -172,3 +172,31 @@ export function classifyXrDevice(
   if (/Windows|Mac OS X|Macintosh|X11|Linux/i.test(ua)) return 'pcvr'
   return 'unknown'
 }
+
+/**
+ * Is this AR session running on a handheld — a phone or tablet held in
+ * the hand — rather than on a headset?
+ *
+ * The two get separate input paths for the whole session (see
+ * `vrSession.ts`): a headset keeps the controller grab / pinch /
+ * thumbstick model, a handheld gets the DOM placement chrome and a
+ * one-finger rotate and nothing else. That split must be decided ONCE
+ * and never flap mid-session. It used to key off "does any input source
+ * carry a gamepad", but Chrome on Android hands its screen-tap input
+ * source a gamepad too (the touch position rides on its axes), so that
+ * test flipped on every tap and every gate downstream flipped with it —
+ * the AR touch layer unmounted and remounted per touch, the pinch
+ * suppression dropped mid-tap, and the thumbstick-zoom path read the
+ * finger's Y position as a stick push and resized the globe on contact.
+ *
+ * The user agent does not flap. `classifyXrDevice` already puts every
+ * headset we know of (Quest, Quest Pro, Pico, Vision Pro, HoloLens,
+ * Magic Leap) ahead of the generic Android match, so `android-ar` is
+ * exactly "an Android device that is not a headset". Meta's browser is
+ * excluded by name as belt-and-braces in case a build ever drops the
+ * model name from its UA.
+ */
+export function isHandheldArUserAgent(ua: string): boolean {
+  if (/OculusBrowser|Oculus/i.test(ua)) return false
+  return classifyXrDevice(ua, 'ar') === 'android-ar'
+}

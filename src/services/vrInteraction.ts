@@ -220,25 +220,26 @@ export interface VrInteractionContext {
   /** Fired on a long-press grip (~800 ms hold) away from the globe — caller ends the session. */
   onExit: () => void
   /**
-   * True while the session's input archetype is handheld-AR screen
-   * touch. Two simultaneous screen touches register as two transient
-   * input sources, so an incidental second finger would otherwise
-   * drive the two-hand pinch-scale path — on this class the DOM zoom
-   * slider is the EXCLUSIVE zoom control, and every touch-driven
-   * scale write is suppressed. Rotation (single- and two-finger) is
-   * unaffected. Optional so controller-only callers/tests can omit
-   * it (defaults to false — no suppression).
+   * True for the whole session when it is running on a handheld (an
+   * Android phone or tablet) rather than a headset. Every XR path that
+   * can write the globe's scale — the two-hand pinch and the thumbstick
+   * zoom — stands down when this is set: a phone's taps arrive as
+   * transient sources whose positions sit at the device (so a pinch
+   * ratio is meaningless), and Chrome hands the screen-tap source a
+   * gamepad whose axes are the touch position (so the thumbstick path
+   * reads a finger as a stick push). The DOM zoom slider is the only
+   * sizing control there. A session-lifetime constant on the caller's
+   * side, never recomputed from the input sources. Optional so
+   * controller-only callers/tests can omit it (defaults to false).
    */
   isScreenInput?: () => boolean
   /**
-   * True while the DOM touch layer owns globe manipulation (`?vrDebug`
-   * aside, this is the handheld-AR path that gives one finger = move,
-   * two = pinch/twist). When set, this layer declines to grab the globe
-   * so a single drag cannot rotate and move at once and two touches
-   * cannot fight the DOM pinch. Distinct from `isScreenInput`, which
-   * asks the wider question "is this session touch-only at all" and is
-   * what suppresses the pinch below — a device with no DOM overlay has
-   * no touch layer but is still touch-only, and must not pinch.
+   * True while the handheld rotate layer (`vrRotateTouch`) is mounted
+   * and owns the globe's rotation. When set, this layer declines to
+   * grab the globe on a select so one drag cannot rotate through both
+   * paths. Narrower than `isScreenInput`: a handheld with no DOM
+   * overlay has no rotate layer but is still a handheld, and must
+   * still not pinch.
    */
   domTouchActive?: () => boolean
   /**
@@ -1113,13 +1114,12 @@ export function createVrInteraction(
       return
     }
 
-    // Handheld-AR manipulation is DOM-driven, not XR-driven: the touch
-    // layer (vrTouchControls) moves the globe with one finger and
-    // pinches it with two, so the transient screen ray must NOT also
-    // grab-and-rotate — a phone drag would rotate and move at once, and
-    // two fingers would fight the pinch. Every branch above still runs,
+    // Handheld-AR rotation is DOM-driven, not XR-driven: the rotate
+    // layer (vrRotateTouch) spins the globe from the real touch point,
+    // so the transient screen ray must NOT also grab-and-rotate or one
+    // drag would turn the globe twice. Every branch above still runs,
     // so HUD / browse / tour / Place-button taps keep working exactly as
-    // they did; only the globe grab is declined on this input class.
+    // they did; only the globe grab is declined on this device.
     if (ctx.domTouchActive?.()) return
 
     // Any globe hit (primary or secondary) — flip this trigger's
@@ -1622,9 +1622,13 @@ export function createVrInteraction(
     // the latter can interleave transient-pointer / gaze sources
     // that throw off index-based lookups.
     //
-    // Screen-class (handheld AR) input never reaches the scale write:
-    // transient screen sources have no gamepad, so the `if (!gp)`
-    // guard below skips them — the DOM slider is the only zoom there.
+    // Handheld AR never reaches this path at all. Chrome on Android
+    // hands the screen-tap input source a gamepad whose axes carry the
+    // TOUCH POSITION, so the `axes[1]` fallback below read the finger's
+    // Y as a stick push and resized the globe on every contact. The
+    // phone's only sizing control is the DOM zoom slider, and its
+    // browse panel scrolls by drag (browseDrag), not by an axis.
+    if (ctx.isScreenInput?.()) return
     const session = ctx.renderer.xr.getSession()
     if (!session) return
     let zoomAxis = 0

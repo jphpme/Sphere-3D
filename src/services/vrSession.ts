@@ -37,7 +37,7 @@ import {
 import { getSharedLumaSampler } from './glLumaSampler'
 import { createVrZoomOverlay, type VrZoomOverlayHandle } from '../ui/vrZoomOverlay'
 import { createVrPlacementTouch, type VrPlacementTouchHandle } from '../ui/vrPlacementTouch'
-import { createVrTouchControls, type VrTouchControlsHandle } from '../ui/vrTouchControls'
+import { createVrRotateTouch, type VrRotateTouchHandle } from '../ui/vrRotateTouch'
 import { createVrDebugPanel, type VrDebugPanelHandle } from './vrDebugPanel'
 import { MAX_GLOBE_SCALE, MIN_GLOBE_SCALE } from './vrScene'
 import { createVrPlacement, type VrPlacementHandle } from './vrPlacement'
@@ -54,6 +54,7 @@ import type { VrExitReason } from '../types'
 import {
   classifyXrDevice,
   getInputArchetype,
+  isHandheldArUserAgent,
   type VrInputArchetype,
 } from '../utils/vrCapability'
 
@@ -713,45 +714,32 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
   session.addEventListener('inputsourceschange', updateInputClass)
 
   /**
-   * Is a controller driving this session, or is it touch-only?
+   * Handheld or headset? Decided ONCE for the session, from the user
+   * agent, and never recomputed — see `isHandheldArUserAgent` for why
+   * the gamepad-presence test it replaces flapped on every phone tap.
    *
-   * A capability test, deliberately NOT an archetype test. The archetype
-   * above guesses *how* a device is being used, per source, and Android
-   * AR has been observed resolving to `transient` rather than `screen` —
-   * so every gate written as `inputClass === 'screen'` silently did
-   * nothing on a phone whose taps report `transient-pointer`: the DOM
-   * touch layer never mounted, the XR pinch was never suppressed, and two
-   * taps kept driving the two-hand scale path from two unrelated
-   * transient sources. What the session states outright is whether a
-   * source carries a gamepad, and no phone has one; everything that means
-   * "this is a touch device" keys off that instead.
+   *   - handheld (Android phone / tablet, Chrome + ARCore): the DOM
+   *     placement chrome, the zoom slider, a one-finger rotate, and
+   *     NOTHING else from touch. The XR pinch, grab and thumbstick
+   *     paths in vrInteraction all stand down for the whole session.
+   *   - headset (Quest 3 / 3S / Pro, Pico, …): the controller model
+   *     exactly as before — grab-and-rotate, two-hand pinch,
+   *     thumbstick zoom, trigger-to-confirm placement.
    */
+  const handheldAr = isAr && isHandheldArUserAgent(navigator.userAgent)
+  /** Debug readout only — no gate keys off this any more. */
   const hasGamepadInput = (): boolean => {
     for (const source of session.inputSources) {
       if (source?.gamepad) return true
     }
     return false
   }
-  let touchDriven = !hasGamepadInput()
   /**
-   * True once the DOM touch layer is mounted and owns globe manipulation.
-   *
-   * This — not the archetype — is what lets vrInteraction stand its own
-   * scale and grab paths down, and it is why a device where the DOM path
-   * cannot work (no dom-overlay granted, so no touch events mid-session)
-   * falls back to the pre-existing XR behaviour instead of losing
-   * manipulation entirely: the layer never mounts, so nothing stands
-   * down, and the two-hand floor in vrInteraction keeps that path sane.
+   * True once the handheld rotate layer is mounted and owns the globe's
+   * rotation. vrInteraction declines its own globe grab while this is
+   * set, so one drag cannot rotate through both paths.
    */
-  let touchControlsMounted = false
-  const updateTouchDriven = (): void => {
-    const next = !hasGamepadInput()
-    if (next !== touchDriven) {
-      logger.info(`[VR] touch-driven input: ${touchDriven} -> ${next}`)
-      touchDriven = next
-    }
-  }
-  session.addEventListener('inputsourceschange', updateTouchDriven)
+  let rotateTouchMounted = false
 
   // Whether the session actually granted the DOM overlay. Requested
   // as optional above, so Quest browsers (which don't implement the
@@ -767,13 +755,14 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
 
   // One line that answers "why did the AR gestures not engage?" without
   // a device attached: the resolved archetype, how many input sources the
-  // session reports, whether any of them carries a gamepad, and whether
-  // the browser granted the DOM overlay. Everything downstream keys off
-  // the last two.
+  // session reports, whether any of them carries a gamepad (on a phone
+  // it does — that is the touch position, not a controller), whether
+  // the browser granted the DOM overlay, and the handheld/headset
+  // decision every gate downstream keys off.
   logger.info(
     `[VR] input at start: class=${sessionTelemetry.inputClass} ` +
-      `sources=${session.inputSources.length} gamepad=${!touchDriven} ` +
-      `domOverlay=${domOverlayActive} touchDriven=${touchDriven}`,
+      `sources=${session.inputSources.length} gamepad=${hasGamepadInput()} ` +
+      `domOverlay=${domOverlayActive} handheld=${handheldAr}`,
   )
 
   // Lazy-load the controller-model addon alongside Three.js. The
@@ -1155,22 +1144,12 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
   // same confirm / cancel logic.
   let placementTouch: VrPlacementTouchHandle | null = null
   /**
-   * Handheld-AR globe manipulation layer (one finger moves, two pinch
-   * to scale, two twist to rotate). Mounted only for the `screen`
-   * input class with a granted DOM overlay, and armed only OUTSIDE
-   * Place mode — the placement flow owns the globe's position while it
-   * is active.
+   * Handheld-AR rotate layer: one finger spins the globe on its own
+   * axis. Mounted only on a handheld with a granted DOM overlay, and
+   * armed only OUTSIDE Place mode — the placement flow owns the globe
+   * while it is active.
    */
-  let touchControls: VrTouchControlsHandle | null = null
-  /**
-   * World offset the AR touch layer has dragged the globe by, on top of
-   * whatever the placement/anchor sync writes. Kept as three numbers
-   * rather than a Vector3 because this module imports Three as a type
-   * only — the vectors below come from `loadThree()`.
-   */
-  let touchOffsetX = 0
-  let touchOffsetY = 0
-  let touchOffsetZ = 0
+  let rotateTouch: VrRotateTouchHandle | null = null
   /**
    * Single entry point for Place-mode transitions — keeps the
    * placement state machine and the DOM touch layer (cancel button
@@ -1213,12 +1192,6 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     // there but harmless to compute.
     const base = placement.getBasePosition()
     placementHeightOffset = base ? target.y - base.y : 0
-    // A fresh placement re-bases the globe: a drag offset from the
-    // PREVIOUS placement would slide the new one off the surface the
-    // user just picked.
-    touchOffsetX = 0
-    touchOffsetY = 0
-    touchOffsetZ = 0
     // Move the globe right away so the visual response is
     // immediate. The anchor creation (below) is async; the anchor
     // sync applies placementHeightOffset so there's no jump when
@@ -1295,20 +1268,13 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     tourOverlay,
     placement,
     renderer,
-    // True while the DOM touch layer owns manipulation — vrInteraction
-    // then declines its own globe grab and pinch, so one drag cannot
-    // rotate and move at once and two touches cannot fight the pinch.
-    // Keyed on the layer actually being mounted rather than on any
-    // guess about the device: unmounted means the XR path keeps its
-    // upstream behaviour.
-    // Touch-only session (no gamepad anywhere): the XR pinch is driven
-    // by transient sources whose positions sit at the device, so its
-    // ratio is meaningless and it is the thing that runs the globe to
-    // maximum scale on any contact. Suppressed for the whole class.
-    isScreenInput: () => touchDriven,
-    // The DOM layer actually owning manipulation is a narrower fact, and
-    // it is the one that should stop this layer grabbing the globe.
-    domTouchActive: () => touchControlsMounted,
+    // Handheld session: every XR path that can write the globe's scale
+    // (two-hand pinch, thumbstick zoom) stands down for the whole
+    // session. A constant — it does not flap with the input sources.
+    isScreenInput: () => handheldAr,
+    // The rotate layer owning the globe's rotation is the narrower
+    // fact, and it is what stops vrInteraction grabbing the globe.
+    domTouchActive: () => rotateTouchMounted,
     onCameraSettled: () => {
       const state = captureVrCameraState()
       if (!state) return
@@ -1392,7 +1358,7 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
   // never reach the XR confirm short-circuit. Controller sessions
   // keep trigger-to-confirm + the raycast Place button. See
   // vrPlacementTouch.ts for the full rationale.
-  if (domOverlayActive && domOverlayRoot && placement) {
+  if (handheldAr && domOverlayActive && domOverlayRoot && placement) {
     placementTouch = createVrPlacementTouch({
       onConfirm: onPlaceConfirm,
       onCancel: () => setPlacing(false),
@@ -1404,19 +1370,13 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     placementTouch.mount(domOverlayRoot)
   }
 
-  // --- Phase 1 phone-AR zoom slider ---
-  // Mount the DOM zoom overlay reactively when `inputClass` resolves
-  // to `screen`. Controller sessions never see it (their thumbstick
-  // already does this job); transient-pointer devices get widened in
-  // Phase 2 PR 4. The listener runs the sync now (in case inputClass
-  // resolved during the slow Three.js + setSession path above) and
-  // on every subsequent inputsourceschange. Gated on the DOM overlay
-  // being granted — without it the slider is invisible mid-session
-  // anyway — and mounted INTO the overlay root so the browser renders
-  // it on top of the AR camera feed.
+  // --- Handheld-AR zoom slider ---
+  // The one sizing control a phone has: an explicit DOM slider, never a
+  // touch gesture. Mounted once, INTO the overlay root so the browser
+  // renders it over the camera feed; headsets keep the thumbstick.
   let zoomOverlay: VrZoomOverlayHandle | null = null
   const syncZoomOverlay = (): void => {
-    const wantOverlay = touchDriven && domOverlayActive
+    const wantOverlay = handheldAr && domOverlayActive
     if (wantOverlay && !zoomOverlay) {
       zoomOverlay = createVrZoomOverlay({
         onZoom: (raw) => {
@@ -1434,80 +1394,26 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     }
   }
   syncZoomOverlay()
-  session.addEventListener('inputsourceschange', syncZoomOverlay)
 
-  // --- Handheld-AR globe manipulation (move / pinch / twist) ---
-  // The screen class has no grip and no thumbstick, and its XR select
-  // stream carries a ray whose origin is the device rather than the
-  // touch point — so one finger cannot mean "move" through the XR path,
-  // and two fingers arrive as two unrelated transient sources. This DOM
-  // layer sees the real touch points instead: one finger drags the
-  // globe, two pinch to scale it, two twist to rotate it. See
-  // src/ui/vrTouchControls.ts for the gesture contract and
-  // vrInteraction's isScreenInput guard for how the XR path stands down.
-  const touchCamPos = new THREE_.Vector3()
-  const touchGlobePos = new THREE_.Vector3()
-  const touchRight = new THREE_.Vector3()
-  const touchUp = new THREE_.Vector3()
-  const touchAxis = new THREE_.Vector3()
-
-  const syncTouchControls = (): void => {
-    const wantControls = touchDriven && domOverlayActive
-    if (wantControls && !touchControls) {
-      logger.info('[VR] AR touch layer mounted — one finger moves, two pinch/twist')
-      touchControls = createVrTouchControls({
-        onMove: (delta) => {
-          if (currentAnchor) {
-            // An anchor rewrites globe.position every frame — carry the
-            // drag as an offset on top of it instead of losing it.
-            touchOffsetX += delta.x
-            touchOffsetY += delta.y
-            touchOffsetZ += delta.z
-          } else {
-            // No anchor (VR, or AR without the anchors module): nothing
-            // re-bases the position per frame, so drag it directly.
-            scene.globe.position.x += delta.x
-            scene.globe.position.y += delta.y
-            scene.globe.position.z += delta.z
-          }
-        },
-        onScale: (scale) => {
-          scene.globe.scale.setScalar(scale)
-        },
-        onRotate: (delta) => {
-          if (delta === 0) return
-          // Twist spins the globe about the axis the user is looking
-          // down — the screen-normal, which is what "twist the phone"
-          // means to the person holding it.
-          camera.getWorldDirection(touchAxis)
-          scene.globe.rotateOnWorldAxis(touchAxis, delta)
-        },
-        getScale: () => scene.globe.scale.x,
-        getMinScale: () => MIN_GLOBE_SCALE,
-        getMaxScale: () => MAX_GLOBE_SCALE,
-        getViewDistance: () => {
-          camera.getWorldPosition(touchCamPos)
-          scene.globe.getWorldPosition(touchGlobePos)
-          return touchCamPos.distanceTo(touchGlobePos)
-        },
-        getFovYRad: () => (camera.fov * Math.PI) / 180,
-        getCameraBasis: () => {
-          // Camera local X/Y in world space — the exact plane the
-          // finger is dragging in, roll included.
-          const m = camera.matrixWorld.elements
-          touchRight.set(m[0], m[1], m[2]).normalize()
-          touchUp.set(m[4], m[5], m[6]).normalize()
-          return { right: touchRight, up: touchUp }
-        },
-      })
-    } else if (!wantControls && touchControls) {
-      touchControls.dispose()
-      touchControls = null
-    }
-    touchControlsMounted = touchControls !== null
+  // --- Handheld-AR rotate (one finger, nothing else) ---
+  // The whole of what touch does to a placed globe on a phone: a
+  // sideways drag spins it about its own axis. No move, no pinch, no
+  // twist — a second finger is ignored, and no touch here can write the
+  // scale or the position. See src/ui/vrRotateTouch.ts, and
+  // vrInteraction's isScreenInput / domTouchActive guards for how the
+  // XR grab, pinch and thumbstick paths stand down on this device.
+  if (handheldAr && domOverlayActive) {
+    logger.info('[VR] handheld rotate layer mounted — one finger spins the globe')
+    rotateTouch = createVrRotateTouch({
+      onRotate: (delta) => {
+        // Object3D.rotateY is about the globe's LOCAL Y — its own
+        // axis, whatever orientation it currently has. scene.update
+        // copies the quaternion to any secondary globes.
+        scene.globe.rotateY(delta)
+      },
+    })
+    rotateTouchMounted = true
   }
-  syncTouchControls()
-  session.addEventListener('inputsourceschange', syncTouchControls)
 
   active = {
     session,
@@ -1516,13 +1422,11 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     scene,
     hud,
     disposeZoomOverlay: () => {
-      session.removeEventListener('inputsourceschange', syncZoomOverlay)
       zoomOverlay?.dispose()
       zoomOverlay = null
-      session.removeEventListener('inputsourceschange', syncTouchControls)
-      touchControls?.dispose()
-      touchControls = null
-      touchControlsMounted = false
+      rotateTouch?.dispose()
+      rotateTouch = null
+      rotateTouchMounted = false
       placementTouch?.dispose()
       placementTouch = null
     },
@@ -1677,13 +1581,13 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
       }
     }
 
-    // Arm the touch layer only when nothing else owns the touch: the
-    // placement flow owns the globe's position while it is active, and
-    // an open browse panel owns a drag as a list scroll (that scroll
-    // runs through the XR ray, so without this a drag across the panel
-    // would scroll the list AND shove the globe). `setEnabled` is a
-    // no-op when the state has not changed.
-    touchControls?.setEnabled(
+    // Arm the rotate layer only when nothing else owns the touch: the
+    // placement flow owns the globe while it is active, and an open
+    // browse panel owns a drag as a list scroll (that scroll runs
+    // through the XR ray, so without this a drag across the panel would
+    // scroll the list AND spin the globe). `setEnabled` is a no-op when
+    // the state has not changed.
+    rotateTouch?.setEnabled(
       !active.placement?.isPlacing() && !active.browse.isVisible(),
     )
 
@@ -1700,15 +1604,10 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
       const anchorPose = frame.getPose(currentAnchor.anchorSpace, active.refSpace)
       if (anchorPose) {
         const ap = anchorPose.transform.position
-        // The touch layer's drag offset rides on top of the anchor pose
-        // (and of the chosen height): the anchor bolts the globe to the
-        // real surface, and the offset is where the user has pushed it
-        // since. Both are in reference space, so the sum survives a
-        // local-floor re-base together.
         active.scene.globe.position.set(
-          ap.x + touchOffsetX,
-          ap.y + placementHeightOffset + touchOffsetY,
-          ap.z + touchOffsetZ,
+          ap.x,
+          ap.y + placementHeightOffset,
+          ap.z,
         )
       }
     }
@@ -1903,8 +1802,8 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
         debugPanel.setLines([
           `${isAr ? 'AR' : 'VR'} class=${sessionTelemetry.inputClass} src=${session.inputSources.length} ` +
             `pad=${hasGamepadInput() ? 'y' : 'n'} domOv=${domOverlayActive ? 'y' : 'n'}`,
-          `touch=${touchDriven ? 'y' : 'n'} layer=${touchControlsMounted ? 'y' : 'n'} ` +
-            `mounted=${touchControls !== null ? 'y' : 'n'}`,
+          `hand=${handheldAr ? 'y' : 'n'} rotate=${rotateTouchMounted ? 'y' : 'n'} ` +
+            `zoomUi=${zoomOverlay !== null ? 'y' : 'n'}`,
           `img=${ctx.getDatasetTexture() ? 'y' : 'n'} load=${active.loading ? 'y' : 'n'} ` +
             `anchor=${currentAnchor ? 'y' : 'n'} place=${placement ? placement.getStep() : '-'}`,
           `cat=${ctx.getDatasets().length} panels=${ctx.getPanelCount()} ` +
