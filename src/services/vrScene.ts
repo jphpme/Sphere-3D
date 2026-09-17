@@ -104,6 +104,13 @@ export interface VrSceneHandle {
    */
   readonly allGlobes: THREE.Mesh[]
   /**
+   * Show or hide the whole primary Earth presentation — globe mesh,
+   * atmosphere shell, sun sprites, ground shadow and its lights — as
+   * one. Used by the loading handover; hiding the globe mesh alone
+   * leaves its scene-level siblings visible.
+   */
+  setEarthVisible(visible: boolean): void
+  /**
    * Set the number of visible globe slots. 1 = primary-only
    * (default, backward-compatible). 2+ = arc layout with
    * secondary globes alongside the primary. Creates/destroys
@@ -189,7 +196,16 @@ export function createVrScene(
     radius: GLOBE_RADIUS,
     position: globePosition,
   })
-  earth.addTo(scene)
+  // Everything the Earth factory adds (globe, atmosphere shell, sun
+  // sprites, ground shadow, lights) lives under one group so the whole
+  // presentation can be hidden while the loading scene is up. Hiding
+  // only the globe mesh left its siblings — the atmosphere shell above
+  // all — visible, so a phone user could place and resize an empty
+  // translucent shell while the splash was still in front of it.
+  const earthRoot = new THREE_.Group()
+  earthRoot.name = 'earthRoot'
+  earth.addTo(earthRoot)
+  scene.add(earthRoot)
   const globe = earth.globe
 
   // --- Secondary globes (Phase 2.5 multi-globe support) ---
@@ -618,6 +634,11 @@ export function createVrScene(
       for (const sg of secondaries) sg.borders.setVisible(visible)
     },
 
+    setEarthVisible(visible) {
+      earthRoot.visible = visible
+      globe.visible = visible
+    },
+
     update() {
       // Factory handles: sun direction refresh (throttled), atmosphere
       // / cloud / shadow follow, sun sprite position, sun light
@@ -659,7 +680,8 @@ export function createVrScene(
 
     dispose() {
       unsubscribeDiffuse()
-      earth.removeFrom(scene)
+      earth.removeFrom(earthRoot)
+      scene.remove(earthRoot)
       earth.dispose()
       scene.remove(primaryBorders.mesh)
       primaryBorders.dispose()

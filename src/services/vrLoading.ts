@@ -77,6 +77,12 @@ export interface VrLoadingHandle {
    * typically removes + disposes the group right after.
    */
   fadeOut(): Promise<void>
+  /**
+   * True once a fade-out has run to completion. A synchronous read the
+   * render loop can poll on the same frame the fade finishes, so the
+   * handover does not depend on a promise continuation being scheduled.
+   */
+  isFadedOut(): boolean
   /** Release every GPU resource. Safe to call multiple times. */
   dispose(): void
 }
@@ -283,6 +289,7 @@ export function createVrLoading(THREE_: typeof THREE): VrLoadingHandle {
   let lastStatus = 'Initializing\u2026'
 
   /** Active fade tween, if any. */
+  let fadedOut = false
   let fadeStart: number | null = null
   let fadePromise: { resolve: () => void } | null = null
 
@@ -335,10 +342,15 @@ export function createVrLoading(THREE_: typeof THREE): VrLoadingHandle {
         if (fadeProgress >= 1) {
           fadeStart = null
           group.visible = false
+          fadedOut = true
           fadePromise?.resolve()
           fadePromise = null
         }
       }
+    },
+
+    isFadedOut() {
+      return fadedOut
     },
 
     fadeOut() {

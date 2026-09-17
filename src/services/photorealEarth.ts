@@ -328,9 +328,9 @@ export interface PhotorealEarthHandle {
    * to the supplied scene. Cloud mesh attaches itself to `globe`
    * (which is in this list) once its async texture finishes loading.
    */
-  addTo(scene: THREE.Scene): void
+  addTo(scene: THREE.Object3D): void
   /** Remove every owned object from the scene. Pair with addTo. */
-  removeFrom(scene: THREE.Scene): void
+  removeFrom(scene: THREE.Object3D): void
   /**
    * Swap the globe surface texture. Pass `null` to revert to the
    * full photoreal Earth stack; `{ kind: 'video' }` to stream from
