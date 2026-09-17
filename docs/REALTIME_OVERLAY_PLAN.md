@@ -87,7 +87,13 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 ### Phase 0 — Metadata model
 - [ ] 0.1 Inspect AYNI2 `AssetDataset` + `composition` shape and the shared DSA schema; document the exact fields to port.
 - [ ] 0.2 Design VR `composition` types (`roles`, `overlay.type`, `overlay.requiresAlpha`, `geo.bounds`, `geo.wrapLongitude`, `dataProductType`/product group) in `src/types/index.ts`.
-- [ ] 0.3 Decide where roles are sourced for VR: extend `realtime-dash-datasets.json` entries vs. parse remote `.dsa` files via the Cloudflare catalog backend.
+- [x] 0.3 **Decided: parse the remote `.dsa`.** Roles and the time axis
+  both live in the annotation the publisher writes beside the MPD, the
+  index row already carries its path, and `/realtime/*` proxies it as a
+  free asset — see `VR_PLAYBACK_TRACK_PLAN.md`, which shipped the time
+  half of this. Extending `realtime-dash-datasets.json` instead would
+  put a second copy of publisher metadata in the repo, free to drift
+  from the file it was copied out of.
 - [ ] 0.4 Port pure classifier functions from AYNI2 `rt-dataset-classifier.ts` (`isCompositionBase`, `isCompositionOverlay`, `isRegionalMaskOverlay`, `isSelectableRtOverlay`, `resolveOverlayCompositionType`, `resolveDataProductGroup`, `requiresOverlayAlpha`).
 - [ ] 0.5 Add unit tests for the ported classifiers (co-locate `*.test.ts` per repo convention).
 - [ ] 0.6 Register any new module in the CLAUDE.md module map (the repo's `check:doc-coverage` gate requires it — see prior CI failure).

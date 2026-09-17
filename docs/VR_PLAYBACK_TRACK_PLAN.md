@@ -1,6 +1,6 @@
 # VR / AR Playback Track and Dates
 
-Status: **implementing.** Design record for the in-VR date track —
+Status: **shipped for VR/AR.** Design record for the in-VR date track —
 the timeline strip that shows *when* the frame on the globe is, and
 lets the user move through it. Companion to
 [`REALTIME_OVERLAY_PLAN.md`](REALTIME_OVERLAY_PLAN.md) (which owns the
@@ -20,6 +20,23 @@ at all** and no way to move through the series except letting it play.
 
 The dates are not missing. They are declared beside every stream, in
 the R2 bucket the MPD is pulled from.
+
+## What shipped
+
+| Piece | Where |
+|---|---|
+| The time axis, parsed and mapped | `src/services/dsaTimeline.ts` |
+| Fetch once, remember success and failure | `src/services/dsaTimelineCache.ts` |
+| The strip | `src/services/vrTimelineTrack.ts` |
+| Resolved into the catalog row | `Dataset.timelineLink` (`dataService`) |
+| Polled, drawn, positioned, torn down | `vrSession` (`getDatasetTimeline`, `seekToTimelineDate`) |
+| Ray → scrub or tap → seek | `vrInteraction` (`{ kind: 'timeline' }`, `SCRUB_SEEK_INTERVAL_MS`) |
+| The host's answers | `main.ts` (`this.dsaTimelines`) |
+
+Not shipped, and deliberately: a 2D strip (the mapping module is
+UI-agnostic, so it is a second consumer rather than a second
+implementation), seeking backwards in a `type="dynamic"` manifest, and
+anything the DSA declares beyond the time axis.
 
 ## What the data gives us
 
@@ -122,9 +139,15 @@ frame.
 
 ## Verification
 
-- Unit tests for the parse, the mapping (including `last_frame` and
-  the mid-frame seek), the availability lookup, and the tick layout.
-- `npm run type-check` (the repo's gate chain) and the VR suites.
-- On hardware: a real-time stream in VR shows dates and scrubs; a
-  phone taps the track without rotating the globe; a dataset without a
-  DSA shows no track and no regression.
+- **Unit tests** — 42 across `dsaTimeline.test.ts`,
+  `dsaTimelineCache.test.ts` and `vrTimelineTrack.test.ts`: the parse
+  (numeric strings, the deprecated fps alias, a derived cadence, and
+  every rejection), the mapping (`last_frame`, mid-frame seeks,
+  clamping, the axis round-trip), the availability lookup (binary
+  search, sparse spans, `unknown`), the tick ladder, the UV↔progress
+  inversion, and the cache's five rules — one fetch per URL including
+  failures, concurrent callers sharing it, and null for every miss.
+- **`npm run type-check`** — the repo's whole gate chain — passes.
+- ☐ **On hardware.** A real-time stream in VR should show dates and
+  scrub; a phone should seek on a tap and still rotate on a drag; a
+  dataset with no axis should show no track and no regression.
