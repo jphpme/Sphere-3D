@@ -904,17 +904,16 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     }
   }
   const placement = createVrPlacement(THREE_, isAr ? 'ar' : 'vr', hitTestSource)
-  // AR reveals the Place button only when a hit-test source backs
-  // it; VR always has a gaze ray to project, so the button always
-  // shows.
+  // AR offers the Place button only when a hit-test source backs it; VR
+  // always has a gaze ray to project, so the button always shows. It
+  // stays hidden until the loading handover reveals the scene — see
+  // `syncPlacementChrome` — because a live Place affordance over a
+  // hidden globe invites a phone to anchor something nobody can see.
   const placementAvailable = isAr ? !!hitTestSource : true
   if (placement) {
     scene.scene.add(placement.reticleGroup)
     scene.scene.add(placement.railGroup)
     scene.scene.add(placement.placeButtonMesh)
-    if (placementAvailable) {
-      placement.placeButtonMesh.visible = true
-    }
   }
 
   // --- Restore persisted placement via WebXR Anchor (AR only) ---
@@ -988,6 +987,14 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
    */
   let loadingDisposed = false
   /**
+   * True once the splash has handed over and the real scene is on
+   * screen. Gates the placement chrome: the 3D Place button and the DOM
+   * Re-place button used to be live from the first frame while
+   * `setEarthVisible(false)` had the globe hidden, so a phone could
+   * enter Place mode and anchor a globe that was not there yet.
+   */
+  let sceneRevealed = false
+  /**
    * Loading handover state, all driven from the render loop's own clock
    * rather than from timers or a promise chain. `loopElapsed` counts
    * XR-frame seconds since the first frame; readiness marks
@@ -1035,6 +1042,8 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     if (active) active.loading = null
     scene.setEarthVisible(true)
     hud.mesh.visible = true
+    sceneRevealed = true
+    syncPlacementChrome()
   }
   scene.setTexture(ctx.getDatasetTexture(), finishLoading)
   hud.setState({
@@ -1336,16 +1345,23 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     },
   })
 
-  // --- Handheld-AR placement touch layer ---
-  // Only when the session actually granted the DOM overlay (Android
-  // `screen` input): touches on empty screen then arrive as DOM touch
-  // events, enabling explicit Place / Cancel buttons, drag-to-adjust
-  // height, and a Re-place corner button. Stray screen taps during
-  // placement are swallowed by the layer (beforexrselect dedup) and
-  // never reach the XR confirm short-circuit. Controller sessions
+  // --- Handheld-AR placement chrome ---
+  // Mounted only when the session actually granted the DOM overlay
+  // (Android `screen` input) AND the session is a handheld: touches on
+  // empty screen then arrive as DOM touch events, which buys the
+  // explicit Place / Cancel buttons, the Re-place corner button, and the
+  // `beforexrselect` dedup that swallows stray taps during placement so
+  // they never reach the XR confirm short-circuit. Controller sessions
   // keep trigger-to-confirm + the raycast Place button. See
   // vrPlacementTouch.ts for the full rationale.
-  if (handheldAr && domOverlayActive && domOverlayRoot && placement) {
+  //
+  // Idempotent and deferred: both affordances appear only once the
+  // loading handover has revealed the globe (see `sceneRevealed`), so
+  // this is called from `revealScene()` and no-ops if it runs earlier.
+  function syncPlacementChrome(): void {
+    if (!placement || !sceneRevealed) return
+    if (placementAvailable) placement.placeButtonMesh.visible = true
+    if (placementTouch || !handheldAr || !domOverlayActive || !domOverlayRoot) return
     placementTouch = createVrPlacementTouch({
       onConfirm: onPlaceConfirm,
       onCancel: () => setPlacing(false),
@@ -1354,6 +1370,7 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     })
     placementTouch.mount(domOverlayRoot)
   }
+  syncPlacementChrome()
 
   // --- Handheld-AR zoom slider ---
   // The one sizing control a phone has: an explicit DOM slider, never a
@@ -1569,10 +1586,14 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     // placement flow owns the globe while it is active, and an open
     // browse panel owns a drag as a list scroll (that scroll runs
     // through the XR ray, so without this a drag across the panel would
-    // scroll the list AND spin the globe). `setEnabled` is a no-op when
-    // the state has not changed.
+    // scroll the list AND spin the globe). It also waits for the splash
+    // to hand over — there is nothing placed, or even visible, to spin
+    // before that. `setEnabled` is a no-op when the state has not
+    // changed.
     rotateTouch?.setEnabled(
-      !active.placement?.isPlacing() && !active.browse.isVisible(),
+      sceneRevealed &&
+        !active.placement?.isPlacing() &&
+        !active.browse.isVisible(),
     )
 
     // Sync globe position from the system-tracked anchor, if any.
