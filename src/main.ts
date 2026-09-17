@@ -49,6 +49,8 @@ import {
   notifyAnalyzePlaybackSettled,
 } from './ui/analyzeUI'
 import { createPlaybackSettleWatcher } from './services/playbackSettle'
+import { createDsaTimelineCache, type DsaTimelineCache } from './services/dsaTimelineCache'
+import { dateAtVideoTimeMs, timelineSpanMs, videoTimeForDateMs } from './services/dsaTimeline'
 import { registerAnalysisSource } from './services/docentAnalysisTools'
 import { buildHistogram } from './services/datasetStats'
 import { DEFAULT_DISPLAY, type ColorScaleDisplay } from './services/colorScaleDisplay'
@@ -397,6 +399,15 @@ class InteractiveSphere {
   }
 
   private playback: PlaybackState = createPlaybackState()
+
+  /**
+   * Parsed `.dsa` time axes for real-time and forecast streams, keyed by
+   * URL. The catalog resolves each row's annotation into
+   * `Dataset.timelineLink`; this fetches it once and remembers both
+   * outcomes, so the per-frame poll in VR cannot put a request on the wire.
+   * See `services/dsaTimelineCache.ts`.
+   */
+  private dsaTimelines: DsaTimelineCache = createDsaTimelineCache()
   private loadingHideTimer: ReturnType<typeof setTimeout> | null = null
   private loadGeneration = 0 // guards against concurrent dataset loads
   private tourEngine: TourEngine | null = null
@@ -2561,6 +2572,41 @@ class InteractiveSphere {
         // Image dataset — the startTime is the only thing to show.
         const showTime = ds.period ? isSubDailyPeriod(ds.period) : false
         return formatDate(new Date(ds.startTime), showTime)
+      },
+      getDatasetTimeline: () => {
+        // The axis lives in the stream's `.dsa`, beside its MPD. Prefetch
+        // is idempotent and fire-and-forget, so calling it from a per-frame
+        // poll costs a map lookup; a dataset with no annotation, or one
+        // whose annotation has not arrived, answers null and shows no track.
+        const url = this.appState.currentDataset?.timelineLink
+        if (!url) return null
+        this.dsaTimelines.prefetch(url)
+        const timeline = this.dsaTimelines.get(url)
+        if (!timeline) return null
+        const video = this.hlsService?.video
+        return {
+          startMs: timeline.startMs,
+          // The exclusive end of the axis, derived from frames x cadence
+          // rather than from `timeRange.end`: the declared end is either
+          // exclusive or the last frame's stamp depending on the file, and
+          // the track wants one meaning.
+          endMs: timeline.startMs + timelineSpanMs(timeline),
+          currentMs: video
+            ? dateAtVideoTimeMs(timeline, video.currentTime)
+            : timeline.startMs,
+          frameCount: timeline.frameCount,
+          cadenceMs: timeline.cadenceMs,
+          availabilitySpans: timeline.availability.spans,
+        }
+      },
+      seekToTimelineDate: (epochMs) => {
+        const url = this.appState.currentDataset?.timelineLink
+        const timeline = url ? this.dsaTimelines.get(url) : null
+        const video = this.hlsService?.video
+        if (!timeline || !video) return
+        // Mid-frame: the decoder lands inside the frame that represents the
+        // instant instead of on the boundary between two of them.
+        video.currentTime = videoTimeForDateMs(timeline, epochMs)
       },
       hasVideoDataset: () => {
         const ds = this.appState.currentDataset

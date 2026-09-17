@@ -30,6 +30,7 @@ import type { VrBrowseAction, VrBrowseHandle } from './vrBrowse'
 import type { VrPlacementHandle } from './vrPlacement'
 import type { VrTourControlsAction, VrTourControlsHandle } from './vrTourControls'
 import type { VrTourInteractiveAction, VrTourOverlayHandle } from './vrTourOverlay'
+import type { VrTimelineTrackHandle } from './vrTimelineTrack'
 import { MAX_GLOBE_SCALE, MIN_GLOBE_SCALE } from './vrScene'
 import { logger } from '../utils/logger'
 import { emit } from '../analytics'
@@ -246,6 +247,13 @@ export interface VrInteractionContext {
   tourControls: VrTourControlsHandle
   /** Tour overlay manager — exposes interactive meshes (currently question panels) for controller raycast. */
   tourOverlay: VrTourOverlayHandle
+  /**
+   * In-VR date track for the primary dataset's time axis. Draws itself
+   * only while a timeline is loaded (`isVisible()`), and is hit-tested
+   * before the globe so a drag on the strip scrubs the series rather than
+   * spinning it.
+   */
+  timeline: VrTimelineTrackHandle
   /** AR-only spatial placement. Null in VR mode or when hit-test isn't available. */
   placement: VrPlacementHandle | null
   renderer: THREE.WebGLRenderer
@@ -255,6 +263,14 @@ export interface VrInteractionContext {
   onBrowseAction: (action: VrBrowseAction) => void
   /** Fired when the user taps a tour-control button (prev/play-pause/next/stop). */
   onTourAction: (action: VrTourControlsAction) => void
+  /**
+   * Fired when the user seeks on the date track: `preview` repeatedly
+   * while a headset drag is in flight (rationed here — a DASH seek per XR
+   * frame would be ninety seeks a second), then `commit` once on release.
+   * A handheld only ever gets `commit`, because its touch is rotate-only
+   * and a drag across the strip must not also move the series.
+   */
+  onTimelineSeek?: (progress: number, phase: 'preview' | 'commit') => void
   /** Fired when the user taps the floating Place button — caller toggles Place mode. */
   onPlaceButton: () => void
   /** Fired when the user pulls trigger while in Place mode — caller anchors the globe. */
@@ -588,6 +604,38 @@ export function createVrInteraction(
   const BROWSE_DRAG_THRESHOLD = 0.02
   /** Per-controller "ray is currently on the browse panel" — drives thumbstick scroll. */
   const rayOnBrowse: boolean[] = [false, false]
+
+  /**
+   * Date-track scrub state. Armed by a select that lands on the strip;
+   * the ray is re-read every frame while armed, and the release decides
+   * whether it was a scrub or a tap.
+   */
+  type TimelineDrag =
+    | { kind: 'idle' }
+    | {
+        kind: 'scrub'
+        controllerIndex: 0 | 1
+        /** Progress where the press landed — the tap test's baseline. */
+        startProgress: number
+        /** Progress last seen under the ray; the release fallback. */
+        lastProgress: number
+      }
+  let timelineDrag: TimelineDrag = { kind: 'idle' }
+  /**
+   * Progress units a press may drift and still count as a tap. The bar
+   * spans most of the strip's width, so 0.02 is roughly 22 px on the
+   * canvas — past a finger's wobble, short of a deliberate drag. It is
+   * what keeps a handheld from seeking on every rotate across the strip.
+   */
+  const TIMELINE_TAP_SLOP = 0.02
+  /**
+   * Minimum gap between preview seeks. A seek stalls a DASH decoder, and
+   * the drawn playhead follows the ray every frame regardless, so the
+   * video catches up in ~120 ms steps while the strip stays smooth.
+   */
+  const SCRUB_SEEK_INTERVAL_MS = 120
+  /** `performance.now()` of the last preview seek, for the ration above. */
+  let lastScrubSeekAt = 0
   /**
    * Per-controller reference to the globe mesh that was grabbed on
    * selectstart. Passed to captureSingleMode so the surface-pinned
@@ -700,6 +748,7 @@ export function createVrInteraction(
     | { kind: 'browse'; action: VrBrowseAction }
     | { kind: 'browse-scroll' }
     | { kind: 'tour-control'; action: VrTourControlsAction }
+    | { kind: 'timeline'; progress: number }
     | { kind: 'tour-overlay'; action: VrTourInteractiveAction }
     | { kind: 'overlay-drag'; overlayId: string; mesh: THREE.Mesh }
     | { kind: 'place-button' }
@@ -741,6 +790,18 @@ export function createVrInteraction(
           y: tourHits[0].uv.y,
         })
         if (action) return { kind: 'tour-control', action }
+      }
+    }
+
+    // Date track — below the HUD and above the globe in priority, so a
+    // drag on the strip scrubs instead of rotating. Gated by
+    // `isVisible()`, so a dataset that declares no axis costs no raycast.
+    if (ctx.timeline.isVisible()) {
+      const trackHits = raycaster.intersectObject(ctx.timeline.mesh, false)
+      const uv = trackHits[0]?.uv
+      if (uv) {
+        const progress = ctx.timeline.progressAtUv({ x: uv.x, y: uv.y })
+        if (progress !== null) return { kind: 'timeline', progress }
       }
     }
 
@@ -1017,6 +1078,20 @@ export function createVrInteraction(
    * the panel only — called on the infrequent selectstart, not per
    * frame. Returns null when the ray misses the panel (no UV).
    */
+  /**
+   * Axis progress under a controller's ray, or null when the ray is off
+   * the strip. Raycasts the track alone rather than calling `pickHit`,
+   * because a scrub re-reads this every frame and `pickHit` walks every
+   * interactive surface in the session.
+   */
+  function timelineProgressUnder(controller: THREE.XRTargetRaySpace): number | null {
+    if (!ctx.timeline.isVisible()) return null
+    setRaycasterFromController(controller)
+    const uv = raycaster.intersectObject(ctx.timeline.mesh, false)[0]?.uv
+    if (!uv) return null
+    return ctx.timeline.progressAtUv({ x: uv.x, y: uv.y })
+  }
+
   function currentBrowseUvY(): number | null {
     const hits = raycaster.intersectObject(ctx.browse.mesh, false)
     const uv = hits[0]?.uv
@@ -1119,6 +1194,23 @@ export function createVrInteraction(
       return
     }
 
+    if (hit.kind === 'timeline') {
+      // Scrub the date axis. A headset gets a live preview from the first
+      // frame; a phone waits for the release, because the same drag is
+      // also rotating the globe and only a tap should seek.
+      timelineDrag = {
+        kind: 'scrub',
+        controllerIndex: index,
+        startProgress: hit.progress,
+        lastProgress: hit.progress,
+      }
+      if (!ctx.isScreenInput?.()) {
+        lastScrubSeekAt = performance.now()
+        ctx.onTimelineSeek?.(hit.progress, 'preview')
+      }
+      return
+    }
+
     if (hit.kind === 'tour-overlay') {
       tourOverlayArmed[index] = hit.action
       return
@@ -1203,6 +1295,21 @@ export function createVrInteraction(
         }
       }
       browseArmed[index] = null
+    }
+    // Date track release. A headset commits whatever the drag reached; a
+    // handheld commits only a tap, so a rotate that crossed the strip does
+    // not also move the series. The release ray wins over the last preview
+    // so a drag that left the bar still lands where the user let go, with
+    // the last-seen progress as the fallback.
+    if (timelineDrag.kind === 'scrub' && timelineDrag.controllerIndex === index) {
+      const released =
+        timelineProgressUnder(controllers[index]) ?? timelineDrag.lastProgress
+      const isTap =
+        Math.abs(released - timelineDrag.startProgress) <= TIMELINE_TAP_SLOP
+      if (isTap || !ctx.isScreenInput?.()) {
+        ctx.onTimelineSeek?.(released, 'commit')
+      }
+      timelineDrag = { kind: 'idle' }
     }
     // Tour controls: same press-and-release-on-same-target click semantics.
     if (tourArmed[index]) {
@@ -1748,6 +1855,19 @@ export function createVrInteraction(
       return null
     },
     update(deltaSeconds) {
+      // Date track: re-read the ray while a scrub is armed and push a
+      // rationed preview, so the drawn playhead follows the controller
+      // even though the decoder can only be steered a few times a second.
+      if (timelineDrag.kind === 'scrub' && !ctx.isScreenInput?.()) {
+        const progress = timelineProgressUnder(controllers[timelineDrag.controllerIndex])
+        if (progress !== null) timelineDrag.lastProgress = progress
+        const now = performance.now()
+        if (progress !== null && now - lastScrubSeekAt >= SCRUB_SEEK_INTERVAL_MS) {
+          lastScrubSeekAt = now
+          ctx.onTimelineSeek?.(progress, 'preview')
+        }
+      }
+
       switch (rotationMode.kind) {
         case 'idle':
           break

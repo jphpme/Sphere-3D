@@ -25,6 +25,8 @@ import { createVrBrowse, type VrBrowseHandle } from './vrBrowse'
 import { createVrTourControls, type VrTourControlsHandle } from './vrTourControls'
 import { createVrTourOverlay, type VrTourOverlayHandle } from './vrTourOverlay'
 import { createVrTimeLabel, type VrTimeLabelHandle } from './vrTimeLabel'
+import { createVrTimelineTrack, type VrTimelineTrackHandle } from './vrTimelineTrack'
+import type { DsaAvailabilitySpan } from './dsaTimeline'
 import { setVrTourOverlaySink } from '../ui/tourUI'
 import { createVrInteraction, type VrInteractionHandle } from './vrInteraction'
 import { createVrLoading, type VrLoadingHandle } from './vrLoading'
@@ -148,6 +150,26 @@ function sampleVrProbe(
   return reading ? formatProbeReading(reading) : null
 }
 
+/**
+ * The primary dataset's declared time axis, in the shape the date track
+ * draws. The host answers it from the `.dsa` beside the stream
+ * (`services/dsaTimeline.ts`) plus the video's own playhead; a dataset
+ * that declares no axis — every catalog row, and any stream whose
+ * annotation has not arrived — answers `null`, and the track hides.
+ */
+export interface VrDatasetTimeline {
+  /** Instant of the first frame, ms since epoch. */
+  readonly startMs: number
+  /** Exclusive end of the axis — the instant after the final frame. */
+  readonly endMs: number
+  /** The instant the playhead represents now. */
+  readonly currentMs: number
+  readonly frameCount: number
+  readonly cadenceMs: number
+  /** Sparse provenance spans for the track to shade; a frame outside them is data. */
+  readonly availabilitySpans: readonly DsaAvailabilitySpan[]
+}
+
 export interface VrSessionContext {
   /**
    * The currently-loaded dataset's surface texture for the PRIMARY
@@ -180,6 +202,23 @@ export interface VrSessionContext {
    * `main.ts`'s implementation for the expected pattern.
    */
   getDatasetTimeLabel(): string | null
+  /**
+   * The primary dataset's declared time axis, or null when it declares
+   * none. Polled per XR frame like the label, and answered the same way:
+   * the host reads the stream's `.dsa` (fetched once, cached, and null
+   * when absent) and maps the video's `currentTime` through it. A null
+   * answer is the normal case rather than a failure — every catalog
+   * dataset answers null here, and shows no track.
+   */
+  getDatasetTimeline(): VrDatasetTimeline | null
+  /**
+   * Seek the primary playback to an instant on that axis. The host
+   * converts through the same mapping, which lands the video **inside**
+   * the frame representing that instant rather than on its boundary, so
+   * a decode cannot resolve to the neighbouring date. No-op without an
+   * axis or a video element.
+   */
+  seekToTimelineDate(epochMs: number): void
   /** True iff a video dataset is loaded on the primary — drives the HUD play/pause button visibility. */
   hasVideoDataset(): boolean
   /** Drives the HUD play/pause icon. Reflects the primary panel's state. */
@@ -313,6 +352,13 @@ interface ActiveSession {
   tourOverlay: VrTourOverlayHandle
   /** Floating date readout above the globe for datasets with time metadata. */
   timeLabel: VrTimeLabelHandle
+  /**
+   * Date track under the HUD — the primary dataset's declared time axis,
+   * hidden while the host reports none. Distinct from `timeLabel`: the
+   * label answers "what date is this?", the track answers "what is the
+   * span, and where in it am I?", and only the track is interactive.
+   */
+  timeline: VrTimelineTrackHandle
   /** Loading scene shown during entry; null after fade-out + dispose. */
   loading: VrLoadingHandle | null
   /** AR-only spatial placement (hit-test reticle + Place button). Null when hit-test unavailable. */
@@ -808,6 +854,13 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
   const tourControls = createVrTourControls(THREE_)
   scene.scene.add(tourControls.mesh)
 
+  // Date track — the timeline of the primary dataset's declared time
+  // axis. Added now and hidden until the host reports one, because most
+  // datasets declare none and a session that never loads a real-time
+  // stream should pay nothing for it beyond one invisible mesh.
+  const timeline = createVrTimelineTrack(THREE_)
+  scene.scene.add(timeline.mesh)
+
   // Tour overlay manager — the parent Group is always in the scene;
   // individual overlay meshes are added / removed by its show/hide
   // methods. The sink registered below forwards every DOM overlay
@@ -1251,6 +1304,13 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     })
   }
 
+  /**
+   * Axis progress a scrub is holding the playhead at, or null when none
+   * is in flight. The drawer prefers it over the host's snapshot so the
+   * strip follows the finger between the rationed seeks.
+   */
+  let timelineScrubProgress: number | null = null
+
   const interaction = createVrInteraction(THREE_, XRControllerModelFactory, {
     scene: scene.scene,
     globe: scene.globe,
@@ -1262,6 +1322,7 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     browse,
     tourControls,
     tourOverlay,
+    timeline,
     placement,
     renderer,
     // Handheld session: every XR path that can write the globe's scale
@@ -1338,6 +1399,16 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     },
     onPlaceButton,
     onPlaceConfirm,
+    onTimelineSeek: (progress, phase) => {
+      const snapshot = ctx.getDatasetTimeline()
+      if (!snapshot) return
+      // The strip follows the finger immediately; the decoder is steered
+      // through the host, which maps progress to the frame's midpoint.
+      timelineScrubProgress = phase === 'preview' ? progress : null
+      ctx.seekToTimelineDate(
+        snapshot.startMs + progress * (snapshot.endMs - snapshot.startMs),
+      )
+    },
     onExit: () => {
       void session.end().catch(err =>
         logger.warn('[VR] session.end() from grip failed:', err),
@@ -1435,6 +1506,7 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     browse,
     tourControls,
     tourOverlay,
+    timeline,
     timeLabel,
     interaction,
     loading,
@@ -1485,7 +1557,15 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
    * the same x/z and adds another ~12 cm of y-drop so the two
    * panels don't overlap even when the user has zoomed the globe.
    */
-  const tourControlsOffset = new THREE_.Vector3(0, -0.80, 0.15)
+  /**
+   * Date track sits where the tour strip used to: directly under the HUD,
+   * because the two answer the same question ("what am I looking at, and
+   * how do I move it?"). The tour strip drops a further 15 cm so an
+   * active tour and a real-time stream can both be on screen without one
+   * covering the other.
+   */
+  const timelineOffset = new THREE_.Vector3(0, -0.80, 0.15)
+  const tourControlsOffset = new THREE_.Vector3(0, -0.95, 0.15)
   /** Scratch reused per-frame for position math; avoids GC churn. */
   const scratchPos = new THREE_.Vector3()
   /** Scratch vector reused every frame by the billboard-lookAt block below. */
@@ -1786,6 +1866,34 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
       active.tourControls.mesh.position.copy(scratchPos)
       active.tourControls.mesh.lookAt(scratchCamPos)
     }
+    // Date track: asked for every frame, which is what makes the host's
+    // answer a cheap map read rather than a request. While a scrub is in
+    // flight the drawn playhead follows the finger rather than the video
+    // — the decoder is steered in steps (see vrInteraction's
+    // SCRUB_SEEK_INTERVAL_MS) and the strip should not stutter with it.
+    {
+      // Gated on the handover like the placement chrome: the axis is a
+      // description of the globe, and floating it over the splash would
+      // describe a globe that is not on screen yet.
+      const snapshot = sceneRevealed ? ctx.getDatasetTimeline() : null
+      if (snapshot) {
+        const currentMs =
+          timelineScrubProgress === null
+            ? snapshot.currentMs
+            : snapshot.startMs +
+              timelineScrubProgress * (snapshot.endMs - snapshot.startMs)
+        active.timeline.setState({
+          ...snapshot,
+          currentMs,
+          scrubbing: timelineScrubProgress !== null,
+        })
+        scratchPos.copy(active.scene.globe.position).add(timelineOffset)
+        active.timeline.mesh.position.copy(scratchPos)
+        active.timeline.mesh.lookAt(scratchCamPos)
+      } else {
+        active.timeline.setState(null)
+      }
+    }
     if (active.placement) {
       scratchPos.copy(active.scene.globe.position).add(placeOffset)
       active.placement.placeButtonMesh.position.copy(scratchPos)
@@ -1835,6 +1943,7 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
           `${isAr ? 'AR' : 'VR'} class=${sessionTelemetry.inputClass} src=${session.inputSources.length} ` +
             `pad=${hasGamepadInput() ? 'y' : 'n'} domOv=${domOverlayActive ? 'y' : 'n'}`,
           `hand=${handheldAr ? 'y' : 'n'} rotate=${rotateTouchMounted ? 'y' : 'n'} ` +
+            `tl=${timeline.isVisible() ? 'y' : 'n'} ` +
             `zoomUi=${zoomOverlay !== null ? 'y' : 'n'}`,
           `img=${ctx.getDatasetTexture() ? 'y' : 'n'} load=${active.loading ? 'y' : 'n'} ` +
             `anchor=${currentAnchor ? 'y' : 'n'} place=${placement ? placement.getStep() : '-'}`,
@@ -1902,6 +2011,8 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     a.browse.dispose()
     a.scene.scene.remove(a.tourControls.mesh)
     a.tourControls.dispose()
+    a.scene.scene.remove(a.timeline.mesh)
+    a.timeline.dispose()
     a.scene.scene.remove(a.timeLabel.mesh)
     a.timeLabel.dispose()
     // Clear the tourUI sink first so any in-flight `hideAll*` calls

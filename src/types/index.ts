@@ -137,6 +137,15 @@ export interface Dataset {
    * set by `fetchRealtimeDashDatasets` so the UI can tag/prefix them. */
   realtimeKind?: 'real-time' | 'forecast'
 
+  /**
+   * Resolved URL of the stream's `.dsa` annotation — the file beside the
+   * MPD that declares the time axis (origin, cadence, frame count) and the
+   * provenance of frames the publisher filled in. Set for realtime and
+   * forecast rows only. The VR date track reads it; its absence is what
+   * makes a dataset show no track at all. See `services/dsaTimeline.ts`.
+   */
+  timelineLink?: string
+
   /** When true, country/region borders render on by default for this
    * dataset (sparse transparent DASH overlays). */
   defaultBordersVisible?: boolean

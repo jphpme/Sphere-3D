@@ -596,6 +596,10 @@ async function fetchRealtimeDashDatasets(): Promise<Dataset[]> {
           abstractTxt: entry.description,
           thumbnailLink: resolveRealtimeDashAsset(entry.thumbnail, baseUrl),
           legendLink: resolveRealtimeDashAsset(entry.colorbar, baseUrl),
+          // The stream's time axis, for the VR date track. Resolved here
+          // rather than at the point of use so nothing downstream needs to
+          // know about the R2 layout or the configured base URL.
+          timelineLink: resolveRealtimeDashAsset(entry.dsa, baseUrl),
           tags,
           realtimeKind: isForecast ? 'forecast' : 'real-time',
           defaultBordersVisible: true,
