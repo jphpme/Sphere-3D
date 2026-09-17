@@ -11,7 +11,7 @@ This implements the five numbered steps in [the metadata plan](README.md#phase-1
 | 1 | STAC core 1.1 TypeScript contracts | Implemented |
 | 2 | Canonical D1 read model and separate node context | Implemented |
 | 3 | Deterministic resource and mapping builders | Implemented |
-| 4 | Local Terraviz extension schema and validation | Pending |
+| 4 | Local Terraviz extension schema and validation | Implemented |
 | 5 | Table-driven eligibility and mapping coverage | Pending |
 
 No STAC routes, schema URLs, discovery links, native public fields, profile
@@ -45,3 +45,8 @@ Phase 0 two-actor review contract. Custom values require registration, matching
 scope/owner, aggregate bounds, and a pinned local schema validator; unavailable
 optional fields are omitted, essential or invalid fields withhold the resource.
 Vocabulary projections retain owner and revision but exclude review evidence.
+
+The [local schema bundle](schemas/README.md) documents each mapping and its
+scope. Tests validate core Catalog/Collection/Item output and every declared
+extension against pinned offline schema bytes. UTC normalization preserves
+arbitrary fractional-second precision. Schema publication remains Phase 2.

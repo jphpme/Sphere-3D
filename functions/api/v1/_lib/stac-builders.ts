@@ -72,6 +72,14 @@ function assetFrom(resolved: StacResolvedAsset, roles: string[], digest: string 
 
 function distinct(values: string[]): string[] { return [...new Set(values.filter(value => value.trim()).map(value => value.trim()))].sort() }
 
+function utcInstant(value: string): string {
+  const match = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(\.\d+)?(Z|[+-]\d{2}:\d{2})$/.exec(value)
+  if (!match) throw new Error('Invalid represented instant')
+  const wholeSeconds = new Date(match[1] + match[3]).toISOString().replace(/\.000Z$/, '')
+  if (wholeSeconds.length !== 19) throw new Error('UTC instant outside supported year range')
+  return wholeSeconds + (match[2] ?? '') + 'Z'
+}
+
 function providers(model: StacDatasetReadModel, node: StacNodeContext, hostedBy: string | undefined): StacProvider[] {
   const result: StacProvider[] = []
   if (model.row.organization?.trim()) result.push({ name: model.row.organization.trim() })
@@ -148,6 +156,7 @@ export function buildStacProduct(model: StacDatasetReadModel, node: StacNodeCont
     const root = resolvers.resource('catalog', node.identity.node_id)
     const collectionUrl = spatial.geometry ? resolvers.resource('collection', collectionId) : null
     const itemUrl = readiness.temporal.ready ? resolvers.resource('item', itemId) : null
+    const interval = readiness.temporal.interval?.map(utcInstant) as [string, string] | undefined
     const licenseLinks: StacLink[] = []
     if (readiness.license.kind === 'other') {
       const references = model.licenseReferenceEvidence && row.license_spdx?.includes('LicenseRef-')
@@ -222,13 +231,13 @@ export function buildStacProduct(model: StacDatasetReadModel, node: StacNodeCont
     const common = { ...extensionFields, title: row.title, description: row.abstract?.trim() || row.title, keywords, providers: attribution }
     const collection: StacCollection | null = collectionUrl && spatial.bbox ? {
       type: 'Collection', stac_version: STAC_VERSION, stac_extensions: [], id: collectionId, ...common, license,
-      extent: { spatial: { bbox: [spatial.bbox] }, temporal: { interval: [readiness.temporal.interval ?? [null, null]] } },
+      extent: { spatial: { bbox: [spatial.bbox] }, temporal: { interval: [interval ?? [null, null]] } },
       links: [link('self', collectionUrl), link('root', root), link('parent', root), ...(itemUrl ? [link('item', itemUrl, 'application/geo+json')] : []), ...extraLinks],
       ...(!itemUrl ? { assets } : {}),
     } : null
     let item: StacItem | null = null
-    if (itemUrl && readiness.temporal.interval) {
-      const [start, end] = readiness.temporal.interval
+    if (itemUrl && interval) {
+      const [start, end] = interval
       const temporal: StacTemporal = readiness.temporal.status === 'instant' ? { datetime: start } : { datetime: null, start_datetime: start, end_datetime: end }
       item = { type: 'Feature', stac_version: STAC_VERSION, stac_extensions: [], id: itemId, ...spatial,
         ...(collection ? { collection: collectionId } : {}),
@@ -236,7 +245,7 @@ export function buildStacProduct(model: StacDatasetReadModel, node: StacNodeCont
         links: [link('self', itemUrl, 'application/geo+json'), link('root', root), link('parent', collectionUrl ?? root), ...(collectionUrl ? [link('collection', collectionUrl)] : []), ...extraLinks],
       }
       for (const [key, value] of [['created', row.created_at], ['updated', row.updated_at]] as const) {
-        if (evaluateTemporal({ temporal_semantics: 'represented', temporal_evidence: 'Metadata timestamp syntax check', start_time: value, end_time: value }).ready) item.properties[key] = value
+        if (evaluateTemporal({ temporal_semantics: 'represented', temporal_evidence: 'Metadata timestamp syntax check', start_time: value, end_time: value }).ready) item.properties[key] = utcInstant(value)
       }
     }
     for (const document of [collection, item]) {

@@ -1,18 +1,15 @@
 # Phase 0 decision record
 
-**Status:** Implementation decision for review; effective when PR merged
+**Status:** Ratified by Phase 0 merge (#433); internal Phase 1 consumer added
 **Decision date:** 2026-09-11
-**Last reviewed:** 2026-09-15
-**Revisit when:** Phase 1 adds a policy consumer, Phase 2 exposes metadata,
+**Last reviewed:** 2026-09-16
+**Revisit when:** Phase 2 exposes metadata,
 or operator permissions, extension ownership, or vocabulary requirements change.
 **Scope:** Phase 0 step 7 — public-profile selection and permissions,
 node-owned extensions, and node-local vocabulary declarations (issue #428).
 
-These are **chosen defaults submitted for maintainer approval**, not a claim
-that maintainers have already ratified them. The PR may mark step 7's decision
-record and executable input-contract work complete, **ratification pending
-merge**. Merge ratifies this policy; it does not complete the other Phase 0
-steps or authorize public exposure. This record resolves the proposed decisions
+These defaults were ratified by the maintainer merge of PR #433. That merge
+does not authorize public exposure. This record resolves the proposed decisions
 in the [metadata design](README.md#node-owned-extensions), including its
 [private-profile](README.md#node-profile-and-publication-policy) and
 [vocabulary](README.md#node-local-vocabularies) sections. It does not amend the
@@ -20,10 +17,9 @@ federation handshake, feed, signing, or native wire protocol.
 
 ## 1. Authorization and approval evidence
 
-The executable policy module currently has no production consumers. It is a
-tested specification of input contracts, not deployed enforcement. The first
-Phase 1 consumer must import these contracts and add integration tests covering
-unapproved fields, owner identity, scope, revocation, and unknown fields. Before
+The internal Phase 1 projection imports these contracts and exercises optional
+reviewed inputs with fixtures, including owner/scope, withdrawal and unknown
+fields. It is not a deployed publication or authorization surface. Before
 Phase 2 exposes richer metadata, route tests must also prove authenticated
 approval provenance and the cache/revocation bounds below. Do not duplicate
 the rules in a serializer and rely on the isolated contract tests to catch drift.
