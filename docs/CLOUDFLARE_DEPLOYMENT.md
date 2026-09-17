@@ -127,7 +127,13 @@ For a manual deploy from a local build:
 ```bash
 npm install
 npm run build
-npx wrangler pages deploy dist --project-name ayni-vr
+npx wrangler pages deploy dist --project-name ayni-vr --branch production
 ```
+
+The `--branch production` is not decoration. A direct-upload project files the
+deployment under `production` only when that is the branch it is told; without
+the flag wrangler sends the local git branch and the deploy lands as a
+**Preview** — visible at its own `*.pages.dev` URL, attached to no custom
+domain, and easy to mistake for a successful production release.
 
 For Git-connected Pages, set the same build command and output directory in the Cloudflare dashboard and deploy from the selected branch.
