@@ -195,6 +195,14 @@ export function classifyXrDevice(
  * exactly "an Android device that is not a headset". Meta's browser is
  * excluded by name as belt-and-braces in case a build ever drops the
  * model name from its UA.
+ *
+ * The list is the one weakness of a UA test: an Android-based headset
+ * nobody has named yet (Vive Focus, an XR-glasses puck) reads as a
+ * handheld. That is why nothing *correctness-critical* keys off this
+ * answer alone — the scale paths refuse any source that cannot carry a
+ * thumbstick regardless of device (`thumbstickAxisY` in
+ * `vrInteraction`), so a wrong classification costs the prettier
+ * gesture set rather than the globe's size.
  */
 export function isHandheldArUserAgent(ua: string): boolean {
   if (/OculusBrowser|Oculus/i.test(ua)) return false

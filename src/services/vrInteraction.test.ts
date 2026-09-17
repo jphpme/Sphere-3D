@@ -4,6 +4,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import {
   emitVrInteraction,
+  thumbstickAxisY,
   __resetVrInteractionThrottleForTests,
   VR_INTERACTION_MAX_PER_MINUTE,
 } from './vrInteraction'
@@ -132,5 +133,48 @@ describe('emitVrInteraction — per-gesture throttle', () => {
     )
     expect(hudEvents).toHaveLength(VR_INTERACTION_MAX_PER_MINUTE + 1)
     nowSpy.mockRestore()
+  })
+})
+
+describe('thumbstickAxisY — which sources may drive the zoom', () => {
+  const controller = (axes: number[], withGamepad = true) => ({
+    targetRayMode: 'tracked-pointer',
+    gamepad: withGamepad ? { axes } : null,
+  })
+
+  it('reads axes[3] from a controller, falling back to axes[1]', () => {
+    expect(thumbstickAxisY(controller([0, 0, 0, -0.8]))).toBe(-0.8)
+    // A pad that reports only the touchpad pair still works.
+    expect(thumbstickAxisY(controller([0, 0.7]))).toBe(0.7)
+  })
+
+  it('refuses a screen source whose gamepad carries the touch position', () => {
+    // The Chrome-on-Android shape: axes are the finger's x/y. Reading
+    // them as a stick is what resized the globe on every press.
+    expect(
+      thumbstickAxisY({ targetRayMode: 'screen', gamepad: { axes: [0.4, 0.9] } }),
+    ).toBeNull()
+  })
+
+  it('refuses transient-pointer and gaze sources', () => {
+    expect(
+      thumbstickAxisY({ targetRayMode: 'transient-pointer', gamepad: { axes: [0, 1] } }),
+    ).toBeNull()
+    expect(
+      thumbstickAxisY({ targetRayMode: 'gaze', gamepad: { axes: [0, 1] } }),
+    ).toBeNull()
+  })
+
+  it('is null for a missing source, a missing gamepad, and a non-finite axis', () => {
+    expect(thumbstickAxisY(null)).toBeNull()
+    expect(thumbstickAxisY(undefined)).toBeNull()
+    expect(thumbstickAxisY(controller([0, 0.5], false))).toBeNull()
+    expect(thumbstickAxisY({ targetRayMode: 'tracked-pointer' })).toBeNull()
+    // NaN used to slip past the deadzone check (Math.abs(NaN) <= x is false).
+    expect(thumbstickAxisY(controller([0, 0, 0, Number.NaN]))).toBeNull()
+  })
+
+  it('returns the raw reading — the deadzone stays in the caller', () => {
+    expect(thumbstickAxisY(controller([0, 0, 0, 0.05]))).toBe(0.05)
   })
 })

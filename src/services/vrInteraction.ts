@@ -111,6 +111,48 @@ const THUMBSTICK_DEADZONE = 0.15
 const ZOOM_RATE_PER_SECOND = 2.5
 
 /**
+ * Structural slice of `XRInputSource` this module reads for the
+ * thumbstick. Deliberately minimal so the rule below is unit-testable
+ * with no XR session — the same session-like seam `vrCapability` takes.
+ */
+export interface XRInputSourceLike {
+  readonly targetRayMode?: string
+  readonly gamepad?: { readonly axes: ArrayLike<number> } | null
+}
+
+/**
+ * Thumbstick Y deflection for one stashed input source, or `null` when
+ * that source cannot carry a stick at all.
+ *
+ * Read this instead of `source.gamepad` directly. Only a
+ * `tracked-pointer` source describes a held controller; a screen,
+ * transient-pointer or gaze source either has no gamepad or — Chrome on
+ * Android — a gamepad whose axes ARE the touch position. Taking the
+ * latter for a stick is what made "any press" resize the globe: the
+ * finger's Y arrived as `axes[1]`, and the zoom path applied it on
+ * every contact, including during the placement height step.
+ *
+ * A capability test, deliberately not a device test. The coarser
+ * `isScreenInput` gate above it stands a whole session down on a
+ * classification that is right for today's phones; this one holds for
+ * any source, on any device, whatever that classification said.
+ */
+export function thumbstickAxisY(
+  source: XRInputSourceLike | null | undefined,
+): number | null {
+  if (!source || source.targetRayMode !== 'tracked-pointer') return null
+  const gamepad = source.gamepad
+  if (!gamepad) return null
+  // Each Quest controller maps axes [2, 3] to the thumbstick (axes
+  // [0, 1] are the touchpad, which the Quest doesn't have), hence the
+  // fallback. A non-finite reading is rejected rather than clamped:
+  // `Math.abs(NaN) <= THUMBSTICK_DEADZONE` is false, so a NaN axis used
+  // to slip past the deadzone check rather than being caught by it.
+  const y = gamepad.axes[3] ?? gamepad.axes[1] ?? 0
+  return Number.isFinite(y) ? y : null
+}
+
+/**
  * Smallest hand separation a two-hand gesture may start from, in metres.
  *
  * The pinch applies `currentDistance / startDistance` to the globe's
@@ -1622,22 +1664,22 @@ export function createVrInteraction(
     // the latter can interleave transient-pointer / gaze sources
     // that throw off index-based lookups.
     //
-    // Handheld AR never reaches this path at all. Chrome on Android
-    // hands the screen-tap input source a gamepad whose axes carry the
-    // TOUCH POSITION, so the `axes[1]` fallback below read the finger's
-    // Y as a stick push and resized the globe on every contact. The
-    // phone's only sizing control is the DOM zoom slider, and its
-    // browse panel scrolls by drag (browseDrag), not by an axis.
+    // Two gates, coarse then fine. The session gate stands a handheld
+    // down entirely — its only sizing control is the DOM zoom slider and
+    // its browse panel scrolls by drag (browseDrag), not by an axis —
+    // and `thumbstickAxisY` then refuses any individual source that
+    // cannot carry a stick, which is the part that cannot be fooled by a
+    // device classification. Chrome on Android hands the screen-tap
+    // input source a gamepad whose axes carry the TOUCH POSITION; read
+    // as a thumbstick it resized the globe on every press.
     if (ctx.isScreenInput?.()) return
     const session = ctx.renderer.xr.getSession()
     if (!session) return
     let zoomAxis = 0
     let scrollAxis = 0
     for (let i = 0; i < 2; i++) {
-      const source = inputSources[i]
-      const gp = source?.gamepad
-      if (!gp) continue
-      const y = gp.axes[3] ?? gp.axes[1] ?? 0
+      const y = thumbstickAxisY(inputSources[i])
+      if (y === null) continue
       if (Math.abs(y) <= THUMBSTICK_DEADZONE) continue
       // When this controller's ray is on the browse panel, redirect
       // its Y axis to scroll instead of zoom.
