@@ -478,6 +478,34 @@ async function streamResponse(
     { returnRawResponse: true },
   )) as Response
 
+  // A failed upstream arrives as a Response, not a throw: with
+  // `returnRawResponse` Workers AI hands back its own error envelope — a
+  // 4xx/5xx body that is not SSE at all — and the transformer below skips
+  // every line of it and closes an *empty* stream. The client cannot tell
+  // that from a model that answered nothing: it retries twice, falls back
+  // to the local engine, and shows "AI service unavailable — check LLM
+  // settings", which is how an exhausted neuron budget was being
+  // reported. Surface it as the same typed failure the non-streaming
+  // paths already produce (see the catch below).
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '')
+    if (isWorkersAiQuotaError(detail)) {
+      return new Response(
+        JSON.stringify({ error: { message: detail.slice(0, 300), type: 'quota_exhausted', code: 4006 } }),
+        { status: 503, headers: { ...cors, 'Content-Type': 'application/json' } },
+      )
+    }
+    return new Response(
+      JSON.stringify({
+        error: {
+          message: detail.slice(0, 300) || 'Workers AI request failed',
+          type: 'server_error',
+        },
+      }),
+      { status: 502, headers: { ...cors, 'Content-Type': 'application/json' } },
+    )
+  }
+
   if (!response.body) {
     return new Response(JSON.stringify({ error: 'No response from AI' }), {
       status: 502,

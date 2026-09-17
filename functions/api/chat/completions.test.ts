@@ -107,3 +107,72 @@ describe('POST /api/chat/completions — tool shim envelope handling', () => {
     expect(sse).toContain('"finish_reason":"tool_calls"')
   })
 })
+
+describe('POST /api/chat/completions — upstream failures on the streaming path', () => {
+  // `returnRawResponse: true` means a failed Workers AI call comes back as a
+  // Response rather than a throw. Before this guard the transformer read that
+  // error body as if it were SSE, skipped every line of it, and closed an empty
+  // stream — which the client rendered as "the model said nothing": two
+  // retries, the local engine, and a "check LLM settings" banner. On an
+  // exhausted neuron budget that is the wrong story to tell an operator.
+  function plainBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      model: 'llama-3.2-3b',
+      stream: true,
+      messages: [{ role: 'user', content: 'hi' }],
+      ...overrides,
+    }
+  }
+
+  it('turns an exhausted neuron budget into the typed 503 the SPA degrades on', async () => {
+    const run = vi.fn(async () => new Response(
+      JSON.stringify({
+        error: '4006: you have used up your daily free allocation of 10,000 neurons',
+      }),
+      { status: 429 },
+    ))
+
+    const res = await onRequestPost(ctx({ body: plainBody(), run }))
+
+    expect(res.status).toBe(503)
+    const json = await res.json() as { error: { type: string; code: number; message: string } }
+    expect(json.error.type).toBe('quota_exhausted')
+    expect(json.error.code).toBe(4006)
+    expect(json.error.message).toContain('4006')
+  })
+
+  it('reports any other upstream failure as a 502, with what the upstream said', async () => {
+    // Deliberately not a quota signal: the classifier is conservative about
+    // load-shedding, which is a wait-for-the-incident answer, not an upgrade one.
+    const run = vi.fn(async () => new Response(
+      'Capacity temporarily exceeded for this model',
+      { status: 503 },
+    ))
+
+    const res = await onRequestPost(ctx({ body: plainBody(), run }))
+
+    expect(res.status).toBe(502)
+    const json = await res.json() as { error: { type: string; message: string } }
+    expect(json.error.type).toBe('server_error')
+    expect(json.error.message).toContain('Capacity temporarily exceeded')
+  })
+
+  it('leaves a healthy raw stream alone', async () => {
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(
+          'data: {"response":"still streaming"}\n\ndata: [DONE]\n\n',
+        ))
+        controller.close()
+      },
+    })
+    const run = vi.fn(async () => new Response(stream))
+
+    const res = await onRequestPost(ctx({ body: plainBody(), run }))
+    const text = await res.text()
+
+    expect(res.status).toBe(200)
+    expect(text).toContain('"content":"still streaming"')
+    expect(text).toContain('data: [DONE]')
+  })
+})
