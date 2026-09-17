@@ -30,6 +30,18 @@ work.
   doctype, `// swift-tools-version:`). Re-running it is safe: it repairs a wrong header rather than
   stacking a second one on top.
 
+  The check reads your working tree and is byte-exact: a
+  `// SPDX-License-Identifier:` line that ends in CRLF does not match, and
+  the file is reported as having no header at all. Text files are
+  therefore pinned to LF by the first rule in `.gitattributes`
+  (`* text=auto eol=lf`), which overrides the `core.autocrlf=true` that
+  Git for Windows sets in its system config and would otherwise check
+  text files out as CRLF. Inherited a tree that predates the rule? Run
+  `git add --renormalize -u` — it refreshes the index without changing
+  content, so `git diff --cached` stays empty. Do not use
+  `check:license --fix` for that: it cannot see a CRLF header and would
+  add a second one above it.
+
   The year may widen (`2026-2027`) but the holder is pinned. `The Zyra Project` is the copyright holder;
   `CITATION.cff` separately records who to cite, and the two are deliberately different fields. Changing
   the holder is one edit to the `COPYRIGHT` constant in `scripts/check-license-headers.ts` plus a

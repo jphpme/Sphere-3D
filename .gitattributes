@@ -1,3 +1,19 @@
+# --- Line endings ----------------------------------------------------
+# Every text file is stored AND checked out with LF. Git for Windows sets
+# `core.autocrlf=true` in its system config, so without this rule a
+# Windows clone writes CRLF into the worktree — and two things here read
+# those files as broken. `check:license` splits on '\n' and compares the
+# header line exactly, so a CRLF `// SPDX…` line reads as "no SPDX
+# header" (it failed on four files that way). And a worktree carrying two
+# ending styles leaves files looking modified to `git status` while
+# `git diff` stays empty, because the diff normalises and the stat cache
+# does not.
+#
+# `text=auto` keeps git's binary detection, so images, video and every
+# LFS path below are untouched, and the specific rules further down still
+# win over this one — which is why it comes first.
+* text=auto eol=lf
+
 *.webm filter=lfs diff=lfs merge=lfs -text
 *.jpg filter=lfs diff=lfs merge=lfs -text
 *.jpeg filter=lfs diff=lfs merge=lfs -text

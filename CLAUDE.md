@@ -3,6 +3,20 @@
 ## Git
 
 - All commits must be DCO signed-off. Use `git commit -s` (or `--signoff`) on every commit.
+- **Text files are LF on every platform**, pinned by the first rule in
+  `.gitattributes` (`* text=auto eol=lf`) rather than left to a
+  developer's `core.autocrlf`. Git for Windows sets that to `true` in
+  its *system* config, so a clone there checks text files out as CRLF —
+  and two things here read such a tree as broken. `check:license` splits
+  on `\n` and compares the header line byte-for-byte, so a CRLF
+  `// SPDX…` line reads as "no SPDX header" (it failed on four files
+  exactly that way). And a worktree carrying two ending styles leaves
+  files looking modified to `git status` while `git diff` stays empty,
+  because the diff normalises and the index's stat cache does not.
+  Inherited a tree like that? `git add --renormalize -u` rewrites the
+  index without touching content — confirm `git diff --cached` is empty
+  afterwards. Never reach for `check:license --fix` as the remedy: it
+  cannot see a CRLF header and would stack a second one above it.
 
 ---
 
