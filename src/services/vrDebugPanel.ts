@@ -20,16 +20,25 @@
  * actually raises, in the order they are asked:
  *
  *   - `class` / `src` / `pad` / `domOv` — what the session and the
- *     device reported, which is what decides every branch downstream.
- *   - `touch` / `layer` — whether the AR touch layer mounted (the one
- *     thing that makes one finger move the globe).
- *   - `img` / `load` — whether a dataset texture reached the scene and
- *     whether the loading scene is still up, which is what "there are two
- *     spheres" turns out to be.
+ *     device reported. `pad=y` on a phone is normal and not a
+ *     controller: Chrome hands the screen-tap source a gamepad whose
+ *     axes are the touch position, which is why no gate keys off
+ *     gamepad presence any more.
+ *   - `hand` / `rotate` / `zoomUi` — the handheld-versus-headset
+ *     decision the session keys off, whether the one-finger rotate layer
+ *     mounted on it, and whether the zoom slider did.
+ *   - `img` / `load` / `anchor` / `place` — whether a dataset texture
+ *     reached the scene, whether the loading scene is still up (which is
+ *     what "there are two spheres" turns out to be), whether a placement
+ *     anchor is tracking, and which placement step is active.
  *   - `cat` / `panels` — whether the catalog is empty (nothing to pick)
  *     and how many globes the 2D layout put in the scene.
- *   - `scale` — the globe's size, which is the number the pinch keeps
- *     driving to its maximum.
+ *   - `scale` — the globe's size, which the DOM slider drives and
+ *     nothing else is allowed to.
+ *   - `loadT` / `ready` / `fade` / `shown` — the loading handover's own
+ *     clock in loop seconds and which of its steps have run. A splash
+ *     that never hands over is the one failure with no other symptom on
+ *     the glass.
  */
 
 import type * as THREE from 'three'

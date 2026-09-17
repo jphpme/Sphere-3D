@@ -7,7 +7,10 @@ Quest, identifies the gaps that block other WebXR-capable devices
 from being usable in practice, and proposes phased work to close
 those gaps.
 
-Status: **v5 — Phase 1 shipped.** PR 1 (#94: input archetype +
+Status: **v6 — Phase 1 shipped, then corrected on hardware.**
+(2026-09: the phone's input path was split from the headset's and its
+touch is rotation-only now — see §Phase 1's post-ship corrections.)
+PR 1 (#94: input archetype +
 analytics scaffolding), PR 2 + PR 3 (#96: phone-AR UX +
 `local-floor` → `local` fallback) merged. One on-device confirmation
 from a recent Android phone — drag-rotate + zoom slider + HUD ✕
@@ -230,6 +233,43 @@ existing `quest` / `quest-pro` / `vision-pro` / `pcvr` /
 positional layout in [`ANALYTICS_QUERIES.md`](ANALYTICS_QUERIES.md),
 Grafana panel in `grafana/dashboards/product-health.json` all
 updated.
+
+**Post-ship corrections (on-device pass, 2026-09).** Three claims in
+the table above did not survive a real phone, and the code they
+described has changed:
+
+- **The `vrInteraction.ts` "no change" row was wrong.** Chrome on
+  Android gives the *screen-tap* input source a gamepad too, whose axes
+  are the touch position — so `updateThumbstickZoom`'s
+  `axes[3] ?? axes[1]` fallback read a finger's Y as a stick push and
+  resized the globe on every press, mid-placement included. Two gates
+  stand in front of it now: a session-level handheld/headset decision
+  taken once from the user agent (`isHandheldArUserAgent`), and a
+  capability rule that refuses any source which is not a
+  `tracked-pointer` (`thumbstickAxisY`). The `inputClass` machinery
+  in the first row is telemetry only: Android AR has been observed
+  resolving to `transient` rather than `screen`, so nothing
+  user-facing keys off it.
+- **The phone's manipulation contract is rotate-only.** One finger
+  spins the *placed* globe about its own axis and a second finger is
+  ignored outright (`src/ui/vrRotateTouch.ts`). The one-finger-move /
+  two-finger-pinch / two-finger-twist layer this phase described was
+  removed after every stray contact turned out to be doing something to
+  the globe. Sizing is the DOM slider, and only the slider.
+- **The height step is device tilt on every device.** The DOM layer
+  kept a vertical drag for a while, but tilt is the phone's own aim and
+  already worked, so the drag, its maths (`dragToHeight`) and the
+  `VrPlacementHandle` setters behind it are gone. That layer is now
+  three buttons, a hint, and the `beforexrselect` interception that
+  keeps a stray tap from confirming a placement.
+
+The first verification bullet also read better than the hardware
+behaved: the loading scene could hold the globe hidden for a whole
+session, so "place" acted on an invisible globe, and the two-sphere
+report was the splash plus the atmosphere shell of a hidden globe. The
+handover runs from the render loop now, the Earth stack hides as one
+group (`vrScene.setEarthVisible`), and the placement chrome appears
+only after it has handed over.
 
 ### Phase 2 — Vision Pro and hand-tracking devices
 
