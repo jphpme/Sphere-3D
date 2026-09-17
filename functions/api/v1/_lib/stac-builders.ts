@@ -110,6 +110,7 @@ export function buildStacCatalog(node: StacNodeContext, resolvers: StacResolvers
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(identity.node_id) || !identity.display_name.trim()) return { ok: false, reasons: ['node_identity_invalid'] }
   try {
     const root = resolvers.resource('catalog', identity.node_id)
+    if (node.customFields?.some(field => field.scope !== 'Catalog')) return { ok: false, reasons: ['custom_field_scope_invalid'] }
     const links = [link('self', root), link('root', root)]
     for (const product of children) {
       const child = product.collection ?? product.item
@@ -248,12 +249,17 @@ export function buildStacProduct(model: StacDatasetReadModel, node: StacNodeCont
         if (evaluateTemporal({ temporal_semantics: 'represented', temporal_evidence: 'Metadata timestamp syntax check', start_time: value, end_time: value }).ready) item.properties[key] = utcInstant(value)
       }
     }
+    for (const field of model.customFields ?? []) {
+      if (!['Collection', 'Item', 'Asset'].includes(field.scope)) return { ok: false, reasons: ['custom_field_scope_invalid'] }
+      if (field.essential && ((field.scope === 'Collection' && !collection) || (field.scope === 'Item' && !item))) return { ok: false, reasons: ['essential_field_target_missing'] }
+    }
     for (const document of [collection, item]) {
       if (!document) continue
       if (model.vocabularyReferences?.length) {
         const references = stacVocabularyReferences(model.vocabularyReferences, node)
         if (!references.ok) return { ok: false, reasons: references.reasons }
         for (const reference of references.value) {
+          if (reference.ownerNodeId !== row.origin_node) return { ok: false, reasons: ['vocabulary_origin_mismatch'] }
           const resolved = verifiedAsset(reference.vocabularyUri, 'vocabulary', resolvers)
           if (!resolved) return { ok: false, reasons: ['vocabulary_resource_unresolved'] }
           document.links.push(link('related', resolved.href, resolved.type))

@@ -6,6 +6,18 @@ import { asD1, seedFixtures } from './test-helpers'
 import { readStacModel } from './stac-read-model'
 
 describe('canonical STAC read model', () => {
+  it('classifies even disabled overwrite workflows from their persisted ownership', async () => {
+    const sqlite = seedFixtures({ count: 1 })
+    try {
+      sqlite.exec(`INSERT INTO publishers (id,email,display_name,role,status,created_at)
+        VALUES ('PUB','publisher@example.test','Publisher','service','active','2026-01-01');
+        INSERT INTO workflows (id,publisher_id,name,pipeline_json,metadata_template,schedule,target_dataset_id,created_at,updated_at)
+        SELECT 'WF','PUB','Recurring','{}','{}','P1D',id,'2026-01-01','2026-01-01' FROM datasets;`)
+      const result = await readStacModel(asD1(sqlite))
+      expect(result.datasets[0].publicationKind).toBe('workflow')
+    } finally { sqlite.close() }
+  })
+
   it('retains decorations, media and delivered/source digests independently', async () => {
     const sqlite = seedFixtures({ count: 1 })
     try {

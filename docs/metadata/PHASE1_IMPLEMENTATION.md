@@ -1,6 +1,6 @@
 # Phase 1: Pure STAC Projection
 
-**Status:** In progress; internal projection only
+**Status:** Implemented; internal projection only, no public exposure
 **Last reviewed:** 2026-09-16
 **Revisit when:** Phase 1 contracts change or Phase 2 begins public exposure.
 
@@ -12,7 +12,7 @@ This implements the five numbered steps in [the metadata plan](README.md#phase-1
 | 2 | Canonical D1 read model and separate node context | Implemented |
 | 3 | Deterministic resource and mapping builders | Implemented |
 | 4 | Local Terraviz extension schema and validation | Implemented |
-| 5 | Table-driven eligibility and mapping coverage | Pending |
+| 5 | Table-driven eligibility and mapping coverage | Implemented |
 
 No STAC routes, schema URLs, discovery links, native public fields, profile
 publication storage/UI, or frame/revision history are introduced. Identity-only
@@ -50,3 +50,21 @@ The [local schema bundle](schemas/README.md) documents each mapping and its
 scope. Tests validate core Catalog/Collection/Item output and every declared
 extension against pinned offline schema bytes. UTC normalization preserves
 arbitrary fractional-second precision. Schema publication remains Phase 2.
+
+The table-driven tests cover public visibility, classification, geometry and
+time eligibility, SPDX/LicenseRef handling, resolved image/MP4/HLS and opaque
+R2/Stream/Vimeo/peer references, renditions, data-luma fallback, mirror origins
+and hosting, deterministic IDs/order, selected-field withdrawal, namespace and
+scope failures, optional versus essential omission, aggregate limits, pinned
+schema execution, and vocabulary ownership. Native probing annotations and
+frame enumeration remain native-only: this phase does not invent frame Items
+or promote unvalidated legacy probing metadata into measurement claims.
+
+Validation: the Phase 1 slice and `npm run type-check` pass. The full Windows
+suite reported 8460 passing, 7 failing and 3 skipped tests: five known path
+failures, an unrelated privacy-page drift check, and a timeline timeout that
+passed on isolated rerun. No unrelated files were changed to silence those
+failures. PySTAC validation has not been run; official JSON Schema validation
+is offline and automated. Public route traversal/reachability, authenticated
+policy provenance, cache invalidation, and publication notices remain Phase 2
+gates, not claims made by these pure builders.

@@ -15,6 +15,35 @@ function source(bytes: Uint8Array, uri = TERRAVIZ_SCHEMA): StacSchemaSource {
 }
 
 describe('pinned local extension schemas', () => {
+  it.each(['unknown-keyword', 'unknown-format', 'bad-pointer', 'nested-id', 'reference-limit', 'depth-limit'])('rejects %s schema input', async mode => {
+    let body: Record<string, unknown> = {}
+    if (mode === 'unknown-keyword') body = { inventedKeyword: true }
+    if (mode === 'unknown-format') body = { type: 'string', format: 'unreviewed-format' }
+    if (mode === 'bad-pointer') body = { $ref: '#/definitions/missing' }
+    if (mode === 'nested-id') body = { properties: { nested: { $id: 'https://nested.example/schema.json' } } }
+    if (mode === 'reference-limit') body = { definitions: { text: { type: 'string' } }, allOf: Array.from({ length: 33 }, () => ({ $ref: '#/definitions/text' })) }
+    if (mode === 'depth-limit') {
+      const definitions: Record<string, unknown> = { end: { type: 'string' } }
+      for (let index = 9; index >= 0; index--) definitions[`depth${index}`] = { $ref: `#/definitions/${index === 9 ? 'end' : `depth${index + 1}`}` }
+      body = { definitions, $ref: '#/definitions/depth0' }
+    }
+    const schema = source(new TextEncoder().encode(JSON.stringify({ $id: TERRAVIZ_SCHEMA, $schema: 'http://json-schema.org/draft-07/schema#', ...body })))
+    await expect(createStacSchemaValidator([schema])).rejects.toThrow()
+  })
+
+  it('resolves local external refs and fails digest mismatches without fetching', async () => {
+    const dependencyUri = 'https://lab.example/definition.json'
+    const dependency = source(new TextEncoder().encode(JSON.stringify({ $id: dependencyUri, $schema: 'http://json-schema.org/draft-07/schema#', type: 'object' })), dependencyUri)
+    const root = source(new TextEncoder().encode(JSON.stringify({ $id: TERRAVIZ_SCHEMA, $schema: 'http://json-schema.org/draft-07/schema#', $ref: dependencyUri })))
+    const validator = await createStacSchemaValidator([root, dependency])
+    const { node, resolvers } = await stacFixture()
+    const catalog = buildStacCatalog(node, resolvers)
+    if (!catalog.ok) throw new Error(catalog.reasons.join(','))
+    expect(validator.validate(root.uri, root.sha256, catalog.value)).toBe('valid')
+    expect(validator.validate(root.uri, 'sha256:' + '0'.repeat(64), catalog.value)).toBe('invalid')
+    expect(validator.validate('https://absent.example/schema.json', root.sha256, catalog.value)).toBe('unavailable')
+  })
+
   it('validates the emitted Terraviz fields and rejects unknown fields', async () => {
     const schema = source(readFileSync('docs/metadata/schemas/terraviz-v1.0.0.json'))
     const validator = await createStacSchemaValidator([schema])

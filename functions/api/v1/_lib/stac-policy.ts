@@ -59,9 +59,13 @@ export function applyStacPolicy(
   const scope = document.type === 'Feature' ? 'Item' : document.type
   const registry = validateExtensionRegistry(node.extensions ?? [])
   if (!registry.ok) return { ok: false, reasons: registry.reasons }
+  for (const { assetKey, ...input } of customFields) {
+    const decision = decideExtensionField(input, node.extensions ?? [])
+    if (decision.decision === 'withhold') return { ok: false, reasons: decision.reasons }
+  }
   const staged = structuredClone(document)
   const fields = staged.type === 'Feature' ? staged.properties : staged
-  const candidates = customFields.filter(field => field.scope === scope || field.scope === 'Asset')
+  const candidates = customFields.filter(field => field.scope === scope || (field.scope === 'Asset' && staged.type !== 'Catalog' && staged.assets))
   const grouped = new Map<string, { essential: boolean; targets: { target: Record<string, unknown>; key: string }[]; payload: unknown[] }>()
   for (const field of candidates) {
     const { assetKey, ...input } = field
@@ -74,7 +78,7 @@ export function applyStacPolicy(
       continue
     }
     const target = field.scope === 'Asset'
-      ? staged.type !== 'Catalog' && assetKey ? staged.assets?.[assetKey] : undefined : fields
+      ? staged.type !== 'Catalog' && assetKey && staged.assets && Object.hasOwn(staged.assets, assetKey) ? staged.assets[assetKey] : undefined : fields
     if (!target || (field.scope !== 'Asset' && assetKey !== undefined) || Object.hasOwn(target, field.key)) return { ok: false, reasons: ['custom_field_target_invalid'] }
     const registration = registry.value.find(entry => entry.schemaUri === decision.schemaUri)!
     let group = grouped.get(registration.schemaUri)
@@ -87,6 +91,7 @@ export function applyStacPolicy(
     group.targets.push({ target: record, key: field.key })
   }
   for (const uri of grouped.keys()) staged.stac_extensions.push(uri)
+  staged.stac_extensions.sort()
   for (const [uri, group] of grouped) {
     const registration = registry.value.find(entry => entry.schemaUri === uri)!
     const status = validator?.validate(uri, registration.schemaSha256, staged) ?? 'unavailable'
