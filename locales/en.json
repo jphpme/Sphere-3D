@@ -1821,6 +1821,7 @@
   "publisher.workflows.template.ftpFrames": "FTP frames → SOS MP4 (NOAA weekly drought)",
   "publisher.workflows.template.gefsCycle": "Model cycle → SOS MP4 (NOAA GEFS forecast)",
   "publisher.workflows.template.httpFrames": "HTTP frames → SOS MP4",
+  "timeline.aria": "Dataset timeline",
   "tools.actions.analyze": "Analyze…",
   "tools.actions.clear": "Clear markers & highlights",
   "tools.actions.credits": "Credits…",

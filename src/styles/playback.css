@@ -24,6 +24,28 @@
     border-color: var(--accent-o40) !important;
 }
 
+/* --- Date track (2D) ---
+ * The strip drawn by src/ui/timelineTrackUI.ts, inserted into
+ * #playback-controls above the scrubber. Height comes from the module
+ * (the canvas is laid out at the panel's width); everything here is the
+ * affordance around it. */
+.timeline-track {
+    position: relative;
+    margin-bottom: 0.35rem;
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+}
+
+.timeline-track canvas {
+    display: block;
+    width: 100%;
+}
+
+.timeline-track:focus-visible {
+    outline: 2px solid var(--accent-o70);
+    outline-offset: 2px;
+}
+
 #time-label {
     font-size: var(--component-playback-time-label-font-size);
     font-weight: var(--component-playback-time-label-font-weight);

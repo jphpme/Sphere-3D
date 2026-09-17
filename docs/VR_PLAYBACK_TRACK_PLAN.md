@@ -1,7 +1,7 @@
 # VR / AR Playback Track and Dates
 
-Status: **shipped for VR/AR.** Design record for the in-VR date track —
-the timeline strip that shows *when* the frame on the globe is, and
+Status: **shipped for VR/AR and the 2D transport.** Design record for the
+date track — the strip that shows *when* the frame on the globe is, and
 lets the user move through it. Companion to
 [`REALTIME_OVERLAY_PLAN.md`](REALTIME_OVERLAY_PLAN.md) (which owns the
 overlay rendering) and [`VR_INVESTIGATION_PLAN.md`](VR_INVESTIGATION_PLAN.md)
@@ -27,16 +27,30 @@ the R2 bucket the MPD is pulled from.
 |---|---|
 | The time axis, parsed and mapped | `src/services/dsaTimeline.ts` |
 | Fetch once, remember success and failure | `src/services/dsaTimelineCache.ts` |
-| The strip | `src/services/vrTimelineTrack.ts` |
+| The strip itself — geometry, labels, drawing | `src/services/timelineTrackCanvas.ts` |
+| The VR half: plane, texture, UV hits | `src/services/vrTimelineTrack.ts` |
+| The 2D half: panel canvas, pointer, keyboard, ARIA | `src/ui/timelineTrackUI.ts` |
 | Resolved into the catalog row | `Dataset.timelineLink` (`dataService`) |
 | Polled, drawn, positioned, torn down | `vrSession` (`getDatasetTimeline`, `seekToTimelineDate`) |
-| Ray → scrub or tap → seek | `vrInteraction` (`{ kind: 'timeline' }`, `SCRUB_SEEK_INTERVAL_MS`) |
-| The host's answers | `main.ts` (`this.dsaTimelines`) |
+| Ray → scrub or tap → seek | `vrInteraction` (`{ kind: 'timeline' }`) |
+| The host's answers, for both surfaces | `main.ts` (`timelineSnapshot`, `seekTimelineDate`) |
 
-Not shipped, and deliberately: a 2D strip (the mapping module is
-UI-agnostic, so it is a second consumer rather than a second
-implementation), seeking backwards in a `type="dynamic"` manifest, and
-anything the DSA declares beyond the time axis.
+The two surfaces share the renderer deliberately: one implementation of
+"where does a tick fall, what does a shaded span mean, where is the
+playhead" cannot disagree with itself, and the geometry is proportional so
+the same code draws a 1200 x 220 headset strip and a 240 x 56 panel
+canvas. The VR drawing did not move when the renderer was extracted —
+`timelineTrackCanvas.test.ts` pins its original pixel numbers.
+
+**Dates in the 2D app.** The panel's time label now fills in for real-time
+and forecast streams, which it never did: they carry no catalog
+`startTime`/`endTime`, so the old path hid it. It borrows the track's UTC
+formatter, because the axis is declared in UTC and two surfaces
+disagreeing about one instant by a timezone offset is worse than either
+choice on its own.
+
+Not shipped, and deliberately: seeking backwards in a `type="dynamic"`
+manifest, and anything the DSA declares beyond the time axis.
 
 ## What the data gives us
 
@@ -139,8 +153,9 @@ frame.
 
 ## Verification
 
-- **Unit tests** — 42 across `dsaTimeline.test.ts`,
-  `dsaTimelineCache.test.ts` and `vrTimelineTrack.test.ts`: the parse
+- **Unit tests** — 57 across `dsaTimeline.test.ts`,
+  `dsaTimelineCache.test.ts`, `timelineTrackCanvas.test.ts` and
+  `timelineTrackUI.test.ts`: the parse
   (numeric strings, the deprecated fps alias, a derived cadence, and
   every rejection), the mapping (`last_frame`, mid-frame seeks,
   clamping, the axis round-trip), the availability lookup (binary
@@ -149,5 +164,7 @@ frame.
   failures, concurrent callers sharing it, and null for every miss.
 - **`npm run type-check`** — the repo's whole gate chain — passes.
 - ☐ **On hardware.** A real-time stream in VR should show dates and
-  scrub; a phone should seek on a tap and still rotate on a drag; a
-  dataset with no axis should show no track and no regression.
+  scrub; a phone should seek on a tap and still rotate on a drag; the 2D
+  panel should show the same axis above its scrubber and seek by click,
+  drag and arrow key; a dataset with no axis should show no track and no
+  regression.

@@ -26,7 +26,7 @@ import { createVrTourControls, type VrTourControlsHandle } from './vrTourControl
 import { createVrTourOverlay, type VrTourOverlayHandle } from './vrTourOverlay'
 import { createVrTimeLabel, type VrTimeLabelHandle } from './vrTimeLabel'
 import { createVrTimelineTrack, type VrTimelineTrackHandle } from './vrTimelineTrack'
-import type { DsaAvailabilitySpan } from './dsaTimeline'
+import type { TimelineAvailabilitySpan } from './timelineTrackCanvas'
 import { setVrTourOverlaySink } from '../ui/tourUI'
 import { createVrInteraction, type VrInteractionHandle } from './vrInteraction'
 import { createVrLoading, type VrLoadingHandle } from './vrLoading'
@@ -166,8 +166,11 @@ export interface VrDatasetTimeline {
   readonly currentMs: number
   readonly frameCount: number
   readonly cadenceMs: number
-  /** Sparse provenance spans for the track to shade; a frame outside them is data. */
-  readonly availabilitySpans: readonly DsaAvailabilitySpan[]
+  /** Sparse provenance spans for the track to shade; a frame outside them is data.
+   *  The renderer's own span shape — three fields it draws — rather than the
+   *  DSA's full record, so a second reader of the annotation cannot make the
+   *  drawing depend on a field it never paints. */
+  readonly availabilitySpans: readonly TimelineAvailabilitySpan[]
 }
 
 export interface VrSessionContext {

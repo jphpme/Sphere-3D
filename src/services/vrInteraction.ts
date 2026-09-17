@@ -31,6 +31,7 @@ import type { VrPlacementHandle } from './vrPlacement'
 import type { VrTourControlsAction, VrTourControlsHandle } from './vrTourControls'
 import type { VrTourInteractiveAction, VrTourOverlayHandle } from './vrTourOverlay'
 import type { VrTimelineTrackHandle } from './vrTimelineTrack'
+import { SCRUB_SEEK_INTERVAL_MS } from './timelineTrackCanvas'
 import { MAX_GLOBE_SCALE, MIN_GLOBE_SCALE } from './vrScene'
 import { logger } from '../utils/logger'
 import { emit } from '../analytics'
@@ -628,13 +629,9 @@ export function createVrInteraction(
    * what keeps a handheld from seeking on every rotate across the strip.
    */
   const TIMELINE_TAP_SLOP = 0.02
-  /**
-   * Minimum gap between preview seeks. A seek stalls a DASH decoder, and
-   * the drawn playhead follows the ray every frame regardless, so the
-   * video catches up in ~120 ms steps while the strip stays smooth.
-   */
-  const SCRUB_SEEK_INTERVAL_MS = 120
-  /** `performance.now()` of the last preview seek, for the ration above. */
+  /** `performance.now()` of the last preview seek, rationed by
+   *  `SCRUB_SEEK_INTERVAL_MS` — one constant, shared with the 2D track,
+   *  because it is one decoder problem. */
   let lastScrubSeekAt = 0
   /**
    * Per-controller reference to the globe mesh that was grabbed on

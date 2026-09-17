@@ -51,6 +51,8 @@ import {
 import { createPlaybackSettleWatcher } from './services/playbackSettle'
 import { createDsaTimelineCache, type DsaTimelineCache } from './services/dsaTimelineCache'
 import { dateAtVideoTimeMs, timelineSpanMs, videoTimeForDateMs } from './services/dsaTimeline'
+import { formatPlayheadLabel, type TimelineTrackState } from './services/timelineTrackCanvas'
+import { createTimelineTrackUI, type TimelineTrackUIHandle } from './ui/timelineTrackUI'
 import { registerAnalysisSource } from './services/docentAnalysisTools'
 import { buildHistogram } from './services/datasetStats'
 import { DEFAULT_DISPLAY, type ColorScaleDisplay } from './services/colorScaleDisplay'
@@ -408,6 +410,13 @@ class InteractiveSphere {
    * See `services/dsaTimelineCache.ts`.
    */
   private dsaTimelines: DsaTimelineCache = createDsaTimelineCache()
+
+  /**
+   * The 2D transport's date track. Mounted into `#playback-controls` at
+   * boot, hidden until the primary dataset declares a time axis, and fed
+   * from the same snapshot the headset draws — one axis, two surfaces.
+   */
+  private timelineTrackUI: TimelineTrackUIHandle | null = null
   private loadingHideTimer: ReturnType<typeof setTimeout> | null = null
   private loadGeneration = 0 // guards against concurrent dataset loads
   private tourEngine: TourEngine | null = null
@@ -1670,8 +1679,84 @@ class InteractiveSphere {
     hideAllTourQuestions()
   }
 
+  /**
+   * The primary dataset's declared time axis, or null when it declares
+   * none. One implementation for both surfaces: the VR session asks for it
+   * per XR frame and the 2D track per animation frame, and both get the
+   * same answer from the same cache.
+   *
+   * `prefetch` is idempotent and fire-and-forget, so calling this from a
+   * render loop costs a map lookup. A dataset with no annotation — every
+   * catalog row — and one whose annotation has not arrived answer null
+   * alike, and both surfaces simply draw no track.
+   */
+  private timelineSnapshot(): TimelineTrackState | null {
+    const url = this.appState.currentDataset?.timelineLink
+    if (!url) return null
+    this.dsaTimelines.prefetch(url)
+    const timeline = this.dsaTimelines.get(url)
+    if (!timeline) return null
+    const video = this.hlsService?.video
+    return {
+      startMs: timeline.startMs,
+      // The exclusive end of the axis, derived from frames x cadence
+      // rather than from `timeRange.end`: the declared end is either
+      // exclusive or the last frame's stamp depending on the file, and a
+      // track wants one meaning.
+      endMs: timeline.startMs + timelineSpanMs(timeline),
+      currentMs: video
+        ? dateAtVideoTimeMs(timeline, video.currentTime)
+        : timeline.startMs,
+      frameCount: timeline.frameCount,
+      cadenceMs: timeline.cadenceMs,
+      availabilitySpans: timeline.availability.spans,
+      // The drag state belongs to whoever owns the pointer; the surfaces
+      // add it themselves.
+      scrubbing: false,
+    }
+  }
+
+  /** Seek the primary playback to an instant on that axis. */
+  private seekTimelineDate(epochMs: number): void {
+    const url = this.appState.currentDataset?.timelineLink
+    const timeline = url ? this.dsaTimelines.get(url) : null
+    const video = this.hlsService?.video
+    if (!timeline || !video) return
+    // Mid-frame: the decoder lands inside the frame that represents the
+    // instant instead of on the boundary between two of them.
+    video.currentTime = videoTimeForDateMs(timeline, epochMs)
+  }
+
+  /**
+   * Mount the 2D date track into the transport panel, above the scrubber.
+   * Called once at boot; the strip hides itself until a dataset declares an
+   * axis, so a catalog-only session never sees it.
+   *
+   * Before the scrubber rather than appended: the scrubber is the fine
+   * control for the same axis, and the strip is its context.
+   */
+  private mountTimelineTrack(): void {
+    if (this.timelineTrackUI) return
+    const controls = document.getElementById('playback-controls')
+    const scrubber = document.getElementById('scrubber')
+    if (!controls || !scrubber) return
+    this.timelineTrackUI = createTimelineTrackUI({
+      onSeek: (epochMs) => this.seekTimelineDate(epochMs),
+    })
+    controls.insertBefore(this.timelineTrackUI.element, scrubber)
+  }
+
+  /** Push the axis into the 2D date track, or hide it when there is none. */
+  private updateTimelineTrack(): void {
+    this.timelineTrackUI?.setState(this.timelineSnapshot())
+  }
+
   /** Map the current video playback time to a real-world date and update the time label. */
   private updateVideoTimeLabel(videoTime: number): void {
+    // The track reads the dataset and the playhead itself, so it is fed
+    // before the label's own early returns — a dataset without a catalog
+    // start/end still has an axis.
+    this.updateTimelineTrack()
     const dataset = this.appState.currentDataset
     if (!dataset) {
       this.assertedLabelDate = null
@@ -1695,8 +1780,23 @@ class InteractiveSphere {
       this.assertedLabelDate = trueDate
       this.showTimeLabel(true)
     } else {
-      this.assertedLabelDate = null
-      this.showTimeLabel(false)
+      // No catalog time range. A real-time or forecast stream still knows
+      // its axis — its `.dsa` declares one — so the label fills in where it
+      // used to hide. It borrows the track's formatter, which prints UTC:
+      // the axis is declared in UTC and two surfaces disagreeing about the
+      // same instant by a timezone offset is worse than either choice.
+      const snapshot = this.timelineSnapshot()
+      if (snapshot) {
+        this.appState.timeLabel = formatPlayheadLabel(
+          snapshot.currentMs,
+          snapshot.cadenceMs,
+        )
+        this.assertedLabelDate = new Date(snapshot.currentMs)
+        this.showTimeLabel(true)
+      } else {
+        this.assertedLabelDate = null
+        this.showTimeLabel(false)
+      }
     }
   }
 
@@ -2573,41 +2673,8 @@ class InteractiveSphere {
         const showTime = ds.period ? isSubDailyPeriod(ds.period) : false
         return formatDate(new Date(ds.startTime), showTime)
       },
-      getDatasetTimeline: () => {
-        // The axis lives in the stream's `.dsa`, beside its MPD. Prefetch
-        // is idempotent and fire-and-forget, so calling it from a per-frame
-        // poll costs a map lookup; a dataset with no annotation, or one
-        // whose annotation has not arrived, answers null and shows no track.
-        const url = this.appState.currentDataset?.timelineLink
-        if (!url) return null
-        this.dsaTimelines.prefetch(url)
-        const timeline = this.dsaTimelines.get(url)
-        if (!timeline) return null
-        const video = this.hlsService?.video
-        return {
-          startMs: timeline.startMs,
-          // The exclusive end of the axis, derived from frames x cadence
-          // rather than from `timeRange.end`: the declared end is either
-          // exclusive or the last frame's stamp depending on the file, and
-          // the track wants one meaning.
-          endMs: timeline.startMs + timelineSpanMs(timeline),
-          currentMs: video
-            ? dateAtVideoTimeMs(timeline, video.currentTime)
-            : timeline.startMs,
-          frameCount: timeline.frameCount,
-          cadenceMs: timeline.cadenceMs,
-          availabilitySpans: timeline.availability.spans,
-        }
-      },
-      seekToTimelineDate: (epochMs) => {
-        const url = this.appState.currentDataset?.timelineLink
-        const timeline = url ? this.dsaTimelines.get(url) : null
-        const video = this.hlsService?.video
-        if (!timeline || !video) return
-        // Mid-frame: the decoder lands inside the frame that represents the
-        // instant instead of on the boundary between two of them.
-        video.currentTime = videoTimeForDateMs(timeline, epochMs)
-      },
+      getDatasetTimeline: () => this.timelineSnapshot(),
+      seekToTimelineDate: (epochMs) => this.seekTimelineDate(epochMs),
       hasVideoDataset: () => {
         const ds = this.appState.currentDataset
         return !!ds && dataService.isVideoDataset(ds)
@@ -2729,6 +2796,7 @@ class InteractiveSphere {
   /** Initialize the Orbit chat panel and wire playback positioning observers. */
   private initChat(): void {
     initPlaybackPositioning()
+    this.mountTimelineTrack()
     initChatUI({
       onLoadDataset: (id) => { void this.selectDatasetFromChat(id) },
       onLoadFrame: (id, frameQuery) => { void this.loadFrameFromChat(id, frameQuery) },

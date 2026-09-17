@@ -268,6 +268,7 @@
   "vr.placement.cancel": "Label for the on-screen button shown during globe placement on handheld AR (Android phones/tablets). Tapping it exits placement mode without placing the globe. Keep short.",
   "vr.placement.place": "Label for the primary acceptance button during globe placement on handheld AR (Android phones/tablets). Tapped once to accept the globe's position and again to accept its height. Keep very short.",
   "vr.placement.replace": "Label for the small corner button shown on handheld AR when not placing. Tapping it restarts the two-step globe placement flow. Keep very short.",
+  "timeline.aria": "Accessible name of the 2D playback panel's date track, a canvas a screen reader sees as a slider. It reports the instant it is on through aria-valuetext, so this name only has to say what the control is.",
   "vr.placement.stepHeight": "Hint pill text shown during the second placement step on handheld AR, where tilting the phone raises or lowers the globe. Touch there is rotate-only, so nothing in this string should invite a drag. Keep short — shown in a small pill at the top of the screen.",
   "vr.placement.stepPosition": "Hint pill text shown during the first placement step on handheld AR, where the user aims a reticle at a real surface. Keep short — shown in a small pill at the top of the screen.",
   "vr.zoomSlider.aria": "ARIA label for the in-AR vertical zoom slider on phones. Describes its function for screen readers; not visible text.",
