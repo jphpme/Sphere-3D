@@ -53,3 +53,21 @@ public/luma-check/out/*.mp4 -filter -diff -merge
 # Windows checkout with core.autocrlf=true can't flip it to CRLF.
 # (Upstream moved the snapshot out of `migrations/` to `schema/`.)
 schema/catalog-schema.sql text eol=lf
+
+# Reference images that are plain blobs in history for the same reason
+# the app icons above are, but which no earlier rule covered: two
+# handoff wireframes, the Weblate QR code, and the equirect samples.
+# `*.png` says LFS, so with git-lfs installed the clean filter rewrites
+# them into pointers — `git status` then lists all five as modified on
+# every run while `git diff` shows nothing (the worktree bytes ARE
+# their blobs), and a `git add -A` would silently replace the pictures
+# with pointers no fork without `git lfs pull` could read.
+#
+# Named per path rather than by directory: `poster/assets/qr/` also
+# holds real LFS pointers, and a wildcard there would stop them being
+# smudged on checkout.
+docs/events-tab-handoff/images/01-current-screen-before.png -filter -diff -merge
+docs/events-tab-handoff/images/02-wireframe-directions.png -filter -diff -merge
+poster/assets/qr/weblate.png -filter -diff -merge
+public/assets/equirect-sample.png -filter -diff -merge
+scripts/screenshots/fixtures/equirect-sample.png -filter -diff -merge
