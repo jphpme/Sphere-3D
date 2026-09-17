@@ -230,10 +230,74 @@ export function tickBudgetForWidth(width: number): number {
   return Math.max(2, Math.min(7, Math.round(width / 150)))
 }
 
+/** One label's horizontal extent on its row, in canvas pixels. */
+export interface TimelineLabelBox {
+  /** Position in the row's own order — what the caller draws by. */
+  readonly index: number
+  readonly left: number
+  readonly right: number
+}
+
+/**
+ * Which labels survive on one row, left to right, given a minimum gap.
+ *
+ * The ladder picks a *count*, but a count is not a fit: the labels are
+ * dates whose width changes with the span ("Aug 18" against "Aug 2026"),
+ * the canvas changes with the panel, and a ladder that tops out can still
+ * return more ticks than the budget asked for (a ten-year axis falls
+ * through to its largest step and lands ten labels on a phone). Measuring
+ * and dropping is the only rule that holds for all three at once.
+ *
+ * Greedy from the left, because the first label on a row is the one a
+ * reader anchors on, and because a dropped label costs a tick's *text*
+ * and never its tick line — the marks stay, the axis stays readable, and
+ * the spacing stays even to the eye.
+ *
+ * @param boxes    Label extents, any order; sorted here.
+ * @param minGapPx Clear space to leave between two kept labels.
+ * @param anchored Indices that must survive — an axis's ends, which are
+ *   what the row is *for*; a candidate that would touch one is dropped
+ *   instead.
+ * @returns The `index`es to draw.
+ */
+export function distributeLabels(
+  boxes: readonly TimelineLabelBox[],
+  minGapPx: number,
+  anchored: readonly number[] = [],
+): number[] {
+  const anchoredSet = new Set(anchored)
+  const kept = boxes.filter(box => anchoredSet.has(box.index) && box.right >= 0)
+  const keptIndexes = kept.map(box => box.index)
+  const candidates = boxes
+    .filter(box => !anchoredSet.has(box.index) && box.right >= 0)
+    .sort((a, b) => a.left - b.left)
+  for (const box of candidates) {
+    // Against every kept box, not just the last: with two anchored ends the
+    // row has a hole in the middle, and a candidate must clear both.
+    const collides = kept.some(
+      k => box.left < k.right + minGapPx && k.left < box.right + minGapPx,
+    )
+    if (collides) continue
+    kept.push(box)
+    keptIndexes.push(box.index)
+  }
+  keptIndexes.sort((a, b) => a - b)
+  return keptIndexes
+}
+
+/** Clear space between two labels on a row: a share of the width, with a
+ *  floor, because at 200 px a proportional gap rounds to nothing. */
+function labelGapPx(width: number): number {
+  return Math.max(6, 0.006 * width)
+}
+
 /** Compact cadence label: `15m`, `1h`, `6h`, `1d`. Machine-ish on
  *  purpose — the strip's words are numbers, not prose. */
 export function formatCadenceShort(cadenceMs: number): string {
   if (!(cadenceMs > 0)) return '-'
+  // Sub-minute cadences are real (a one-second satellite loop) and would
+  // round to "0m" — a label that says the axis has no step at all.
+  if (cadenceMs < MINUTE) return String(Math.max(1, Math.round(cadenceMs / 1000))) + 's'
   if (cadenceMs < HOUR) return String(Math.round(cadenceMs / MINUTE)) + 'm'
   if (cadenceMs < DAY) {
     const hours = cadenceMs / HOUR
@@ -254,6 +318,38 @@ export function formatTickDate(ms: number, spanMs: number): string {
       ? { month: 'short', year: 'numeric', timeZone: 'UTC' }
       : { month: 'short', day: 'numeric', timeZone: 'UTC' }
   return new Date(ms).toLocaleDateString('en-US', opts)
+}
+
+/**
+ * A label on the axis, with the precision its *step* deserves.
+ *
+ * The form follows the step, not the axis: a six-hour axis stepped every
+ * three hours and a thirty-hour axis stepped every six both land several
+ * labels on the same day, and a row that says "Aug 18" four times explains
+ * nothing. So a step shorter than a day prints the day **and the time**,
+ * and anything longer prints the day — or the month and year once the span
+ * runs past a year, where the day would be noise.
+ *
+ * The ends are their own case: their step is the whole span, so a six-hour
+ * axis labels its ends with times for the same reason.
+ */
+export function formatAxisLabel(ms: number, stepMs: number, spanMs: number): string {
+  if (stepMs < DAY) {
+    return new Date(ms).toLocaleString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+      timeZone: 'UTC',
+    })
+  }
+  return formatTickDate(ms, spanMs)
+}
+
+/** An end of the axis: the span is the step. See {@link formatAxisLabel}. */
+export function formatAxisEndLabel(ms: number, spanMs: number): string {
+  return formatAxisLabel(ms, spanMs, spanMs)
 }
 
 /** The instant a playhead label shows: the date alone on a daily axis,
@@ -331,18 +427,37 @@ export function drawTimelineTrack(
   // labels below the bar.
   if (!compact) {
     ctx.font = String(geometry.headerFontPx) + 'px ' + MONO
+    let startLabel = formatAxisEndLabel(state.startMs, spanMs)
+    let endLabel = formatAxisEndLabel(state.endMs, spanMs)
+    // Two ends of a short axis carry a time, which is wide; when that
+    // cannot fit, the day alone is still true and still identifies the
+    // range, so the form degrades before anything is dropped.
+    let startW = ctx.measureText(startLabel).width
+    let endW = ctx.measureText(endLabel).width
+    if (0.03 * w + startW + labelGapPx(w) > 0.97 * w - endW) {
+      startLabel = formatTickDate(state.startMs, spanMs)
+      endLabel = formatTickDate(state.endMs, spanMs)
+      startW = ctx.measureText(startLabel).width
+      endW = ctx.measureText(endLabel).width
+    }
+    const midLabel = String(state.frameCount) + ' - ' + formatCadenceShort(state.cadenceMs)
+    const midW = ctx.measureText(midLabel).width
+    // The ends are the axis's identity and are drawn unconditionally; the
+    // middle summary is the one that yields, because a header that cannot
+    // fit its own date range is worse than one without a frame count.
+    const keepMid =
+      w / 2 - midW / 2 >= 0.03 * w + startW + labelGapPx(w) &&
+      w / 2 + midW / 2 <= 0.97 * w - endW - labelGapPx(w)
     ctx.fillStyle = TEXT_COLOR
     ctx.textAlign = 'left'
-    ctx.fillText(formatTickDate(state.startMs, spanMs), 0.03 * w, 0.182 * h)
+    ctx.fillText(startLabel, 0.03 * w, 0.182 * h)
     ctx.textAlign = 'right'
-    ctx.fillText(formatTickDate(state.endMs, spanMs), 0.97 * w, 0.182 * h)
-    ctx.textAlign = 'center'
-    ctx.fillStyle = DIM_COLOR
-    ctx.fillText(
-      String(state.frameCount) + ' - ' + formatCadenceShort(state.cadenceMs),
-      w / 2,
-      0.182 * h,
-    )
+    ctx.fillText(endLabel, 0.97 * w, 0.182 * h)
+    if (keepMid) {
+      ctx.textAlign = 'center'
+      ctx.fillStyle = DIM_COLOR
+      ctx.fillText(midLabel, w / 2, 0.182 * h)
+    }
   }
 
   // --- Bar ---
@@ -369,35 +484,73 @@ export function drawTimelineTrack(
   ctx.fillStyle = ACCENT_FILL
   ctx.fillRect(bar.x, bar.y, playhead * bar.w, bar.h)
 
-  // --- Ticks ---
+  // --- Ticks and their labels, distributed as one row ---
+  // The interval ladder picks a count, but a count is not a fit. This row
+  // lays every candidate label out, keeps the axis's ends (in compact mode
+  // they live here, at the row's extremes) and keeps an interior label
+  // only where it clears everything already kept. A dropped label never
+  // drops its tick line: the marks carry the rhythm, the text carries the
+  // reading, and only the second one may go.
   const interval = chooseTickIntervalMs(spanMs, tickBudgetForWidth(w))
   const firstTick = Math.ceil(state.startMs / interval) * interval
-  ctx.font = String(geometry.tickFontPx) + 'px ' + MONO
-  ctx.textAlign = 'center'
+  const tickTimes: number[] = []
   for (let ms = firstTick; ms < state.endMs; ms += interval) {
     const p = (ms - state.startMs) / spanMs
     if (p <= 0.001 || p >= 0.999) continue
-    const x = bar.x + p * bar.w
-    ctx.fillStyle = TICK_LINE
-    ctx.fillRect(x, bar.y, Math.max(1, 0.00125 * w), bar.h)
-    if (!compact) {
-      ctx.fillStyle = DIM_COLOR
-      ctx.fillText(formatTickDate(ms, spanMs), x, bar.y + bar.h + 0.118 * h)
-    }
+    tickTimes.push(ms)
   }
 
-  // --- The ends, under the bar, when the header is gone ---
+  /** Sentinels for the two end labels, which are not ticks. */
+  const END_START = -1
+  const END_END = -2
+  const rowY = bar.y + bar.h + (compact ? 0.16 : 0.118) * h
+  const startLabel = formatAxisEndLabel(state.startMs, spanMs)
+  const endLabel = formatAxisEndLabel(state.endMs, spanMs)
+
+  ctx.font = String(geometry.tickFontPx) + 'px ' + MONO
+  const tickX = (ms: number): number => bar.x + ((ms - state.startMs) / spanMs) * bar.w
+  const tickLabel = (ms: number): string => formatAxisLabel(ms, interval, spanMs)
+  const boxes: TimelineLabelBox[] = tickTimes.map((ms, index) => {
+    const half = ctx.measureText(tickLabel(ms)).width / 2
+    const x = tickX(ms)
+    return { index, left: x - half, right: x + half }
+  })
+  const anchored: number[] = []
   if (compact) {
-    ctx.fillStyle = DIM_COLOR
-    ctx.font = String(geometry.tickFontPx) + 'px ' + MONO
+    const startW = ctx.measureText(startLabel).width
+    const endW = ctx.measureText(endLabel).width
+    boxes.push({ index: END_START, left: bar.x, right: bar.x + startW })
+    boxes.push({ index: END_END, left: bar.x + bar.w - endW, right: bar.x + bar.w })
+    anchored.push(END_START, END_END)
+  }
+  const keep = new Set(distributeLabels(boxes, labelGapPx(w), anchored))
+
+  ctx.fillStyle = TICK_LINE
+  for (const ms of tickTimes) {
+    ctx.fillRect(tickX(ms), bar.y, Math.max(1, 0.00125 * w), bar.h)
+  }
+
+  ctx.fillStyle = DIM_COLOR
+  ctx.textAlign = 'center'
+  for (let i = 0; i < tickTimes.length; i++) {
+    if (!keep.has(i)) continue
+    const text = tickLabel(tickTimes[i]!)
+    // A tick whose label reads the same as an end says nothing the row has
+    // not already said — and on a weekly step the last tick often is the
+    // end's own day. The tick line stays; only the echo goes.
+    if (text === startLabel || text === endLabel) continue
+    ctx.fillText(text, tickX(tickTimes[i]!), rowY)
+  }
+  if (compact) {
     ctx.textAlign = 'left'
-    ctx.fillText(formatTickDate(state.startMs, spanMs), bar.x, bar.y + bar.h + 0.16 * h)
-    ctx.textAlign = 'right'
-    ctx.fillText(
-      formatTickDate(state.endMs, spanMs),
-      bar.x + bar.w,
-      bar.y + bar.h + 0.16 * h,
-    )
+    ctx.fillText(startLabel, bar.x, rowY)
+    // Never both when they would touch: the start is the anchor.
+    const startW = ctx.measureText(startLabel).width
+    const endW = ctx.measureText(endLabel).width
+    if (bar.x + startW + labelGapPx(w) <= bar.x + bar.w - endW) {
+      ctx.textAlign = 'right'
+      ctx.fillText(endLabel, bar.x + bar.w, rowY)
+    }
   }
 
   // --- Playhead ---

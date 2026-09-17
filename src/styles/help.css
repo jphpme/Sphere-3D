@@ -417,10 +417,14 @@ body.tour-authoring-open #help-trigger {
         width: max(40px, calc(40px * var(--ui-scale)));
         height: max(40px, calc(40px * var(--ui-scale)));
     }
-    /* Clear the 40px help trigger at 0.5rem inset */
+    /* Clear the 40px help trigger at 0.5rem inset, and drop to a second
+       row: the first row already carries the lat/lng readout, which starts
+       at 6.5rem, and at 390 px the two boxes overlapped by ~33 px —
+       measured in Chromium, not guessed. A date is only useful whole, so
+       the label moves rather than truncating. */
     #time-label {
         inset-inline-end: calc(3.5rem * var(--ui-scale));
-        top: calc(0.5rem * var(--ui-scale));
+        top: calc(3.25rem * var(--ui-scale));
     }
     #help-panel {
         top: 0;

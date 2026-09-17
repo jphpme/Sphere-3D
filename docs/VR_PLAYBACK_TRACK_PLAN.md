@@ -42,6 +42,17 @@ the same code draws a 1200 x 220 headset strip and a 240 x 56 panel
 canvas. The VR drawing did not move when the renderer was extracted —
 `timelineTrackCanvas.test.ts` pins its original pixel numbers.
 
+**Labels are distributed, not counted.** A tick *count* is not a fit: labels
+change width with the span, the canvas changes with the panel, and a ladder
+that tops out can still return more ticks than the budget asked for. Every
+candidate is measured and thinned against its row — ends anchored, a dropped
+label never dropping its tick line — and the label form follows the **step**
+(a sub-daily step prints the time as well), because a six-hour axis stepped
+every three hours otherwise says "Aug 18" four times. The mobile report was a
+measured one on both counts: at 390 px the panel's canvas is 300 px, and the
+panel's time label overlapped the lat/lng readout by 33 px until it moved to
+its own row.
+
 **Dates in the 2D app.** The panel's time label now fills in for real-time
 and forecast streams, which it never did: they carry no catalog
 `startTime`/`endTime`, so the old path hid it. It borrows the track's UTC

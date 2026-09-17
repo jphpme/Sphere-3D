@@ -6,6 +6,7 @@ import {
   COMPACT_WIDTH_PX,
   TICK_INTERVALS_MS,
   chooseTickIntervalMs,
+  distributeLabels,
   drawTimelineTrack,
   formatCadenceShort,
   formatPlayheadLabel,
@@ -64,6 +65,61 @@ function fakeCtx() {
     fillRect: ReturnType<typeof vi.fn>
     fillText: ReturnType<typeof vi.fn>
   }
+}
+
+/**
+ * A context that measures like the real thing: monospace advance at
+ * 0.6 em, so a label's box is its text times the font size the drawing
+ * set. Records every `fillText` with the alignment in force, which is
+ * what makes "no two labels on a row touch" checkable without a browser.
+ */
+function measuringCtx() {
+  let fontPx = 12
+  let align = 'left'
+  const calls: Array<{ text: string; x: number; y: number; width: number; align: string }> = []
+  const width = (text: string) => text.length * fontPx * 0.6
+  const ctx = {
+    clearRect: () => {},
+    fillRect: () => {},
+    strokeRect: () => {},
+    beginPath: () => {},
+    arc: () => {},
+    fill: () => {},
+    fillText(text: string, x: number, y: number) {
+      calls.push({ text, x, y, width: width(text), align })
+    },
+    measureText: (text: string) => ({ width: width(text) }),
+    set font(value: string) {
+      const m = /([0-9]+(?:\.[0-9]+)?)px/.exec(value)
+      fontPx = m ? Number(m[1]) : 12
+    },
+    get font() {
+      return String(fontPx) + 'px mono'
+    },
+    set textAlign(value: string) {
+      align = value
+    },
+    get textAlign() {
+      return align
+    },
+    fillStyle: '',
+    strokeStyle: '',
+    lineWidth: 1,
+    textBaseline: '',
+  } as unknown as CanvasRenderingContext2D
+  /** Boxes per row, from the recorded calls and the alignment they used. */
+  const rows = () => {
+    const byRow = new Map<number, Array<{ text: string; left: number; right: number }>>()
+    for (const call of calls) {
+      const left = call.align === 'left' ? call.x : call.align === 'right' ? call.x - call.width : call.x - call.width / 2
+      const key = Math.round(call.y)
+      const list = byRow.get(key) ?? []
+      list.push({ text: call.text, left, right: left + call.width })
+      byRow.set(key, list)
+    }
+    return [...byRow.values()]
+  }
+  return { ctx, calls, rows }
 }
 
 describe('timelineTrackGeometry', () => {
@@ -239,5 +295,116 @@ describe('drawTimelineTrack', () => {
     expect(labels.some(text => text.includes('2880'))).toBe(false)
     // ...but the two ends are still dated.
     expect(labels.filter(text => /Aug|Sep/.test(text)).length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('never lets two labels on a row touch, at any size or span', () => {
+    // The complaint this rule came from: on a phone the labels overlapped,
+    // because a tick *count* is not a fit. Every candidate is measured now
+    // and the ones that would collide are dropped, so this is a property of
+    // the drawing rather than a hope about the ladder.
+    const cases: Array<[number, number, number, number]> = [
+      // width, height, span in days, cadence
+      [1200, 220, 30, 15 * MINUTE],
+      [900, 165, 400, DAY],
+      [520, 56, 90, 6 * HOUR],
+      [480, 56, 3650, DAY],
+      [280, 56, 30, 15 * MINUTE],
+      [200, 56, 3650, DAY],
+      [160, 56, 2, 1000],
+    ]
+    for (const [width, height, spanDays, cadence] of cases) {
+      const span = spanDays * DAY
+      const drawn = measuringCtx()
+      drawTimelineTrack(
+        drawn.ctx,
+        {
+          ...STATE,
+          endMs: STATE.startMs + span,
+          currentMs: STATE.startMs + span / 2,
+          frameCount: Math.max(1, Math.round(span / cadence)),
+          cadenceMs: cadence,
+        },
+        timelineTrackGeometry(width, height),
+      )
+      for (const row of drawn.rows()) {
+        const sorted = [...row].sort((a, b) => a.left - b.left)
+        for (let i = 0; i + 1 < sorted.length; i++) {
+          const gap = sorted[i + 1]!.left - sorted[i]!.right
+          expect(
+            gap,
+            width + 'x' + height + ' span=' + spanDays + 'd: ' +
+              JSON.stringify(sorted[i]!.text) + ' / ' + JSON.stringify(sorted[i + 1]!.text),
+          ).toBeGreaterThanOrEqual(0)
+        }
+      }
+    }
+  })
+
+  it('labels the ends even when interior ticks have to give way', () => {
+    const drawn = measuringCtx()
+    drawTimelineTrack(drawn.ctx, { ...STATE, endMs: STATE.startMs + 3650 * DAY }, timelineTrackGeometry(200, 56))
+    const texts = drawn.calls.map(c => c.text)
+    expect(texts.some(t => t.includes('Aug'))).toBe(true)
+    expect(texts.some(t => t.includes('2036'))).toBe(true)
+  })
+})
+
+describe('distributeLabels', () => {
+  it('keeps boxes that clear the gap and drops the ones that do not', () => {
+    const kept = distributeLabels(
+      [
+        { index: 0, left: 0, right: 40 },
+        { index: 1, left: 44, right: 84 },
+        { index: 2, left: 88, right: 128 },
+      ],
+      6,
+    )
+    expect(kept).toEqual([0, 2])
+  })
+
+  it('treats anchored boxes as mandatory and drops whatever touches them', () => {
+    const kept = distributeLabels(
+      [
+        { index: -1, left: 0, right: 50 },
+        { index: 0, left: 60, right: 90 },
+        { index: 1, left: 96, right: 120 },
+        { index: 2, left: 130, right: 149 },
+        { index: -2, left: 150, right: 200 },
+      ],
+      6,
+      [-1, -2],
+    )
+    // The ends stay; candidate 0 clears the left end, candidate 1 clears
+    // candidate 0 by exactly the gap, and candidate 2 would touch the right
+    // end and goes.
+    expect(kept).toEqual([-2, -1, 0, 1])
+  })
+
+  it('gives a contested spot to the leftmost candidate', () => {
+    // Two candidates overlap each other between two anchored ends. The
+    // greedy pass runs left to right, so the earlier one holds the spot —
+    // which is the rule that keeps the spacing even instead of letting a
+    // later, wider label evict an earlier, narrower one.
+    const kept = distributeLabels(
+      [
+        { index: 0, left: 0, right: 70 },
+        { index: 1, left: 80, right: 110 },
+        { index: 2, left: 76, right: 84 },
+        { index: 3, left: 120, right: 200 },
+      ],
+      6,
+      [0, 3],
+    )
+    expect(kept).toContain(2)
+    expect(kept).not.toContain(1)
+    expect(kept).toEqual([0, 2, 3])
+  })
+})
+
+describe('formatCadenceShort, sub-minute', () => {
+  it('prints seconds rather than rounding a second-long step to nothing', () => {
+    expect(formatCadenceShort(1000)).toBe('1s')
+    expect(formatCadenceShort(45_000)).toBe('45s')
+    expect(formatCadenceShort(500)).toBe('1s')
   })
 })
