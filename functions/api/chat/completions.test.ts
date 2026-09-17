@@ -259,6 +259,43 @@ describe('POST /api/chat/completions — upstream failures on the streaming path
     expect(json.error.message).toContain('Capacity temporarily exceeded')
   })
 
+  // The production signature: 200, `text/event-stream`, a body that closes
+  // without a byte in it. Not `new Response('')`, which has no body at all and
+  // takes the older `!response.body` branch instead.
+  function emptyStream(): Response {
+    return new Response(new ReadableStream({ start(controller) { controller.close() } }))
+  }
+
+  it('classifies an empty upstream stream as quota when the budget is spent', async () => {
+    const run = vi.fn()
+      .mockResolvedValueOnce(emptyStream())
+      .mockRejectedValueOnce(
+        new Error('4006: you have used up your daily free allocation of 10,000 neurons'),
+      )
+
+    const res = await onRequestPost(ctx({ body: plainBody(), run }))
+
+    expect(res.status).toBe(503)
+    const json = await res.json() as { error: { type: string; code: number } }
+    expect(json.error.type).toBe('quota_exhausted')
+    expect(json.error.code).toBe(4006)
+    // The classification is a second, 1-token call — and only on this path.
+    expect(run).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not blame the budget for an empty stream it cannot explain', async () => {
+    const run = vi.fn()
+      .mockResolvedValueOnce(emptyStream())
+      .mockResolvedValueOnce({ response: 'ok' })
+
+    const res = await onRequestPost(ctx({ body: plainBody(), run }))
+
+    expect(res.status).toBe(502)
+    const json = await res.json() as { error: { type: string; message: string } }
+    expect(json.error.type).toBe('server_error')
+    expect(json.error.message).toContain('empty stream')
+  })
+
   it('leaves a healthy raw stream alone', async () => {
     const stream = new ReadableStream({
       start(controller) {

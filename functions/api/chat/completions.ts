@@ -532,10 +532,28 @@ async function streamResponse(
   const decoder = new TextDecoder()
   const encoder = new TextEncoder()
 
+  // Workers AI reports a spent free-tier budget as an *empty* 200
+  // text/event-stream — verified against the production deployment: zero
+  // bytes with `content-type: text/event-stream` — so the status says
+  // nothing and the transformer below would close a stream that never
+  // carried a token. The client reads that as "the model answered
+  // nothing": two retries, the local engine, and a banner telling the
+  // operator to check settings that are fine. Reading the first chunk
+  // before committing to a streaming Response keeps the two apart — an
+  // empty upstream still becomes an error the SPA's degraded badge acts
+  // on, and a non-empty one costs nothing beyond the first token the
+  // client was already waiting for.
+  const first = await reader.read()
+  if (first.done || !first.value || first.value.length === 0) {
+    return await emptyUpstreamResponse(ai, model, cors)
+  }
+  let buffered: Uint8Array | null = first.value
+
   const transformed = new ReadableStream({
     async pull(controller) {
-      const { done, value } = await reader.read()
-      if (done) {
+      const value = buffered ?? (await reader.read()).value
+      buffered = null
+      if (!value) {
         controller.close()
         return
       }
@@ -592,6 +610,48 @@ async function streamResponse(
       Connection: 'keep-alive',
     },
   })
+}
+
+/**
+ * What it means when Workers AI answers 200 and then says nothing.
+ *
+ * A spent free-tier budget is the observed cause — the platform sends an
+ * empty event stream rather than an error — and one 1-token call settles
+ * it, through the same `isWorkersAiQuotaError` classifier the other paths
+ * use. When the budget really is spent that call is rejected before any
+ * inference, so the classification is free; when it is not, the honest
+ * answer is that the upstream stream came back empty, which is a 502 and
+ * not something to blame on the operator's settings.
+ */
+async function emptyUpstreamResponse(
+  ai: Env['AI'],
+  model: string,
+  cors: Record<string, string>,
+): Promise<Response> {
+  const jsonHeaders = { ...cors, 'Content-Type': 'application/json' }
+
+  try {
+    await ai.run(model, { messages: [{ role: 'user', content: 'ping' }], max_tokens: 1 })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Workers AI request failed'
+    if (isWorkersAiQuotaError(err)) {
+      return new Response(
+        JSON.stringify({ error: { message, type: 'quota_exhausted', code: 4006 } }),
+        { status: 503, headers: jsonHeaders },
+      )
+    }
+    return new Response(
+      JSON.stringify({ error: { message, type: 'server_error' } }),
+      { status: 502, headers: jsonHeaders },
+    )
+  }
+
+  return new Response(
+    JSON.stringify({
+      error: { message: 'Workers AI returned an empty stream', type: 'server_error' },
+    }),
+    { status: 502, headers: jsonHeaders },
+  )
 }
 
 async function nonStreamResponse(
