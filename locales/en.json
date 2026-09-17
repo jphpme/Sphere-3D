@@ -2026,7 +2026,7 @@
   "vr.placement.cancel": "Cancel placement",
   "vr.placement.place": "Place",
   "vr.placement.replace": "Re-place",
-  "vr.placement.stepHeight": "Step 2 of 2 — drag to set height",
+  "vr.placement.stepHeight": "Step 2 of 2 — tilt to set height",
   "vr.placement.stepPosition": "Step 1 of 2 — aim at a surface",
   "vr.zoomSlider.aria": "Zoom the globe",
   "vr.zoomSlider.label": "Zoom",

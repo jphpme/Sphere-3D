@@ -1351,8 +1351,6 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
       onCancel: () => setPlacing(false),
       onRePlace: onPlaceButton,
       isHeightStep: () => placement.getStep() === 'height',
-      getHeight: () => placement.getHeight(),
-      setHeight: (h) => placement.setHeight(h),
     })
     placementTouch.mount(domOverlayRoot)
   }
@@ -1545,22 +1543,21 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
         active.camera.getWorldDirection(scratchGazeDir)
         active.placement.updateGaze(scratchCamPos, scratchGazeDir)
       }
-      // Height step — both modes use headset pitch, except when the
-      // handheld-AR touch layer owns the height (drag in flight, or a
-      // drag already set it this activation — releasing the finger
-      // must not snap the globe back to the tilt-driven height).
-      // Drive the globe LIVE along the chosen height so the user sees
-      // it slide as they tilt/drag, instead of a frozen globe that
-      // only jumps on confirm (which read as "nothing locked"). The
-      // chosen XZ is frozen from the position step; only Y moves.
+      // Height step — every device, one input: the pose's own pitch.
+      // On a headset that is the user's head; on a phone it is the phone
+      // being aimed with, which is the same gesture the position step's
+      // reticle already follows. (The handheld layer used to own a touch
+      // drag here too; touch is rotate-only now.) Drive the globe LIVE
+      // along the chosen height so the user sees it slide as they tilt,
+      // instead of a frozen globe that only jumps on confirm — which
+      // read as "nothing locked". The chosen XZ is frozen from the
+      // position step; only Y moves.
       if (active.placement.getStep() === 'height') {
-        if (!placementTouch?.ownsHeight()) {
-          active.camera.getWorldDirection(scratchGazeDir)
-          const elevation = Math.asin(
-            Math.max(-1, Math.min(1, scratchGazeDir.y)),
-          )
-          active.placement.updateHeight(elevation)
-        }
+        active.camera.getWorldDirection(scratchGazeDir)
+        const elevation = Math.asin(
+          Math.max(-1, Math.min(1, scratchGazeDir.y)),
+        )
+        active.placement.updateHeight(elevation)
         const preview = active.placement.getPlacementPosition()
         if (preview) {
           active.scene.globe.position.copy(preview)

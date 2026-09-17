@@ -2,53 +2,42 @@
 // Copyright 2026 The Zyra Project
 
 /**
- * Touch layer for handheld-AR globe placement (the `screen` input
- * class).
+ * Placement chrome for handheld-AR globe placement (the `screen` input
+ * class): the DOM **Place** and **Cancel** buttons, the step hint, and
+ * the idle **Re-place** corner button.
  *
- * Only active when the session was granted a `dom-overlay` (Android
- * Chrome + ARCore): the overlay root then receives real DOM touch
- * events mid-session, which buys us things the raw XR `select`
- * stream can't express:
+ * Buttons only — this layer owns no gesture. Both placement inputs on a
+ * phone are the phone's own aim, driven per frame from `vrSession`'s
+ * render loop: the position step follows the hit-test reticle, and the
+ * height step follows device tilt. It used to own a vertical drag that
+ * set the height as well; that went with the rest of the phone's touch
+ * gestures, which are now exactly one — spin the placed globe, in
+ * `vrRotateTouch`.
  *
- *   1. **Explicit acceptance, no implicit confirms.** A bare XR
- *      `selectstart` fires at touch-down on ANY touch, so "tap
- *      anywhere = confirm" makes every stray touch during placement
- *      an accidental confirm. While this layer is placing it calls
- *      `preventDefault()` on every `beforexrselect` reaching the
- *      overlay root (the standard dom-overlays dedup pattern), so
- *      XR never sees those touches — stray taps do NOTHING. The
- *      placement advances only via the explicit DOM buttons:
- *      **Place** (accepts the current step: position → height,
- *      height → finalise) and **Cancel** (exits without placing).
- *   2. **Drag-to-adjust height.** During the height step a vertical
- *      drag on empty screen adjusts the placement height directly
- *      (drag up = higher) via the pure math in
- *      {@link file://./../services/vrHeightControl.ts
- *      vrHeightControl.ts}. Once a drag has set the height, head-tilt
- *      control is latched off for the rest of the step
- *      ({@link VrPlacementTouchHandle.ownsHeight}) so releasing the
- *      finger doesn't snap the globe back to the tilt-driven height
- *      on the next frame.
- *   3. **A reliable re-place affordance.** The floating 6 cm 3D
- *      Place button is a small raycast target for the transient
- *      screen ray; a small DOM **Re-place** corner button (visible
- *      whenever NOT placing) re-enters Place mode at the position
- *      step — a far more forgiving target on a tablet.
+ * What it does own besides the buttons is **interception**. A bare XR
+ * `selectstart` fires at touch-down on ANY touch, so "tap anywhere =
+ * confirm" makes every stray touch during placement an accidental
+ * confirm. While this layer is placing it calls `preventDefault()` on
+ * every `beforexrselect` reaching the overlay root (the standard
+ * dom-overlays dedup pattern), so XR never sees those touches — stray
+ * taps do NOTHING, and the placement advances only via the explicit
+ * buttons.
  *
- * Touches that START on the zoom slider or any of this layer's
- * buttons are left to those elements (the slider has its own
- * `beforexrselect` dedup; the Re-place button too, since it is
- * visible while the root's dedup listener is disarmed).
+ * Only mounted when the session granted a `dom-overlay` (Android Chrome
+ * + ARCore) AND the session was classified handheld. Touches that START
+ * on the zoom slider or any of these buttons are left to those
+ * elements: the slider has its own `beforexrselect` dedup, and the
+ * Re-place button too, since it is visible while the root's dedup
+ * listener is disarmed.
  *
- * Controller sessions never mount this layer — they keep tilt for
- * height, trigger-to-confirm, and the raycast Place-button tap.
+ * Controller sessions never mount this layer — they keep trigger-to-
+ * confirm and the raycast Place-button tap.
  *
  * NOTE: the file lives in `src/ui/` (not `src/services/`) so the
  * `check:i18n-strings` lint scans it for hard-coded user-visible
  * strings.
  */
 
-import { dragToHeight } from '../services/vrHeightControl'
 import { t } from '../i18n'
 
 /** Inputs to {@link createVrPlacementTouch}. */
@@ -64,15 +53,10 @@ export interface VrPlacementTouchOptions {
    *  the position step (same callback as tapping the 3D Place
    *  button). Only fires while NOT placing. */
   readonly onRePlace: () => void
-  /** True while the placement flow is in the height step (drags
-   *  adjust height; in the position step drags are ignored). */
+  /** True while the placement flow is in the height step. Read for the
+   *  hint text ONLY — this layer turns no gesture into a height
+   *  write. */
   readonly isHeightStep: () => boolean
-  /** Current chosen height in metres, or null outside the height
-   *  step. Read at drag start as the drag baseline. */
-  readonly getHeight: () => number | null
-  /** Write a new chosen height (metres). Caller clamps via
-   *  `dragToHeight` before calling. */
-  readonly setHeight: (heightMeters: number) => void
 }
 
 /** Returned handle. Self-contained — caller mounts, toggles with
@@ -84,22 +68,11 @@ export interface VrPlacementTouchHandle {
    *  hint) for the idle chrome (Re-place) and arms / disarms the
    *  touch interception. */
   setPlacing(active: boolean): void
-  /** True while a height drag is in flight, or after one completed
-   *  during this Place-mode activation — signals the render loop to
-   *  leave the height to touch and skip the head-tilt update. */
-  ownsHeight(): boolean
   /** Tear down listeners + DOM. Idempotent. */
   dispose(): void
 }
 
-/**
- * Finger travel (CSS px) before a touch counts as a drag rather than
- * a stray touch. 10 px absorbs normal resting-finger jitter on a
- * tablet without making deliberate small drags feel dead.
- */
-const DRAG_THRESHOLD_PX = 10
-
-/** Create the touch layer. Pure DOM — no Three.js touch. */
+/** Create the placement chrome. Pure DOM — no Three.js touch. */
 export function createVrPlacementTouch(
   opts: VrPlacementTouchOptions,
 ): VrPlacementTouchHandle {
@@ -127,23 +100,13 @@ export function createVrPlacementTouch(
 
   let root: HTMLElement | null = null
   let placing = false
-  /** True once a height drag has completed during this activation —
-   *  latches tilt off until Place mode exits (see module docstring). */
-  let draggedThisActivation = false
-
-  // Active-touch tracking. Multi-touch is ignored beyond the first
-  // finger — placement is a single-pointer flow.
-  let activeTouchId: number | null = null
-  let startY = 0
-  let startHeight: number | null = null
-  let dragging = false
 
   /**
    * Taps on overlay DOM elements fire XR `selectstart` on the
    * transient screen input unless prevented. While placing, we own
-   * every touch on the overlay root — dedup them all so stray
-   * screen taps reach neither the placement confirm short-circuit
-   * nor globe-grab in vrInteraction.
+   * every touch on the overlay root — dedup them all so stray screen
+   * taps reach neither the placement confirm short-circuit nor
+   * globe-grab in vrInteraction.
    */
   const onBeforeXrSelect = (ev: Event): void => {
     ev.preventDefault()
@@ -173,58 +136,6 @@ export function createVrPlacementTouch(
         ? 'vr.placement.stepHeight'
         : 'vr.placement.stepPosition',
     )
-  }
-
-  function onTouchStart(ev: TouchEvent): void {
-    if (!placing || activeTouchId !== null) return
-    // Touches starting on the zoom slider or any of this layer's
-    // buttons belong to those elements — don't treat them as
-    // placement gestures.
-    const target = ev.target as HTMLElement | null
-    if (target?.closest('.vr-zoom-overlay, .vr-place-accept, .vr-place-cancel, .vr-place-replace')) return
-    const touch = ev.changedTouches[0]
-    activeTouchId = touch.identifier
-    startY = touch.clientY
-    startHeight = opts.getHeight()
-    dragging = false
-  }
-
-  function onTouchMove(ev: TouchEvent): void {
-    if (activeTouchId === null) return
-    const touch = findTouch(ev)
-    if (!touch) return
-    const deltaY = touch.clientY - startY
-    if (!dragging && Math.abs(deltaY) >= DRAG_THRESHOLD_PX) {
-      dragging = true
-    }
-    if (dragging && opts.isHeightStep() && startHeight !== null) {
-      opts.setHeight(dragToHeight(startHeight, deltaY, window.innerHeight))
-    }
-  }
-
-  function onTouchEnd(ev: TouchEvent): void {
-    if (activeTouchId === null) return
-    const touch = findTouch(ev)
-    if (!touch) return
-    const wasDragging = dragging
-    activeTouchId = null
-    dragging = false
-    // Stray taps do nothing — placement advances only via the
-    // explicit Place / Cancel buttons (see module docstring).
-    if (wasDragging && opts.isHeightStep()) {
-      // Latch: touch owns the height for the rest of this activation
-      // so head-tilt doesn't snap the globe back on the next frame.
-      draggedThisActivation = true
-    }
-  }
-
-  function findTouch(ev: TouchEvent): Touch | null {
-    for (let i = 0; i < ev.changedTouches.length; i++) {
-      if (ev.changedTouches[i].identifier === activeTouchId) {
-        return ev.changedTouches[i]
-      }
-    }
-    return null
   }
 
   // Closed-over helpers so the handle methods don't depend on `this`
@@ -259,25 +170,10 @@ export function createVrPlacementTouch(
       // deduped so XR sees none of them.
       root.classList.add('xr-dom-overlay-active')
       root.addEventListener('beforexrselect', onBeforeXrSelect)
-      root.addEventListener('touchstart', onTouchStart)
-      root.addEventListener('touchmove', onTouchMove)
-      root.addEventListener('touchend', onTouchEnd)
-      root.addEventListener('touchcancel', onTouchEnd)
     } else {
       root.classList.remove('xr-dom-overlay-active')
       root.removeEventListener('beforexrselect', onBeforeXrSelect)
-      root.removeEventListener('touchstart', onTouchStart)
-      root.removeEventListener('touchmove', onTouchMove)
-      root.removeEventListener('touchend', onTouchEnd)
-      root.removeEventListener('touchcancel', onTouchEnd)
-      activeTouchId = null
-      dragging = false
-      draggedThisActivation = false
     }
-  }
-
-  function ownsHeight(): boolean {
-    return dragging || draggedThisActivation
   }
 
   function dispose(): void {
@@ -293,5 +189,5 @@ export function createVrPlacementTouch(
     root = null
   }
 
-  return { mount, setPlacing, ownsHeight, dispose }
+  return { mount, setPlacing, dispose }
 }

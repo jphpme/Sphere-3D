@@ -6,7 +6,6 @@ import {
   HEIGHT_MAX,
   HEIGHT_MIN,
   HEIGHT_PITCH_RANGE,
-  dragToHeight,
   elevationToHeight,
   rayHeightAtPlane,
   rayPlaneXZ,
@@ -80,39 +79,3 @@ describe('rayPlaneXZ', () => {
   })
 })
 
-describe('dragToHeight', () => {
-  it('raises the globe when the finger drags up (negative deltaY)', () => {
-    // Half a viewport up from the range midpoint adds half the range.
-    const mid = (HEIGHT_MIN + HEIGHT_MAX) / 2
-    expect(dragToHeight(mid, -500, 1000)).toBeCloseTo(HEIGHT_MAX, 6)
-  })
-
-  it('lowers the globe when the finger drags down (positive deltaY)', () => {
-    const mid = (HEIGHT_MIN + HEIGHT_MAX) / 2
-    expect(dragToHeight(mid, 500, 1000)).toBeCloseTo(HEIGHT_MIN, 6)
-  })
-
-  it('maps a full-viewport drag to the full height range', () => {
-    expect(dragToHeight(HEIGHT_MIN, -1000, 1000)).toBeCloseTo(HEIGHT_MAX, 6)
-    expect(dragToHeight(HEIGHT_MAX, 1000, 1000)).toBeCloseTo(HEIGHT_MIN, 6)
-  })
-
-  it('clamps at the range endpoints instead of overshooting', () => {
-    expect(dragToHeight(HEIGHT_MAX, -800, 1000)).toBeCloseTo(HEIGHT_MAX, 6)
-    expect(dragToHeight(HEIGHT_MIN, 800, 1000)).toBeCloseTo(HEIGHT_MIN, 6)
-  })
-
-  it('is resolution-independent — same fraction, same delta', () => {
-    const a = dragToHeight(1.0, -250, 1000)
-    const b = dragToHeight(1.0, -500, 2000)
-    expect(a).toBeCloseTo(b, 6)
-  })
-
-  it('leaves the height unchanged for a degenerate viewport height', () => {
-    expect(dragToHeight(1.2, -400, 0)).toBeCloseTo(1.2, 6)
-  })
-
-  it('clamps an out-of-range starting height before applying the drag', () => {
-    expect(dragToHeight(99, 0, 1000)).toBeCloseTo(HEIGHT_MAX, 6)
-  })
-})
