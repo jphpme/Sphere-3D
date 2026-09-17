@@ -8,6 +8,8 @@
  * Returns a minimal OpenAI-compatible model list.
  */
 
+import { modelIds } from './_lib/ai-models'
+
 interface Env {
   AI: unknown
 }
@@ -40,20 +42,13 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     )
   }
 
-  // Keep this list in sync with MODEL_MAP in functions/api/chat/completions.ts.
-  // The client sorts models alphabetically before displaying in the picker.
+  // One source of truth with the proxy: the catalog in _lib/ai-models, in
+  // its own order. The client keeps the first id as the model for a fresh
+  // install and the catalog is alphabetical, so that is the default model.
   return new Response(
     JSON.stringify({
       object: 'list',
-      data: [
-        { id: 'gemma-4-26b-a4b-it', object: 'model', owned_by: 'cloudflare' },
-        { id: 'llama-4-scout', object: 'model', owned_by: 'cloudflare' },
-        { id: 'llama-3.3-70b', object: 'model', owned_by: 'cloudflare' },
-        { id: 'llama-3.1-70b', object: 'model', owned_by: 'cloudflare' },
-        { id: 'llama-3.1-8b', object: 'model', owned_by: 'cloudflare' },
-        { id: 'llama-3.2-3b', object: 'model', owned_by: 'cloudflare' },
-        { id: 'llama-3.2-11b-vision', object: 'model', owned_by: 'cloudflare' },
-      ],
+      data: modelIds().map(id => ({ id, object: 'model', owned_by: 'cloudflare' })),
     }),
     { headers },
   )

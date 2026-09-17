@@ -1413,8 +1413,9 @@ answer: you already did.
 `functions/api/chat/completions.ts` calls the `AI` binding from
 Phase 8 and streams an OpenAI-shaped SSE response;
 `functions/api/models.ts` backs the "Test Connection" button. No
-API key reaches the browser. Model choice lives in `MODEL_MAP` in
-that file.
+API key reaches the browser. Model choice lives in the catalog at
+`functions/api/_lib/ai-models.ts` — one table behind both endpoints, and
+the place to add, drop or re-flag a model (`docs/ORBIT_MODEL_CATALOG_PLAN.md`).
 
 There is **no server-side proxy for third-party providers.** Older
 docs described `LLM_PROVIDER_URL` / `LLM_PROVIDER_KEY` — those env

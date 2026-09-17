@@ -15,6 +15,13 @@ import {
   extractModelToolCalls,
   type WorkersAiToolCall,
 } from '../_lib/workers-ai-text'
+import {
+  LEGACY_VISION_MODELS,
+  MODEL_MAP,
+  NATIVE_MULTIMODAL_MODELS,
+  TOOL_CALLING_MODELS,
+  applyModelInputDefaults,
+} from '../_lib/ai-models'
 
 interface Env {
   AI: {
@@ -44,52 +51,11 @@ interface RequestBody {
   tools?: unknown[]
 }
 
-// Model mapping: friendly names → Cloudflare AI model IDs
-const MODEL_MAP: Record<string, string> = {
-  'gemma-4-26b-a4b-it':   '@cf/google/gemma-4-26b-a4b-it',
-  'llama-4-scout':        '@cf/meta/llama-4-scout-17b-16e-instruct',
-  'llama-3.3-70b':        '@cf/meta/llama-3.3-70b-instruct-fp8-fast',
-  'llama-3.1-70b':        '@cf/meta/llama-3.1-70b-instruct',
-  'llama-3.1-8b':         '@cf/meta/llama-3.1-8b-instruct',
-  'llama-3.2-3b':         '@cf/meta/llama-3.2-3b-instruct',
-  'llama-3.2-11b-vision': '@cf/meta/llama-3.2-11b-vision-instruct',
-  default:                '@cf/google/gemma-4-26b-a4b-it',
-}
-
-// Models on Workers AI that support OpenAI-style function calling. When
-// the selected model is in this set, the proxy forwards `tools` to the
-// model instead of stripping them, and routes through `toolStreamShim` so
-// the response tool_calls are wrapped in OpenAI-format SSE chunks.
-const TOOL_CALLING_MODELS = new Set([
-  '@cf/meta/llama-4-scout-17b-16e-instruct',
-  '@cf/meta/llama-3.3-70b-instruct-fp8-fast',
-  '@hf/nousresearch/hermes-2-pro-mistral-7b',
-])
-
-// Models that are natively multimodal — they accept OpenAI-style multipart
-// `content` arrays (text + image_url parts) as-is, without the image
-// extraction / license dance the older llama-3.2-11b-vision model needs.
-const NATIVE_MULTIMODAL_MODELS = new Set([
-  '@cf/google/gemma-4-26b-a4b-it',
-  '@cf/meta/llama-4-scout-17b-16e-instruct',
-])
-
-// Reasoning models that think out loud by default. Gemma 4 streams its
-// chain of thought into the reply unless the chat template is told not
-// to, which the client shows as a deliberation preamble — or, on the
-// raw stream envelope, as an empty reply. Every request to these models
-// asks for the answer up front.
-const THINKING_DEFAULT_OFF_MODELS = new Set([
-  '@cf/google/gemma-4-26b-a4b-it',
-])
-
-// Legacy vision models that need the separate-image-field API + Meta
-// community license acceptance. Kept for users who explicitly select
-// llama-3.2-11b-vision in their config; Gemma 4 and llama-4-scout supersede it for
-// the default vision path.
-const LEGACY_VISION_MODELS = new Set([
-  '@cf/meta/llama-3.2-11b-vision-instruct',
-])
+// Friendly name → Workers AI id, the capability sets the routing below
+// reads, and the thinking-off patch all come from the shared catalog in
+// `../_lib/ai-models`, which is also what `/api/models` publishes: one
+// table for both endpoints, so the picker cannot offer a model the
+// proxy has retired or refuses to answer with.
 
 /**
  * Extract the first base64 image from OpenAI-format messages and convert
@@ -140,25 +106,6 @@ function extractImageAndNormalise(
 // Workers AI default max_tokens is ~256 which truncates conversational responses.
 // 512 tokens ≈ 380 words — enough for Orbit's 150-word guideline with headroom.
 const DEFAULT_MAX_TOKENS = 512
-
-/**
- * Switch thinking off for models that deliberate by default, and clear
- * the reasoning-effort knob explicitly (absent is not the same as off
- * for the templates that read it). Called from every path that builds
- * a Workers AI request body so no route to these models can miss it.
- */
-function applyModelInputDefaults(model: string, inputs: Record<string, unknown>): void {
-  if (!THINKING_DEFAULT_OFF_MODELS.has(model)) return
-
-  const existing = inputs.chat_template_kwargs
-  inputs.chat_template_kwargs = {
-    ...(existing && typeof existing === 'object' && !Array.isArray(existing)
-      ? existing as Record<string, unknown>
-      : {}),
-    enable_thinking: false,
-  }
-  inputs.reasoning_effort ??= null
-}
 
 /**
  * Reply text for a single Workers AI streaming chunk.
