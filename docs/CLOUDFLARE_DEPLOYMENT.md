@@ -111,10 +111,13 @@ Create the KV namespace first:
 npx wrangler kv namespace create REALTIME_QUOTA_KV
 ```
 
-Then add the returned namespace ID as a Pages KV binding named
-`REALTIME_QUOTA_KV` in the Cloudflare dashboard, or uncomment the matching
-`wrangler.toml` block and replace the placeholder with that real hex ID before
-running `wrangler pages deploy`.
+Then put the returned namespace ID in the `REALTIME_QUOTA_KV` block in
+`wrangler.toml`, replacing the placeholder, before running
+`wrangler pages deploy`. A Pages project whose repository carries a
+`wrangler.toml` takes its whole binding set from that file — the dashboard
+reports "Bindings for this project are being managed through wrangler.toml"
+and offers no controls — so a binding that is not declared there is absent
+from the deployment until it is added and redeployed.
 
 Do not set `VITE_REALTIME_DASH_BASE_URL` for the public app if realtime access
 must be controlled; it exposes the upstream DASH origin directly to browsers.

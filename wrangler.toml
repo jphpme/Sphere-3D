@@ -8,32 +8,36 @@ pages_build_output_dir = "dist"
 REALTIME_FREE_WEEKLY_SECONDS = "1200"
 REALTIME_QUOTA_SEGMENT_SECONDS = "10"
 
-# Workers AI — deliberately NOT declared here.
+# Workers AI.
 #
-# `AI` is a real production binding. The Orbit chat proxy, voice
-# STT/TTS, dataset embeddings, event enrichment and blog drafting
-# all call `env.AI`, at no extra cost on the free tier (~10k
-# requests/day). It is wired in the dashboard like every other
-# binding in this file — Settings → Bindings → Workers AI →
-# variable name `AI` — and audited by `npm run check:pages-bindings`
-# against `scripts/lib/expected-bindings.ts`, which is where the
-# deploy-time contract actually lives.
+# `AI` is the binding behind the Orbit chat proxy, voice STT/TTS,
+# dataset embeddings, event enrichment and blog drafting: all of it on
+# the free allocation (~10k neurons/day), none of it needing a key.
 #
-# What makes it the one binding not also declared here for
-# documentation, the way the blocks below are: wrangler opens an
-# authenticated *remote* proxy session for an AI binding before
-# `pages dev` will serve anything. Declaring it made a fresh clone
-# impossible to run without `wrangler login`, even though
-# `.dev.vars` sets `MOCK_AI=true` precisely so the real service is
-# not needed. Every other binding here runs local.
+# Declared here because Cloudflare manages this project's bindings
+# through this file. The dashboard refuses edits — "Bindings for this
+# project are being managed through wrangler.toml" — so a binding that
+# is not in this file does not exist in the deployment. That is not
+# theoretical: `AI` used to be wired in the dashboard by hand, and when
+# the project moved to config-file bindings it silently stopped
+# existing. The symptoms were three different failures for one cause —
+# `/api/models` answered 503 "AI binding not configured",
+# `/api/v1/search` answered 200 with `Warning: search degraded:
+# unconfigured`, and the chat proxy returned a bare 502 that the SPA
+# could only render as "AI service unavailable — showing offline
+# results". Every other binding below was already declared here, which
+# is why only the AI features were dark.
 #
-# There is no way to keep both the declaration and the offline
-# loop: `experimental_remote = false` leaves the binding in remote
-# mode, `remote = false` reports it as "not supported" and opens
-# the session anyway, and `pages dev` rejects `--config`.
-#
-# To exercise real Workers AI locally, `wrangler login` and then
-# `npm run dev:functions:ai` — same binding, passed as `--ai AI`.
+# The cost of declaring it, and the reason it was left out before:
+# wrangler opens an authenticated remote session for an AI binding, so
+# `npm run dev:functions` wants `wrangler login` before it will serve.
+# `npm run dev` (the SPA alone) is unaffected, and offline work on the
+# bindings keeps working through the mocks (`MOCK_AI=true` with
+# `MOCK_VECTORIZE=true` for the embedding path) — `npm run
+# dev:functions:ai` is the same binding passed as `--ai AI` when a real
+# one is wanted locally.
+[ai]
+binding = "AI"
 
 # D1 database for storing AI feedback (thumbs up/down ratings)
 [[d1_databases]]
@@ -50,12 +54,9 @@ migrations_dir = "migrations"
 # and can be applied independently with
 # `wrangler d1 migrations apply CATALOG_DB`.
 #
-# Like the other bindings here, **Pages reads its bindings from the
-# dashboard, not this file** — adding the binding in source control
-# documents the canonical name + directory and makes a future
-# Workers-deploy migration mechanical. Wire it under
-# Settings → Bindings → D1 → variable name CATALOG_DB → database
-# `sphere-feedback`.
+# Declared here because this project's bindings are managed from this
+# file (see the `AI` block above): what is written below is what the
+# deployment gets, not documentation for a dashboard step.
 [[d1_databases]]
 binding = "CATALOG_DB"
 database_name = "sphere-feedback"
@@ -66,14 +67,10 @@ migrations_dir = "migrations/catalog"
 # Every datapoint written by functions/api/ingest.ts lands here.
 # Query via the AE SQL API; see docs/ANALYTICS_QUERIES.md.
 #
-# Heads-up: Cloudflare Pages does not auto-pick up bindings from
-# this file — they must be added through the project's
-# Settings → Bindings UI (variable name `ANALYTICS`, dataset
-# `terraviz_events`, attached to both Production and Preview).
-# This declaration is kept in source control because (a) it
-# documents the canonical binding/dataset names, and (b) it works
-# for any future migration to a Workers deploy where wrangler.toml
-# is authoritative.
+# Commented out means **absent from the deployment**, not merely
+# undocumented: the file is the whole binding set now. Enable Analytics
+# Engine on the account, uncomment the block below, and redeploy to
+# start ingesting; the globe runs without it either way.
 # Enable Analytics Engine in the Cloudflare dashboard before restoring this
 # binding. The globe can deploy and run without analytics ingestion.
 # [[analytics_engine_datasets]]
@@ -86,13 +83,9 @@ migrations_dir = "migrations/catalog"
 # and cool down for the rest of the session. Absent or any other
 # value = allow.
 #
-# Like the other bindings in this file, **Pages reads its bindings
-# from the dashboard, not this block** — `Settings → Bindings → KV →
-# variable name TELEMETRY_KILL_SWITCH, namespace = the one below`.
-# Kept declared (rather than commented out) so the canonical
-# binding name + namespace ID are visible in source control and so
-# any future Workers deploy where wrangler.toml is authoritative
-# picks it up automatically.
+# Declared, not commented out, because the file is authoritative for
+# this project's bindings — the kill switch is live in the deployment
+# and `wrangler kv key put` above reaches the same namespace.
 #
 # Operations:
 #   - Activate (clients receive 410):
@@ -113,13 +106,10 @@ id = "cb678d8a3f4d4afda5924d503fa185d3"
 # per browse-page load and burn the 5 M-row-reads/day free-tier
 # budget — see "Free-tier viability" in CATALOG_BACKEND_PLAN.md.
 #
-# Binding name only; the namespace ID is a placeholder and must be
-# replaced with the operator's real namespace before deploy. Local
-# Wrangler doesn't validate the ID — it provisions an in-memory KV
-# under `.wrangler/state/v3/kv/<id>/` regardless. Pages reads the
-# binding from the dashboard, not this file: wire it under
-# Settings → Bindings → KV → variable name CATALOG_KV → namespace
-# created via `wrangler kv namespace create CATALOG_KV`.
+# The namespace ID above is what the deployment binds — if it was ever a
+# placeholder, the binding exists but its cache is empty (every read
+# misses). Create the namespace with `wrangler kv namespace create
+# CATALOG_KV` and paste the real ID here before deploying.
 [[kv_namespaces]]
 binding = "CATALOG_KV"
 id = "07b41256ec53465a9211f60b1132c39d"
@@ -127,8 +117,8 @@ id = "07b41256ec53465a9211f60b1132c39d"
 # Weekly free-tier metering for same-origin realtime DASH playback.
 # `/dash/**` and `/realtime/**` media segment requests decrement this
 # KV-backed allowance; forecast, manifest, thumbnail, legend, and DSA
-# requests are not charged. Wire this binding in the Pages dashboard
-# before enabling the gated realtime catalog in production.
+# requests are not charged. Declared here, so it is present in the
+# deployment; the ID above is the live namespace.
 #
 [[kv_namespaces]]
 binding = "REALTIME_QUOTA_KV"
@@ -154,10 +144,8 @@ id = "fc9ecc345f8a4f078469ceba7d9c78fe"
 #     in `.dev.vars` (or `MOCK_R2=true` for the contributor
 #     walkthrough, which skips signing).
 #
-# Pages reads the binding from the dashboard, not this file: wire it
-# under Settings → Bindings → R2 → variable name CATALOG_R2 → bucket
-# created via `wrangler r2 bucket create terraviz-assets`. The bucket
-# name override knob is `CATALOG_R2_BUCKET` in `.dev.vars` (default
+# Declared here, so the deployment binds this bucket. The bucket name
+# override knob is `CATALOG_R2_BUCKET` in `.dev.vars` (default
 # `terraviz-assets`, matching `bucket_name` below).
 [[r2_buckets]]
 binding = "CATALOG_R2"
@@ -188,9 +176,9 @@ bucket_name = "terraviz-assets"
 # in-memory mock that implements cosine similarity end-to-end. See
 # `docs/CATALOG_BACKEND_DEVELOPMENT.md` for the full setup.
 #
-# Pages reads the binding from the dashboard, not this file: wire it
-# under Settings → Bindings → Vectorize → variable name
-# CATALOG_VECTORIZE → index `terraviz-datasets`.
+# Declared here, so the deployment binds this index. Local
+# `wrangler pages dev` reports Vectorize as "not supported", which is
+# what `MOCK_VECTORIZE=true` is for.
 [[vectorize]]
 binding = "CATALOG_VECTORIZE"
 index_name = "terraviz-datasets"
