@@ -5,8 +5,7 @@ import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 import Ajv from 'ajv'
-import addFormats from 'ajv-formats'
-import { createStacSchemaValidator, type StacSchemaSource } from './stac-schema'
+import { addStacFormats, createStacSchemaValidator, type StacSchemaSource } from './stac-schema'
 import { buildStacCatalog, buildStacProduct, TERRAVIZ_SCHEMA } from './stac-builders'
 import { stacFixture } from './stac-test-helpers'
 
@@ -15,6 +14,19 @@ function source(bytes: Uint8Array, uri = TERRAVIZ_SCHEMA): StacSchemaSource {
 }
 
 describe('pinned local extension schemas', () => {
+  it('counts references across all schemas in a bundle', async () => {
+    const schema = (name: string, count: number) => {
+      const uri = `https://lab.example/${name}.json`
+      return source(new TextEncoder().encode(JSON.stringify({ $id: uri, $schema: 'http://json-schema.org/draft-07/schema#',
+        definitions: { anything: {} }, allOf: Array.from({ length: count }, () => ({ $ref: '#/definitions/anything' })) })), uri)
+    }
+    const first = schema('first', 20), second = schema('second', 20)
+    await expect(createStacSchemaValidator([first])).resolves.toHaveProperty('validate')
+    await expect(createStacSchemaValidator([second])).resolves.toHaveProperty('validate')
+    await expect(createStacSchemaValidator([first, second])).rejects.toThrow('across the bundle')
+    await expect(createStacSchemaValidator([schema('first', 16), schema('second', 16)])).resolves.toHaveProperty('validate')
+  })
+
   it.each(['unknown-keyword', 'unknown-format', 'bad-pointer', 'nested-id', 'reference-limit', 'depth-limit'])('rejects %s schema input', async mode => {
     let body: Record<string, unknown> = {}
     if (mode === 'unknown-keyword') body = { inventedKeyword: true }
@@ -69,9 +81,7 @@ describe('pinned local extension schemas', () => {
 
 describe('official STAC 1.1.0 contracts', () => {
   const ajv = new Ajv({ strict: false, allErrors: true })
-  addFormats(ajv)
-  ajv.addFormat('iri', { type: 'string', validate: value => { try { new URL(value); return true } catch { return false } } })
-  ajv.addFormat('iri-reference', { type: 'string', validate: value => { try { new URL(value, 'https://node.example/'); return true } catch { return false } } })
+  addStacFormats(ajv)
   const manifest = JSON.parse(readFileSync('docs/metadata/schemas/official/manifest.json', 'utf8')) as { uri: string; file: string; sha256: string }[]
   for (const entry of manifest) {
     const bytes = readFileSync(`docs/metadata/schemas/official/${entry.file}`)
@@ -79,6 +89,18 @@ describe('official STAC 1.1.0 contracts', () => {
     ajv.addSchema(JSON.parse(bytes.toString()), entry.uri)
   }
   ajv.addSchema(JSON.parse(readFileSync('docs/metadata/schemas/terraviz-v1.0.0.json', 'utf8')))
+
+  it.each(['https://node.example/with space', 'https://node.example/tab\tpath', 'https://node.example/new\nline'])('uses the same rejecting format checks in official and local validators: %j', async href => {
+    const { node, resolvers } = await stacFixture()
+    const root = buildStacCatalog(node, resolvers)
+    if (!root.ok) throw new Error(root.reasons.join(','))
+    root.value.links = [{ rel: 'self', href }]
+    expect(ajv.getSchema('https://schemas.stacspec.org/v1.1.0/catalog-spec/json-schema/catalog.json')!(root.value)).toBe(false)
+    const schema = source(new TextEncoder().encode(JSON.stringify({ $id: TERRAVIZ_SCHEMA, $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object', properties: { links: { type: 'array', items: { type: 'object', properties: { href: { type: 'string', format: 'iri' } } } } } })))
+    const validator = await createStacSchemaValidator([schema])
+    expect(validator.validate(schema.uri, schema.sha256, root.value)).toBe('invalid')
+  })
 
   it.each(['interval', 'instant', 'offset', 'antimeridian', 'unknown-geometry', 'unknown-time'])('validates %s output against core and every declared schema', async mode => {
     const { model, node, resolvers } = await stacFixture()

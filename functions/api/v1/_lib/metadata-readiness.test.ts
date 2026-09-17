@@ -73,6 +73,12 @@ describe('strict SPDX readiness independent of native publishing', () => {
 })
 
 describe('truthful spatial and represented-time metadata', () => {
+  it.each([{ bbox_n: 20 }, { bbox_w: -170 }, { bbox_w: 180, bbox_e: -180 }])('reports degenerate bounds before declaring eligibility: %j', overrides => {
+    const input = product(overrides)
+    expect(evaluateSpatial(input)).toEqual({ ready: false, status: 'review', bounds: null, reasons: ['spatial_bounds_degenerate'] })
+    expect(evaluateMetadataReadiness(input)).toMatchObject({ decision: 'needs_review', reasons: ['spatial_bounds_degenerate'] })
+  })
+
   it('retains a measured antimeridian box without world expansion', () => {
     expect(evaluateSpatial(product())).toEqual({ ready: true, status: 'known', reasons: [], bounds: { n: 40, s: 20, w: 170, e: -170 } })
   })

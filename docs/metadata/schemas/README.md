@@ -27,6 +27,12 @@ palette range validity and vocabulary ownership, remain in canonical parsers
 and policy gates. `stac_extensions` contains only extensions used by output.
 Arbitrary approved node schemas cannot redefine these reserved namespaces.
 
+Built-in extension declarations are assembled once, before policy/schema
+validation, for Catalogs, Collections and Items. Policy adds/removes custom
+schema URIs itself and cannot add reserved built-in fields, so a second
+built-in declaration pass is unnecessary. Resolver MIME types are normalized
+to lowercase once; rendition comparisons use the same case-insensitive rule.
+
 Catalog description precedence is nonempty node identity description, current
 approved mission, current approved about-summary, then deterministic generic
 text. About summaries are parsed as Markdown and projected to bounded plain
@@ -40,7 +46,13 @@ Phase 2 gate.
 
 `stac-schema.ts` accepts supplied draft-07 bytes, verifies their SHA-256 digest
 and identity, and resolves references only within that bundle. Bounds are 1 MiB,
-33 documents, 32 references, reference depth 8, and 32768 visited nodes. Missing,
+33 documents, 32 references across the entire bundle, reference depth 8, and
+32768 visited nodes across the entire bundle. These are independent ceilings,
+not an allowance of 32 references per document. The conservative Phase 0
+budget is retained: a multi-schema test accepts 16+16 references but rejects
+20+20 even though either schema works alone. Revisit the budget with measured
+extension requirements and a policy review, not by silently resetting counters.
+Missing,
 cyclic, nested-identity, unsupported-keyword and unknown-format schemas fail
 closed. It does not install a network loader, mutate inputs, add defaults, or
 coerce values. Registration and current review evidence remain separate gates.
@@ -57,7 +69,15 @@ retrieval URI. STAC and extension sources are available from their corresponding
 STAC specification / stac-extensions repositories; GeoJSON schemas come from
 geojson.org. Upstream license terms continue to apply.
 
+Official fixture tests and local validators share `addStacFormats`, including
+whitespace rejection for both `iri` and `iri-reference`. Only their schema trust
+and bundle-limit policies differ.
+
 To deliberately refresh fixtures, run `node --import tsx
 scripts/vendor-stac-schemas.ts` from the repository root and review the manifest
 and schema diffs. This maintenance command performs downloads; normal tests and
 the serializer do not. Never refresh fixtures implicitly in CI.
+Filenames identify the schema host/path and a stable URI hash, not traversal
+indices; the manifest is sorted by source URI. Explicit seed URLs have their
+own allowlist, independent of the growing discovery queue. Refreshing removes
+obsolete generated names from the prior manifest but preserves other files.

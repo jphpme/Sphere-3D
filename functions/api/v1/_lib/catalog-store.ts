@@ -425,7 +425,7 @@ export async function getPublicDataset(
  * real workload that crossed the limit; pre-1d nobody had enough
  * published rows to surface the cliff.
  */
-const D1_BIND_BATCH = 80
+export const D1_BIND_BATCH = 80
 
 /**
  * Fetch every decoration row for a set of dataset ids in batch

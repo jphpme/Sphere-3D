@@ -72,15 +72,45 @@ describe('pure STAC builders', () => {
 })
 
 describe('eligibility and mapping matrix', () => {
-  it('maps verified renditions and auxiliary assets without using upload digests', async () => {
+  it.each(['catalog', 'collection', 'item', 'manifest'] as const)('reports only resolver failures as resource URL errors (%s)', async kind => {
+    const { model, node, resolvers } = await stacFixture()
+    const product = buildStacProduct(model, node, resolvers)
+    if (!product.ok) throw new Error(product.reasons.join(','))
+    const original = resolvers.resource
+    resolvers.resource = (requested, id) => { if (requested === kind) throw new Error('Resource unavailable'); return original(requested, id) }
+    expect(buildStacProduct(model, node, resolvers)).toEqual({ ok: false, reasons: ['resource_url_invalid'] })
+    if (kind === 'catalog' || kind === 'collection') expect(buildStacCatalog(node, resolvers, [product.value])).toEqual({ ok: false, reasons: ['resource_url_invalid'] })
+  })
+
+  it('reports failed origin resolution without masking implementation errors', async () => {
+    const { model, node, resolvers } = await stacFixture()
+    node.identity.node_id = 'MIRROR'
+    resolvers.origin = () => { throw new Error('Unavailable origin') }
+    expect(buildStacProduct(model, node, resolvers)).toEqual({ ok: false, reasons: ['origin_link_unresolved'] })
+  })
+
+  it('reports UTC normalization overflow as a temporal error', async () => {
+    const { model, node, resolvers } = await stacFixture()
+    model.row.start_time = model.row.end_time = '9999-12-31T23:59:59-23:59'
+    expect(buildStacProduct(model, node, resolvers)).toEqual({ ok: false, reasons: ['temporal_utc_invalid'] })
+  })
+
+  it.each([{ bbox_n: -30 }, { bbox_w: 60 }, { bbox_w: 180, bbox_e: -180 }])('returns actionable degenerate bounds reasons: %j', async bounds => {
+    const { model, node, resolvers } = await stacFixture()
+    Object.assign(model.row, bounds)
+    expect(buildStacProduct(model, node, resolvers)).toEqual({ ok: false, reasons: ['spatial_bounds_degenerate'] })
+    expect(() => buildStacGeometry({ n: model.row.bbox_n!, s: model.row.bbox_s!, w: model.row.bbox_w!, e: model.row.bbox_e! })).toThrow('Degenerate')
+  })
+
+  it.each([['video/mp4', 'VIDEO/MP4'], ['VIDEO/MP4', 'video/mp4']])('maps rendition MIME %s to %s without using upload digests', async (storedType, resolvedType) => {
     const { model, node, resolvers } = await stacFixture()
     model.row.thumbnail_ref = 'url:https://data.example/thumb.png'
     model.row.caption_ref = 'url:https://data.example/captions.vtt'
     model.renditions = [{ dataset_id: model.row.id, rendition_id: 'REN1', codec: 'h264', color_space: 'rec709', bit_depth: 8, has_alpha: 0, alpha_encoding: null,
-      width: 2048, height: 1024, bitrate_kbps: 1000, ref: 'r2:rendition.mp4', mime_type: 'video/mp4', content_digest: 'sha256:' + 'c'.repeat(64), created_at: '2026-01-01T00:00:00Z' }]
+      width: 2048, height: 1024, bitrate_kbps: 1000, ref: 'r2:rendition.mp4', mime_type: storedType, content_digest: 'sha256:' + 'c'.repeat(64), created_at: '2026-01-01T00:00:00Z' }]
     const original = resolvers.asset
     resolvers.asset = (ref, purpose) => purpose === 'rendition-REN1' || purpose === 'captions'
-      ? { sourceRef: ref, href: `https://assets.example/${purpose}`, type: purpose === 'captions' ? 'text/vtt' : 'video/mp4', anonymous: true, byteSize: 1000 } : original(ref, purpose)
+      ? { sourceRef: ref, href: `https://assets.example/${purpose}`, type: purpose === 'captions' ? 'TEXT/VTT' : resolvedType, anonymous: true, byteSize: 1000 } : original(ref, purpose)
     const result = buildStacProduct(model, node, resolvers)
     expect(result.ok).toBe(true)
     if (!result.ok) return
@@ -144,6 +174,8 @@ describe('eligibility and mapping matrix', () => {
     ['url:https://data.example/file.png', 'image/png'], ['url:https://data.example/file.mp4', 'video/mp4'],
     ['r2:private-internal-key/file.png', 'image/png'], ['stream:opaque-id', 'application/vnd.apple.mpegurl'],
     ['vimeo:12345', 'video/mp4'], ['peer:origin/asset', 'image/jpeg'], ['r2:bundle/master.m3u8', 'application/x-mpegURL'],
+    ['r2:bundle/master.m3u8', 'application/x-mpegurl'], ['stream:opaque-id', 'application/VND.APPLE.MPEGURL'],
+    ['url:https://data.example/file.png', 'IMAGE/PNG'],
   ])('uses only resolved %s assets', async (ref, type) => {
     const { model, node, resolvers } = await stacFixture()
     model.row.data_ref = ref
@@ -154,7 +186,7 @@ describe('eligibility and mapping matrix', () => {
     expect(result.ok).toBe(true)
     if (!result.ok) return
     const asset = result.value.item!.assets.data
-    expect(asset).toMatchObject({ href: 'https://assets.example/delivered', type })
+    expect(asset).toMatchObject({ href: 'https://assets.example/delivered', type: type.toLowerCase() })
     expect(asset['file:checksum']).toBe(/mpegurl/i.test(type) ? undefined : '1220' + 'a'.repeat(64))
     expect(JSON.stringify(result)).not.toContain('b'.repeat(64))
     expect(JSON.stringify(result)).not.toContain('private-internal-key')
@@ -217,6 +249,25 @@ describe('eligibility and mapping matrix', () => {
 })
 
 describe('policy integration matrix', () => {
+  it.each(['Catalog', 'Item'] as const)('does not disguise unexpected %s policy exceptions as resolver errors', async scope => {
+    const { model, node, resolvers } = await stacFixture()
+    const extension = registration()
+    extension.scopes.push('Catalog')
+    extension.fields[0].scopes.push('Catalog')
+    node.extensions = [extension]
+    node.policyCurrent = true
+    const fields = [{ key: 'lab:code', value: 'valid', scope, ownerNodeId: 'NODE000', essential: true }]
+    const error = new TypeError('Unexpected validator defect')
+    resolvers.schemas = { validate: () => { throw error } }
+    if (scope === 'Catalog') {
+      node.customFields = fields
+      expect(() => buildStacCatalog(node, resolvers)).toThrow(error)
+    } else {
+      model.customFields = fields
+      expect(() => buildStacProduct(model, node, resolvers)).toThrow(error)
+    }
+  })
+
   it.each(['__proto__', 'constructor', 'missing'])('rejects non-own Asset target %s', async assetKey => {
     const { model, node, resolvers } = await stacFixture()
     node.policyCurrent = true

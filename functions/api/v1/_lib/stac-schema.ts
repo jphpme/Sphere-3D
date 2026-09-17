@@ -7,6 +7,12 @@ import type { StacSchemaValidator } from './stac-policy'
 
 export interface StacSchemaSource { uri: string; sha256: string; bytes: Uint8Array }
 
+export function addStacFormats(ajv: Ajv): void {
+  addFormats(ajv)
+  ajv.addFormat('iri', { type: 'string', validate: value => { try { new URL(value); return !/\s/.test(value) } catch { return false } } })
+  ajv.addFormat('iri-reference', { type: 'string', validate: value => { try { new URL(value, 'https://schema.invalid/'); return !/\s/.test(value) } catch { return false } } })
+}
+
 export async function createStacSchemaValidator(sources: StacSchemaSource[]): Promise<StacSchemaValidator> {
   if (sources.length > 33 || sources.reduce((sum, source) => sum + source.bytes.byteLength, 0) > 1048576) throw new Error('Schema bundle exceeds bounds')
   const schemas = new Map<string, { schema: AnySchemaObject; digest: string }>()
@@ -35,6 +41,7 @@ export async function createStacSchemaValidator(sources: StacSchemaSource[]): Pr
     }
     return value
   }
+  // Both counters are bundle-wide budgets, not per-schema allowances.
   let references = 0
   let visited = 0
   const scan = (value: unknown, base: string, stack: Set<string>, depth: number, nesting: number): void => {
@@ -65,13 +72,11 @@ export async function createStacSchemaValidator(sources: StacSchemaSource[]): Pr
       }
     }
     count(schema)
-    if (references > 32) throw new Error('Too many schema references')
+    if (references > 32) throw new Error('Too many schema references across the bundle (maximum 32)')
     scan(schema, uri, new Set([uri]), 0, 0)
   }
   const ajv = new Ajv({ strict: false, strictSchema: true, allErrors: false, validateFormats: true, ownProperties: true })
-  addFormats(ajv)
-  ajv.addFormat('iri', { type: 'string', validate: value => { try { new URL(value); return !/\s/.test(value) } catch { return false } } })
-  ajv.addFormat('iri-reference', { type: 'string', validate: value => { try { new URL(value, 'https://schema.invalid/'); return !/\s/.test(value) } catch { return false } } })
+  addStacFormats(ajv)
   for (const { schema } of schemas.values()) ajv.addSchema(schema)
   for (const uri of schemas.keys()) ajv.getSchema(uri)
   return {

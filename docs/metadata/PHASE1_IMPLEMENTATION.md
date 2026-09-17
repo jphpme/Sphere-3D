@@ -1,7 +1,7 @@
 # Phase 1: Pure STAC Projection
 
 **Status:** Implemented; internal projection only, no public exposure
-**Last reviewed:** 2026-09-16
+**Last reviewed:** 2026-09-17
 **Revisit when:** Phase 1 contracts change or Phase 2 begins public exposure.
 
 This implements the five numbered steps in [the metadata plan](README.md#phase-1-pure-projection), one DCO-signed commit per step.
@@ -31,6 +31,15 @@ vocabulary references are optional caller-supplied inputs, never private draft
 reads. The reader is not an atomic D1 snapshot: Phase 2 must provide a consistent
 read session and authoritative access/freshness rechecks before exposing output.
 
+`StacNodeContext` is an internal projection input, not a frozen public wire or
+storage schema. Identity is the currently populated baseline. The optional
+profile/extension/vocabulary shapes are provisional and may evolve when their
+real storage and request adapters are implemented. Their privacy and validation
+invariants remain mandatory. No production request composes this reader and
+these builders yet; Phase 2 must add request-level composition tests, verified
+approval provenance and freshness before enabling richer mappings. A fixture's
+`policyCurrent` flag must never substitute for those checks.
+
 Builders return structured exclusion/omission reasons. Asset resolution is an
 injected trust boundary: the caller attests to an anonymous, stable URL for the
 exact source reference, MIME type and (when supplied) delivered bytes/host.
@@ -38,6 +47,23 @@ No builder fetches assets or treats URL syntax as proof of reachability. HLS
 bundle digests and source-upload digests are not emitted as file checksums.
 The reader joins workflow ownership; sequences and recurring outputs remain
 withheld without the immutable identities deferred to Phase 3.
+
+The `manifest` asset means the existing native playback endpoint
+[`GET /api/v1/datasets/{id}/manifest`](../../functions/api/v1/datasets/%5Bid%5D/manifest.ts),
+not a proposed STAC manifest route. The Phase 2 adapter must point it at that
+deployed endpoint (or a verified equivalent) and test anonymous reachability
+for every exported delivery scheme; the existing endpoint does not support
+all peer references. Merely constructing an absolute URL proves neither route
+existence nor successful resolution. If a required route cannot be supplied,
+the resolver must fail and the product is withheld. STAC routes, their links
+and extension-schema hosting must become available together before discovery
+is advertised; emitting links first is not an allowed rollout sequence.
+
+Expected resolver failures have explicit resource/asset/origin reasons, and
+UTC normalization failures have temporal reasons. Unexpected policy or mapping
+exceptions propagate for diagnosis instead of being relabeled as invalid URLs.
+Zero-area bounds are rejected in readiness as `spatial_bounds_degenerate`;
+the geometry builder retains an invariant assertion as a second line of defense.
 
 Optional policy fixtures explicitly assert `policyCurrent`; that assertion is
 not an authorization or cache implementation. Selected profile fields use the

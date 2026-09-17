@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Zyra Project
 
-import { getDecorations, getNodeIdentity, listPublicDatasets, type DatasetRow, type DecorationRows, type NodeIdentityRow } from './catalog-store'
+import { D1_BIND_BATCH, getDecorations, getNodeIdentity, listPublicDatasets, type DatasetRow, type DecorationRows, type NodeIdentityRow } from './catalog-store'
 import type { ExtensionRegistration, MetadataReviewEvidence, MetadataScope, VocabularyDescriptor, VocabularyReference } from './metadata-policy'
 
 export interface StacMediaIntrinsics {
@@ -82,8 +82,8 @@ export async function readStacModel(db: D1Database): Promise<StacReadModel> {
   const media = new Map<string, StacMediaIntrinsics>()
   const renditions = new Map<string, StacRendition[]>()
   const workflowDatasets = new Set<string>()
-  for (let offset = 0; offset < rows.length; offset += 80) {
-    const ids = rows.slice(offset, offset + 80).map(row => row.id)
+  for (let offset = 0; offset < rows.length; offset += D1_BIND_BATCH) {
+    const ids = rows.slice(offset, offset + D1_BIND_BATCH).map(row => row.id)
     const placeholders = ids.map(() => '?').join(',')
     const [mediaResult, renditionResult, workflowResult] = await Promise.all([
       db.prepare(`SELECT id, width, height, render_width, render_height, color_space,
