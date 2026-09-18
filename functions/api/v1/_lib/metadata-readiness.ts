@@ -140,6 +140,7 @@ export function evaluateSpatial(input: MetadataReadinessInput): SpatialReadiness
       ![n, s, w, e].every(Number.isFinite) || n < s || s < -90 || n > 90 || w < -180 || w > 180 || e < -180 || e > 180) {
     return result('review', 'spatial_bounds_invalid')
   }
+  if (n === s || w === e || (w === 180 && e === -180)) return result('review', 'spatial_bounds_degenerate')
   if (p === 'declared_global' && !(n === 90 && s === -90 && w === -180 && e === 180)) return result('review', 'spatial_global_bounds_mismatch')
   return { ready: true, status: 'known', bounds: { n, s, w, e }, reasons: [] }
 }

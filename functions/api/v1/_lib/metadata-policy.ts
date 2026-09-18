@@ -149,6 +149,7 @@ function jsonBytes(value: unknown, max: number): number | null {
 export function canManageMetadataPolicy(role: PublisherRole): boolean {
   return roleCan(role, 'operator.manage')
 }
+export { approved as isApprovedMetadataReviewEvidence, jsonBytes as metadataJsonBytes }
 function approved(value: unknown): value is MetadataReviewEvidence {
   if (!shape(value, ['authorId', 'authorRole', 'reviewerId', 'reviewerRole', 'changeId', 'reason'])) return false
   return text(value.authorId, 128) && text(value.reviewerId, 128) && value.authorId !== value.reviewerId

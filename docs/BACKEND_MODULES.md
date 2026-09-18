@@ -17,6 +17,17 @@ design rationale in the `docs/CATALOG_*` plan docs.
 
 ## Publisher CLI (`cli/`)
 
+Phase 1 internal projection modules (no public routes):
+
+| File | Responsibility |
+|---|---|
+| `functions/api/v1/_lib/stac-types.ts` | Narrow STAC core 1.1 Catalog/Collection/Item contracts, explicit null geometry and complete temporal intervals; no API conformance claim |
+| `functions/api/v1/_lib/stac-read-model.ts` | Internal canonical STAC input: public rows, batched decorations/media/renditions, separate identity context, optional supplied reviewed policy fixtures; never reads private profile drafts |
+| `functions/api/v1/_lib/stac-builders.ts` | Pure STAC Catalog/Collection/Item builders, readiness gates, antimeridian geometry, verified asset resolver contract, attribution, licenses, extension declarations and deterministic ETag input |
+| `functions/api/v1/_lib/stac-policy.ts` | First internal policy consumer: current reviewed profile selection, Markdown-to-text summary, custom-field scope/owner/aggregate gates with local schema validation, and vocabulary reference validation |
+| `functions/api/v1/_lib/stac-schema.ts` | Offline draft-07 schema validator: SHA-256 verified bytes, bounded local references, cycle/unresolved-reference rejection and no network resolver |
+| `functions/api/v1/_lib/stac-test-helpers.ts` | Shared canonical SQLite fixture for projection and schema tests; never imported by production modules |
+
 | File | Responsibility |
 |---|---|
 | `cli/commands.ts` | Command implementations for the `terraviz` CLI |
