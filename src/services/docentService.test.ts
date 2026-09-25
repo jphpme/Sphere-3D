@@ -3,7 +3,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import type { Dataset, ChatMessage, DocentConfig } from '../types'
-import { processMessage, loadConfig, saveConfig, getDefaultConfig, validateAndCleanText, captureViewContext, readCurrentTime, executeSearchDatasets, executeListFeaturedDatasets, executeSearchEvents, clearPreSearchCache } from './docentService'
+import { processMessage, loadConfig, saveConfig, getDefaultConfig, validateAndCleanText, captureViewContext, readCurrentTime, setStreamContextProvider, executeSearchDatasets, executeListFeaturedDatasets, executeSearchEvents, clearPreSearchCache } from './docentService'
 import type { PublicEvent } from './eventsService'
 import { getDegradedReason, resetForTests as resetDegradedForTests } from './docentDegradedState'
 import type { DocentStreamChunk } from './docentService'
@@ -3193,5 +3193,50 @@ describe('processMessage — §A6 find_extremum moves the globe itself', () => {
       'what is the average here',
     )
     expect(actions(chunks, 'fly-to')).toHaveLength(0)
+  })
+})
+
+describe('processMessage — the stream descriptor (AYNI .dsa)', () => {
+  const config: DocentConfig = {
+    apiUrl: 'http://localhost:11434/v1',
+    apiKey: '',
+    model: 'test',
+    enabled: true,
+    readingLevel: 'general',
+    visionEnabled: false,
+  }
+
+  async function systemPromptFor(question: string): Promise<string> {
+    const { streamChat } = await import('./llmProvider')
+    let system = ''
+    vi.mocked(streamChat).mockImplementation(async function* (msgs) {
+      const sys = msgs.find(m => m.role === 'system')
+      system = typeof sys?.content === 'string' ? sys.content : ''
+      yield { type: 'delta' as const, text: 'Reply.' }
+      yield { type: 'done' as const }
+    })
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('not found', { status: 404 }))
+    for await (const _chunk of processMessage(question, [], datasets, datasets[0]!, config)) { /* drain */ }
+    return system
+  }
+
+  afterEach(() => setStreamContextProvider(null))
+
+  it('puts the loaded stream\'s descriptor lines in front of the model', async () => {
+    setStreamContextProvider(() => 'Stream descriptor (.dsa)\n- Last updated: 2026-09-21 15:40 UTC')
+    const system = await systemPromptFor('when was this last updated?')
+    expect(system).toContain('- Last updated: 2026-09-21 15:40 UTC')
+  })
+
+  it('answers without them rather than wait on a descriptor that is slow to arrive', async () => {
+    setStreamContextProvider(() => new Promise<string | null>(() => { /* never settles */ }))
+    const system = await systemPromptFor('when was this last updated?')
+    expect(system).not.toContain('Stream descriptor')
+    expect(system).toContain('Currently loaded')
+  }, 10_000)
+
+  it('shrugs off a provider that throws', async () => {
+    setStreamContextProvider(() => { throw new Error('boom') })
+    expect(await systemPromptFor('what is this?')).toContain('Currently loaded')
   })
 })

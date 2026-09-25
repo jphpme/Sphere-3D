@@ -113,4 +113,34 @@ describe('createDsaTimelineCache', () => {
     expect(await cache.load('')).toBeNull()
     expect(fetchImpl).not.toHaveBeenCalled()
   })
+
+  describe('descriptor metadata, for Orbit', () => {
+    it('comes from the same single request as the axis', async () => {
+      const fetchImpl = makeFetch(() => jsonResponse({ ...DSA, creator: 'Real-Time New', dataProductType: 'realtime' }))
+      const cache = createDsaTimelineCache({ fetchImpl: fetchImpl as unknown as typeof fetch })
+
+      const [timeline, meta] = await Promise.all([cache.load(URL_A), cache.loadMetadata(URL_A)])
+
+      expect(timeline).not.toBeNull()
+      expect(meta).toMatchObject({ creator: 'Real-Time New', productType: 'realtime' })
+      expect(cache.getMetadata(URL_A)?.creator).toBe('Real-Time New')
+      expect(fetchImpl).toHaveBeenCalledTimes(1)
+    })
+
+    it('survives a descriptor with no time block', async () => {
+      const cache = createDsaTimelineCache({
+        fetchImpl: makeFetch(() => jsonResponse({ creator: 'Someone' })) as unknown as typeof fetch,
+      })
+      expect(await cache.loadMetadata(URL_A)).toMatchObject({ creator: 'Someone' })
+      expect(cache.get(URL_A)).toBeNull()
+    })
+
+    it('is null for a 404, cached like the axis', async () => {
+      const fetchImpl = makeFetch(() => jsonResponse({}, 404))
+      const cache = createDsaTimelineCache({ fetchImpl: fetchImpl as unknown as typeof fetch })
+      expect(await cache.loadMetadata(URL_A)).toBeNull()
+      expect(await cache.loadMetadata(URL_A)).toBeNull()
+      expect(fetchImpl).toHaveBeenCalledTimes(1)
+    })
+  })
 })

@@ -50,7 +50,8 @@ import {
 } from './ui/analyzeUI'
 import { createPlaybackSettleWatcher } from './services/playbackSettle'
 import { createDsaTimelineCache, type DsaTimelineCache } from './services/dsaTimelineCache'
-import { dateAtVideoTimeMs, timelineSpanMs, videoTimeForDateMs } from './services/dsaTimeline'
+import { dateAtVideoTimeMs, frameAtVideoTime, timelineSpanMs, videoTimeForDateMs } from './services/dsaTimeline'
+import { describeStreamForDocent } from './services/dsaMetadata'
 import { formatPlayheadLabel, type TimelineTrackState } from './services/timelineTrackCanvas'
 import { createTimelineTrackUI, type TimelineTrackUIHandle } from './ui/timelineTrackUI'
 import { registerAnalysisSource } from './services/docentAnalysisTools'
@@ -86,7 +87,7 @@ import { resolveRegion } from './data/regions'
 import type { PublicEvent } from './services/eventsService'
 import { TourEngine, type TourTelemetryMeta } from './services/tourEngine'
 import { showTourControls, hideTourControls, hideAllTourTextBoxes, hideAllTourImages, hideAllTourVideos, hideAllTourPopups, hideAllTourQuestions } from './ui/tourUI'
-import { initLegendForDataset, clearLegendCache, loadConfig, readCurrentTime } from './services/docentService'
+import { initLegendForDataset, clearLegendCache, loadConfig, readCurrentTime, setStreamContextProvider } from './services/docentService'
 import { isMobile, IS_MOBILE_NATIVE, getCloudTextureUrl } from './utils/deviceCapability'
 import { initDeepLinks } from './services/deepLinkService'
 import {
@@ -2804,6 +2805,19 @@ class InteractiveSphere {
   private initChat(): void {
     initPlaybackPositioning()
     this.mountTimelineTrack()
+    // Orbit reads the loaded stream's .dsa — its update time, cadence,
+    // completeness, and whether the frame on screen is observed or a
+    // filled gap. Same cache the date track uses, so it is normally one
+    // map lookup; a catalog row has no .dsa and contributes nothing.
+    setStreamContextProvider(async () => {
+      const url = this.appState.currentDataset?.timelineLink
+      if (!url) return null
+      const meta = await this.dsaTimelines.loadMetadata(url)
+      const timeline = this.dsaTimelines.get(url)
+      const video = this.hlsService?.video
+      const frame = timeline && video ? frameAtVideoTime(timeline, video.currentTime) : null
+      return describeStreamForDocent(meta, timeline, frame) || null
+    })
     initChatUI({
       onLoadDataset: (id) => { void this.selectDatasetFromChat(id) },
       onLoadFrame: (id, frameQuery) => { void this.loadFrameFromChat(id, frameQuery) },

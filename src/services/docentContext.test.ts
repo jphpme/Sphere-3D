@@ -89,6 +89,14 @@ describe('buildCurrentDatasetContext', () => {
     const ctx = buildCurrentDatasetContext(ds)
     expect(ctx).toContain('2020')
   })
+
+  it('carries a stream\'s .dsa lines into the prompt, and nothing when there are none', () => {
+    const lines = 'Stream descriptor (.dsa) — …\n- Last updated: 2026-09-21 15:40 UTC'
+    expect(buildCurrentDatasetContext(makeDataset(), null, null, lines)).toContain('- Last updated: 2026-09-21 15:40 UTC')
+    expect(buildCurrentDatasetContext(makeDataset(), null, null, null)).not.toContain('Stream descriptor')
+    // No dataset, no descriptor: the default-Earth message stands alone.
+    expect(buildCurrentDatasetContext(null, null, null, lines)).not.toContain('Stream descriptor')
+  })
 })
 
 describe('getSearchCatalogTool', () => {

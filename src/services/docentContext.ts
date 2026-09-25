@@ -42,6 +42,7 @@ export function buildCurrentDatasetContext(
   dataset: Dataset | null,
   legendDescription?: string | null,
   currentTime?: string | null,
+  streamContext?: string | null,
 ): string {
   if (!dataset) {
     return 'The user is currently viewing the default Earth globe with real-time cloud cover. No specific dataset is loaded. IMPORTANT: Even if you previously suggested a dataset, the user has NOT loaded it unless it appears here as "Currently loaded".'
@@ -107,6 +108,10 @@ export function buildCurrentDatasetContext(
       'You may state this range. Any *specific* value still has to come from a tool result.',
     )
   }
+
+  // AYNI: a real-time or forecast stream's own descriptor — the only
+  // place its update time, cadence and gaps are written.
+  if (streamContext) parts.push(streamContext)
 
   return parts.join('\n')
 }
@@ -174,8 +179,10 @@ export function buildSystemPrompt(
    *  permission alone invites the model to answer from memory, and the
    *  tools alone leave it forbidden from saying what came back. */
   analysisToolsActive: boolean = false,
+  /** AYNI — the loaded stream's `.dsa` metadata, as dsaMetadata's describeStreamForDocent writes it. */
+  streamContext?: string | null,
 ): string {
-  const currentContext = buildCurrentDatasetContext(currentDataset, legendDescription, currentTime)
+  const currentContext = buildCurrentDatasetContext(currentDataset, legendDescription, currentTime, streamContext)
   const languagePreface = buildLanguagePreface()
   const languageDirective = buildLanguageDirective()
 

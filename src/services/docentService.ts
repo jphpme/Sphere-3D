@@ -118,6 +118,41 @@ const legendCache: LegendCache = {
 /** Read the current time label from the globe overlay.
  * Returns null if the time label is hidden (no temporal data for the current dataset).
  */
+/**
+ * Where the stream-descriptor lines come from — the host registers a
+ * provider that knows the loaded dataset, its `.dsa`, and the frame on
+ * screen (main.ts, via dsaMetadata's describeStreamForDocent). Null for
+ * a host without real-time streams, and for every catalog row.
+ */
+type StreamContextProvider = () => string | null | Promise<string | null>
+let streamContextProvider: StreamContextProvider | null = null
+
+export function setStreamContextProvider(provider: StreamContextProvider | null): void {
+  streamContextProvider = provider
+}
+
+/**
+ * A turn waits this long at most for the descriptor. It is normally
+ * cached already — the date track fetched it when the stream loaded —
+ * but a first fetch of a 300 KB file on a slow link must not hold the
+ * answer back; the next turn will have it.
+ */
+const STREAM_CONTEXT_WAIT_MS = 1500
+
+export async function readStreamContext(): Promise<string | null> {
+  if (!streamContextProvider) return null
+  try {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), STREAM_CONTEXT_WAIT_MS) })
+    const context = await Promise.race([Promise.resolve(streamContextProvider()), timeout])
+    clearTimeout(timer)
+    return context || null
+  } catch (err) {
+    logger.debug('[Docent] stream context provider failed:', err)
+    return null
+  }
+}
+
 export function readCurrentTime(): string | null {
   const labelEl = document.getElementById('time-label')
   if (!labelEl || labelEl.classList.contains('hidden')) return null
@@ -1500,6 +1535,9 @@ export async function* processMessage(
     // deprioritised by small vision models); in non-vision mode into the system prompt.
     const legendDescription = cache.legendDescription ?? null
     const currentTime = readCurrentTime()
+    // Started here so it overlaps the Q&A load below; usually already
+    // cached, and capped at STREAM_CONTEXT_WAIT_MS when it is not.
+    const streamContextPending = readStreamContext()
 
     // Best-effort Q&A knowledge retrieval (non-blocking if not yet loaded)
     await ensureQALoaded().catch(() => {})
@@ -1528,6 +1566,10 @@ export async function* processMessage(
     // gate closing is correct behaviour; closing silently is not.
     logger.info(`[Docent] value tools: ${analysisToolsActive ? 'offered' : `absent (${analysisAvail.reason})`}`)
 
+    // Descriptor metadata goes in the system prompt in both modes: it is
+    // about the stream, not the image, so it has no place in the vision
+    // prefix the legend and time move to.
+    const streamContext = await streamContextPending
     const systemPrompt = buildSystemPrompt(
       datasets, currentDataset, cfg.readingLevel, visionActive,
       !visionActive ? legendDescription : null,
@@ -1535,6 +1577,7 @@ export async function* processMessage(
       qaContext || null,
       mapViewContext,
       analysisToolsActive,
+      streamContext,
     )
 
     if (cfg.debugPrompt) {

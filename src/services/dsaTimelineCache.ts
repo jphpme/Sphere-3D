@@ -32,6 +32,7 @@
 
 import { logger } from '../utils/logger'
 import { parseDsaTimeline, type DsaTimeline } from './dsaTimeline'
+import { parseDsaMetadata, type DsaMetadata } from './dsaMetadata'
 
 export interface DsaTimelineCacheOptions {
   /**
@@ -57,6 +58,15 @@ export interface DsaTimelineCache {
   prefetch(url: string): void
   /** Awaitable form of {@link prefetch}, for callers that want the answer. */
   load(url: string): Promise<DsaTimeline | null>
+  /**
+   * The rest of the same descriptor — creator, dates, completeness —
+   * parsed from the one response the timeline came from, for Orbit.
+   * Unlike the axis it survives a file with no time block. Null until
+   * the file has arrived, and for one that never will.
+   */
+  getMetadata(url: string): DsaMetadata | null
+  /** Awaitable form of {@link getMetadata}; shares the timeline's request. */
+  loadMetadata(url: string): Promise<DsaMetadata | null>
   /** Drop every cached axis. For a session teardown in tests. */
   clear(): void
 }
@@ -77,21 +87,24 @@ export function createDsaTimelineCache(
   const settled = new Map<string, DsaTimeline | null>()
   /** In-flight requests, so concurrent callers share one. */
   const pending = new Map<string, Promise<DsaTimeline | null>>()
+  /** Each descriptor's metadata, parsed from the same response as its axis. */
+  const metadata = new Map<string, DsaMetadata | null>()
 
-  async function fetchTimeline(url: string): Promise<DsaTimeline | null> {
-    if (!fetchImpl) return null
+  async function fetchDescriptor(url: string): Promise<{ timeline: DsaTimeline | null; meta: DsaMetadata | null }> {
+    if (!fetchImpl) return { timeline: null, meta: null }
     try {
       const res = await fetchImpl(url, { headers: { Accept: 'application/json' } })
       if (!res.ok) {
         // Debug, not warn: a row whose annotation has not been published
         // yet is a normal state of a live catalog, not a fault.
         logger.debug(`[dsaTimeline] ${url} -> HTTP ${res.status}`)
-        return null
+        return { timeline: null, meta: null }
       }
-      return parseDsaTimeline(await res.json())
+      const raw: unknown = await res.json()
+      return { timeline: parseDsaTimeline(raw), meta: parseDsaMetadata(raw) }
     } catch (err) {
       logger.debug(`[dsaTimeline] ${url} failed:`, err)
-      return null
+      return { timeline: null, meta: null }
     }
   }
 
@@ -100,7 +113,8 @@ export function createDsaTimelineCache(
     if (settled.has(url)) return Promise.resolve(settled.get(url) ?? null)
     const inFlight = pending.get(url)
     if (inFlight) return inFlight
-    const request = fetchTimeline(url).then(timeline => {
+    const request = fetchDescriptor(url).then(({ timeline, meta }) => {
+      metadata.set(url, meta)
       settled.set(url, timeline)
       pending.delete(url)
       return timeline
@@ -123,9 +137,17 @@ export function createDsaTimelineCache(
       void load(url)
     },
     load,
+    getMetadata(url) {
+      return metadata.get(url) ?? null
+    },
+    async loadMetadata(url) {
+      await load(url)
+      return metadata.get(url) ?? null
+    },
     clear() {
       settled.clear()
       pending.clear()
+      metadata.clear()
     },
   }
 }
