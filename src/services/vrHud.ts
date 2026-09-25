@@ -386,7 +386,10 @@ export function createVrHud(THREE_: typeof THREE): VrHudHandle {
         state.isMuted !== currentState.isMuted ||
         state.panelCount !== currentState.panelCount ||
         state.primaryIndex !== currentState.primaryIndex ||
-        state.browseOpen !== currentState.browseOpen
+        state.browseOpen !== currentState.browseOpen ||
+        // Normalised so an omitted readout and an explicit null don't
+        // count as a change — vrSession's first setState omits it.
+        (state.probeReadout ?? null) !== (currentState.probeReadout ?? null)
       if (!changed) return
       currentState = state
       redraw()
