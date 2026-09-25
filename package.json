@@ -65,14 +65,7 @@
     "export:dataset-video": "python3 scripts/export-dataset-video/export_dataset_video.py",
     "check:pages-bindings": "tsx scripts/check-pages-bindings.ts",
     "setup": "tsx scripts/setup-node.ts",
-    "refresh:sos-snapshot": "tsx scripts/refresh-sos-snapshot.ts",
-    "tauri": "tauri",
-    "dev:desktop": "tauri dev",
-    "build:desktop": "tsc && vite build && tauri build",
-    "dev:ios": "tauri ios dev",
-    "dev:android": "tauri android dev",
-    "build:ios": "tsc && vite build && tauri ios build",
-    "build:android": "tsc && vite build && tauri android build"
+    "refresh:sos-snapshot": "tsx scripts/refresh-sos-snapshot.ts"
   },
   "dependencies": {
     "@noble/hashes": "^2.2.0",
@@ -109,7 +102,6 @@
   "devDependencies": {
     "@axe-core/playwright": "^4.11.3",
     "@cloudflare/workers-types": "^5.20260714.1",
-    "@tauri-apps/cli": "^2",
     "@tokens-studio/sd-transforms": "^2.0.3",
     "@types/better-sqlite3": "^7.6.13",
     "@types/d3-axis": "^3.0.6",
