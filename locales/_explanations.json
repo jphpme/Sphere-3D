@@ -271,6 +271,11 @@
   "timeline.aria": "Accessible name of the 2D playback panel's date track, a canvas a screen reader sees as a slider. It reports the instant it is on through aria-valuetext, so this name only has to say what the control is.",
   "vr.placement.stepHeight": "Hint pill text shown during the second placement step on handheld AR, where tilting the phone raises or lowers the globe. Touch there is rotate-only, so nothing in this string should invite a drag. Keep short — shown in a small pill at the top of the screen.",
   "vr.placement.stepPosition": "Hint pill text shown during the first placement step on handheld AR, where the user aims a reticle at a real surface. Keep short — shown in a small pill at the top of the screen.",
+  "vr.voice.error": "Caption under the in-VR/AR control bar when Orbit's speech recognition failed (no microphone permission, no speech engine). Two short sentences; the second tells the user how to retry. Rendered on a narrow strip — keep it brief.",
+  "vr.voice.listening": "Label on the in-VR/AR caption strip while the microphone is capturing a question for Orbit. One or two words; the live transcript appears under it.",
+  "vr.voice.listeningHint": "Shown under the Listening label before any speech is heard. Invites a question and says the mic button sends it. Keep it to one line of about 60 characters.",
+  "vr.voice.speaker": "Label naming the speaker on the in-VR/AR caption strip when Orbit's reply is shown. Orbit is the digital docent's name — do not translate it.",
+  "vr.voice.thinking": "Label on the in-VR/AR caption strip while Orbit is composing a reply; the user's question is shown under it. One or two words.",
   "vr.zoomSlider.aria": "ARIA label for the in-AR vertical zoom slider on phones. Describes its function for screen readers; not visible text.",
   "vr.zoomSlider.label": "Visible label printed above the in-AR zoom slider on phones. Single short word — the column it sits in is narrow.",
   "vr.zoomSlider.title": "Tooltip on the in-AR zoom slider when hovered with a pointer. Brief — appears as a native browser tooltip."
