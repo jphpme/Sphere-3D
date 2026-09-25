@@ -476,8 +476,13 @@ interface RealtimeDashEntry {
   dataProductType?: string
   categories?: string[]
   units?: string
-  mpd: string
+  /** Absent on schema 1.3 release-descriptor rows, which are skipped. */
+  mpd?: string
   dsa?: string
+  /** schema 1.3 — `latest.json` pointer to an immutable release; not resolved yet. */
+  releaseDescriptorUrl?: string
+  /** schema 1.3 — frames carry values (luma-encoded), not colours; not decoded yet. */
+  valueEncoded?: boolean
   /** schema 1.2+ — `global` | `regional`. */
   coverage?: string
   /** schema 1.2+ — human-readable org name (e.g. "NOAA Science On a Sphere"). */
@@ -554,6 +559,56 @@ function prefixedRealtimeDashTitle(rawTitle: string, isForecast: boolean): strin
 }
 
 /**
+ * The publisher's live index. The stream host rewrites `index.json`
+ * beside the streams on every publish, while the copy bundled in
+ * `public/assets` is a snapshot that goes stale as streams move: by
+ * 2026-09-25, 35 of the bundled copy's 72 rows named an MPD and a
+ * `.dsa` that no longer existed, so those streams neither played nor
+ * had a time axis or metadata for Orbit. Null when no stream host is
+ * configured (local dev through the `/dash` proxy).
+ */
+function liveRealtimeIndexUrl(): string | null {
+  const base = (import.meta.env.VITE_REALTIME_DASH_BASE_URL as string | undefined)?.trim()
+  if (!base) return null
+  return new URL('index.json', base.endsWith('/') ? base : `${base}/`).toString()
+}
+
+/** A slow stream host must not hold the whole catalog back. */
+const LIVE_INDEX_TIMEOUT_MS = 6000
+
+/**
+ * The live index when the host answers, else the bundled copy. A row
+ * the index lists without an `mpd` — schema 1.3's release-descriptor
+ * rows, which name a `latest.json` and carry value-encoded video — is
+ * dropped by the caller: this app does not resolve releases or decode
+ * value-encoded frames yet.
+ */
+async function fetchRealtimeDashIndex(): Promise<RealtimeDashIndex | null> {
+  const live = liveRealtimeIndexUrl()
+  for (const url of live ? [live, REALTIME_DASH_INDEX_URL] : [REALTIME_DASH_INDEX_URL]) {
+    const abort = new AbortController()
+    const timer = url === live ? setTimeout(() => abort.abort(), LIVE_INDEX_TIMEOUT_MS) : null
+    try {
+      const res = await fetch(url, { headers: { Accept: 'application/json' }, signal: abort.signal })
+      if (!res.ok) {
+        if (res.status !== 404) {
+          logger.warn(`[DataService] Real-time DASH index ${url} failed: ${res.status} ${res.statusText}`)
+        }
+        continue
+      }
+      const index = (await res.json()) as RealtimeDashIndex
+      if (Array.isArray(index.datasets)) return index
+      logger.warn(`[DataService] Real-time DASH index ${url} has no datasets array`)
+    } catch (error) {
+      logger.warn(`[DataService] Real-time DASH index ${url} unreachable`, error)
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  }
+  return null
+}
+
+/**
  * Fetch the realtime DASH catalog index and map it into `Dataset`
  * rows. The index is written by the R2 catalog publisher; a missing
  * index (404) or an unreachable one is non-fatal — the app continues
@@ -561,19 +616,12 @@ function prefixedRealtimeDashTitle(rawTitle: string, isForecast: boolean): strin
  */
 async function fetchRealtimeDashDatasets(): Promise<Dataset[]> {
   try {
-    const res = await fetch(REALTIME_DASH_INDEX_URL, { headers: { Accept: 'application/json' } })
-    if (!res.ok) {
-      if (res.status !== 404) {
-        logger.warn(`[DataService] Real-time DASH index fetch failed: ${res.status} ${res.statusText}`)
-      }
-      return []
-    }
-
-    const index = (await res.json()) as RealtimeDashIndex
-    const entries = Array.isArray(index.datasets) ? index.datasets : []
+    const index = await fetchRealtimeDashIndex()
+    if (!index) return []
+    const entries = index.datasets ?? []
     const baseUrl = realtimeDashBaseUrl(index)
     return entries
-      .filter(entry => entry.id && entry.mpd)
+      .filter((entry): entry is RealtimeDashEntry & { mpd: string } => !!entry.id && !!entry.mpd)
       .map((entry, i) => {
         const isForecast =
           entry.dataProductType === 'forecast' ||

@@ -402,6 +402,59 @@ describe('DataService — node-mode', () => {
     expect(fetchStub).toHaveBeenCalledWith('/assets/realtime-dash-datasets.json', expect.anything())
   })
 
+  describe('the live real-time index', () => {
+    const LIVE = 'https://streams.example/index.json'
+    const row = (id: string, extra: Record<string, unknown> = {}) => ({
+      id, display_name: id, dataProductType: 'realtime',
+      mpd: `global/realtime/x/${id}/stream.mpd`, dsa: `global/realtime/x/${id}/${id}.dsa`, ...extra,
+    })
+    function stubFetch(liveResponse: () => Response | Promise<Response>) {
+      const fetchStub = vi.fn(async (input: RequestInfo | URL | string) => {
+        const url = String(input)
+        if (url === '/api/v1/catalog') return new Response(JSON.stringify({ datasets: [] }), { status: 200 })
+        if (url === '/api/v1/tours') return new Response(JSON.stringify({ tours: [] }), { status: 200 })
+        if (url === LIVE) return liveResponse()
+        if (url === '/assets/realtime-dash-datasets.json') {
+          return new Response(JSON.stringify({ datasets: [row('bundled')] }), { status: 200 })
+        }
+        throw new Error(`Unexpected fetch URL: ${url}`)
+      })
+      vi.stubGlobal('fetch', fetchStub as unknown as typeof fetch)
+      return fetchStub
+    }
+    const realtimeIds = (datasets: { id: string }[]) =>
+      datasets.filter(d => d.id.startsWith('R2_DASH_')).map(d => d.id)
+
+    beforeEach(() => {
+      ;(import.meta.env as Record<string, string>).VITE_REALTIME_DASH_BASE_URL = 'https://streams.example/'
+    })
+
+    it('reads the index the stream host publishes, not the bundled snapshot', async () => {
+      const fetchStub = stubFetch(() => new Response(JSON.stringify({ datasets: [row('live')] }), { status: 200 }))
+      const datasets = await new DataService().fetchDatasets()
+      expect(realtimeIds(datasets)).toEqual(['R2_DASH_live'])
+      expect(fetchStub).not.toHaveBeenCalledWith('/assets/realtime-dash-datasets.json', expect.anything())
+      // Its .dsa resolves against the host too, for the date track and Orbit.
+      expect(datasets.find(d => d.id === 'R2_DASH_live')?.timelineLink)
+        .toBe('https://streams.example/global/realtime/x/live/live.dsa')
+    })
+
+    it('falls back to the bundled snapshot when the host cannot answer', async () => {
+      stubFetch(() => { throw new TypeError('network down') })
+      expect(realtimeIds(await new DataService().fetchDatasets())).toEqual(['R2_DASH_bundled'])
+    })
+
+    it('skips release-descriptor rows, which name no MPD to play', async () => {
+      stubFetch(() => new Response(JSON.stringify({
+        datasets: [
+          row('direct'),
+          { id: 'released', display_name: 'Released', releaseDescriptorUrl: 'global/x/released/latest.json', valueEncoded: true },
+        ],
+      }), { status: 200 }))
+      expect(realtimeIds(await new DataService().fetchDatasets())).toEqual(['R2_DASH_direct'])
+    })
+  })
+
   it('routes relative real-time DASH assets through the same-origin proxy', async () => {
     vi.stubGlobal(
       'fetch',
