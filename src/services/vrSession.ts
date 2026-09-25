@@ -20,7 +20,7 @@
 
 import type * as THREE from 'three'
 import { createVrScene, type VrSceneHandle, type VrDatasetTexture } from './vrScene'
-import { createVrHud, type VrHudHandle } from './vrHud'
+import { createVrHud, type VrHudHandle, type VrVoiceState } from './vrHud'
 import { createVrBrowse, type VrBrowseHandle } from './vrBrowse'
 import { createVrTourControls, type VrTourControlsHandle } from './vrTourControls'
 import { createVrTourOverlay, type VrTourOverlayHandle } from './vrTourOverlay'
@@ -234,6 +234,16 @@ export interface VrSessionContext {
   tourNext(): void
   /** Stop the running tour entirely. No-op if no tour is active. */
   tourStop(): void
+
+  // --- Phase 5: Orbit voice (docs/ORBIT_VOICE_PLAN.md §5.4) ---
+  /**
+   * Orbit's voice turn for the HUD mic + caption strip, polled per XR
+   * frame. Null — or the member absent, for a host without Orbit —
+   * hides the mic. main.ts wires it to chatUI's getImmersiveVoiceState.
+   */
+  getVoiceState?(): VrVoiceState | null
+  /** The HUD mic was tapped: start listening, send, or stop speaking, depending on the turn. */
+  toggleVoice?(): void
 
   /** Optional — fired after the session ends + resources are torn down. */
   onSessionEnd?: () => void
@@ -945,6 +955,7 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     panelCount: ctx.getPanelCount(),
     primaryIndex: ctx.getPrimaryIndex(),
     browseOpen: browse.isVisible(),
+    voice: ctx.getVoiceState?.() ?? null,
   })
 
   // XRControllerModelFactory was imported earlier (before scene
@@ -1079,6 +1090,12 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
         // feeds `hud.setState({ browseOpen })` each frame, so the
         // next render shows the button in its active-state color.
         browse.setVisible(!browse.isVisible())
+      } else if (action === 'voice') {
+        // Orbit's mic. Called straight from the select handler rather
+        // than deferred, so the tap is as close to a user gesture as
+        // the session allows — starting capture and unlocking speech
+        // output can both depend on one.
+        ctx.toggleVoice?.()
       } else if (action === 'exit-vr') {
         // Programmatic exit — fires the 'end' event, which routes
         // through the same teardown path as headset-initiated exits.
@@ -1357,6 +1374,7 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
       primaryIndex: ctx.getPrimaryIndex(),
       browseOpen: active.browse.isVisible(),
       probeReadout: readVrProbe(active.interaction, ctx, now),
+      voice: ctx.getVoiceState?.() ?? null,
     })
 
     // Tour strip mirrors the engine state. Always poll; the strip's
