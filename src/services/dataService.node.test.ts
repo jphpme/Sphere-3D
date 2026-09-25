@@ -444,14 +444,38 @@ describe('DataService — node-mode', () => {
       expect(realtimeIds(await new DataService().fetchDatasets())).toEqual(['R2_DASH_bundled'])
     })
 
-    it('skips release-descriptor rows, which name no MPD to play', async () => {
+    it('keeps release-descriptor rows out of the catalog the 2D views list', async () => {
       stubFetch(() => new Response(JSON.stringify({
         datasets: [
           row('direct'),
           { id: 'released', display_name: 'Released', releaseDescriptorUrl: 'global/x/released/latest.json', valueEncoded: true },
         ],
       }), { status: 200 }))
-      expect(realtimeIds(await new DataService().fetchDatasets())).toEqual(['R2_DASH_direct'])
+      const svc = new DataService()
+      expect(realtimeIds(await svc.fetchDatasets())).toEqual(['R2_DASH_direct'])
+      expect(svc.getDatasetById('R2_DASH_released')).toBeUndefined()
+    })
+
+    it('hands them to the immersive session instead, pointing at their latest.json', async () => {
+      stubFetch(() => new Response(JSON.stringify({
+        datasets: [
+          row('direct'),
+          { id: 'released', display_name: 'Released', dataProductType: 'forecast',
+            releaseDescriptorUrl: 'global/forecast/x/released/latest.json', valueEncoded: true },
+          // A pointer without value encoding is not something the VR palette path decodes.
+          { id: 'plain', display_name: 'Plain', releaseDescriptorUrl: 'global/x/plain/latest.json' },
+        ],
+      }), { status: 200 }))
+      const svc = new DataService()
+      await svc.fetchDatasets()
+      const immersive = svc.getImmersiveOnlyDatasets()
+      expect(immersive.map(d => d.id)).toEqual(['R2_DASH_released'])
+      expect(svc.getImmersiveOnlyDatasetById('R2_DASH_released')).toMatchObject({
+        title: 'Forecast: Released',
+        realtimeKind: 'forecast',
+        releaseDescriptorLink: 'https://streams.example/global/forecast/x/released/latest.json',
+        dataLink: 'https://streams.example/global/forecast/x/released/latest.json',
+      })
     })
   })
 

@@ -36,9 +36,10 @@ import {
   createPhotorealEarth,
   type PhotorealEarthHandle,
   type VrDatasetTexture,
+  type VrOverlayOptions,
 } from './photorealEarth'
+import type { VrUvRegion } from './dashRelease'
 import { createVrBorders, type VrBordersHandle } from './vrBorders'
-import type { DatasetOverlayOptions } from '../types'
 import {
   buildColorScaleLut,
   COLOR_SCALE_LUT_SIZE,
@@ -233,6 +234,8 @@ export function createVrScene(
     cancelPendingVideoListeners: (() => void) | null
     /** Flip + palette for the data-encoded shader patch. */
     setColorScale: (scale: ColorScale | undefined) => void
+    /** AYNI: the map's rectangle in the frame (a release's calibration strip excluded); undefined = whole frame. */
+    setUvRegion: (region: VrUvRegion | undefined) => void
   }
 
   /**
@@ -330,6 +333,7 @@ export function createVrScene(
    */
   function createSecondaryGlobe(): SecondaryGlobe {
     const dataEncodedUniform = { value: 0 }
+    const uvRegionUniform = { value: new THREE_.Vector4(0, 0, 1, 1) }
     const colorLutUniform: { value: THREE.Texture } = {
       value: earth.baseEarthTexture,
     }
@@ -344,16 +348,18 @@ export function createVrScene(
     mat.onBeforeCompile = shader => {
       shader.uniforms.uSecDataEncoded = dataEncodedUniform
       shader.uniforms.uSecColorLut = colorLutUniform
+      shader.uniforms.uSecUvRegion = uvRegionUniform
       shader.fragmentShader = shader.fragmentShader.replace(
         '#include <common>',
         `#include <common>
          uniform int uSecDataEncoded;
-         uniform sampler2D uSecColorLut;`,
+         uniform sampler2D uSecColorLut;
+         uniform vec4 uSecUvRegion;`,
       )
       shader.fragmentShader = shader.fragmentShader.replace(
         '#include <map_fragment>',
         `#ifdef USE_MAP
-           vec4 sampledDiffuseColor = texture2D(map, vMapUv);
+           vec4 sampledDiffuseColor = texture2D(map, uSecUvRegion.xy + vMapUv * uSecUvRegion.zw);
            if (uSecDataEncoded == 1) {
              vec4 pal = texture2D(uSecColorLut, vec2(sampledDiffuseColor.r, 0.5));
              // No base map is bound on a secondary, so composite
@@ -423,6 +429,9 @@ export function createVrScene(
       activeTexture: null,
       cancelPendingVideoListeners: null,
       setColorScale,
+      setUvRegion: (region) => {
+        uvRegionUniform.value.set(region?.u0 ?? 0, region?.v0 ?? 0, region?.us ?? 1, region?.vs ?? 1)
+      },
     }
   }
 
@@ -436,9 +445,10 @@ export function createVrScene(
   function configureSecondaryTexture(
     tex: THREE.Texture,
     sg: SecondaryGlobe,
-    options?: DatasetOverlayOptions,
+    options?: VrOverlayOptions,
   ): void {
     const scale = options?.colorScale
+    sg.setUvRegion(options?.dataRegion)
     tex.colorSpace = scale ? THREE_.NoColorSpace : THREE_.SRGBColorSpace
     const filter = scale ? THREE_.NearestFilter : THREE_.LinearFilter
     tex.minFilter = filter

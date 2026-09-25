@@ -211,3 +211,26 @@ describe('snapshot — orientation and framebuffer hygiene', () => {
     expect(sampleBody).toMatch(/bindTexture\(gl\.TEXTURE_2D,\s*tex\)/)
   })
 })
+
+describe('AYNI — a release frame\'s map rectangle (dashRelease.ts)', () => {
+  // A value-encoded release carries a calibration strip under the map.
+  // Every dataset-texture lookup on the immersive globes has to go
+  // through the region uniform, or the strip is stretched over the
+  // southern hemisphere. The uniform is identity unless a release sets
+  // it, which is what keeps every other dataset drawn as before.
+  it('routes both of the primary globe\'s dataset lookups through uOverlayUvRegion', () => {
+    const lookups = VR.match(/texture2D\(\s*map\s*,[^;]*\)/g) ?? []
+    expect(lookups.length).toBeGreaterThanOrEqual(2)
+    for (const lookup of lookups) expect(lookup).toMatch(/uOverlayUvRegion\.xy\s*\+.*uOverlayUvRegion\.zw/)
+  })
+
+  it('routes the secondary globes\' lookup through uSecUvRegion', () => {
+    const lookups = SECONDARY.match(/texture2D\(\s*map\s*,[^;]*\)/g) ?? []
+    expect(lookups.length).toBeGreaterThanOrEqual(1)
+    for (const lookup of lookups) expect(lookup).toMatch(/uSecUvRegion\.xy\s*\+.*uSecUvRegion\.zw/)
+  })
+
+  it('leaves the 2D globe\'s shaders alone', () => {
+    expect(TWO_D).not.toMatch(/UvRegion|dataRegion/)
+  })
+})

@@ -45,6 +45,7 @@ import { getSunPosition } from '../utils/time'
 import { getCloudTextureUrl, isMobile } from '../utils/deviceCapability'
 import { logger } from '../utils/logger'
 import type { DatasetOverlayOptions } from '../types'
+import type { VrUvRegion } from './dashRelease'
 import {
   buildColorScaleLut,
   COLOR_SCALE_LUT_SIZE,
@@ -235,11 +236,22 @@ function sunDirectionFromLatLng(
  * uses these to clip the texture to a bbox and reveal an Earth
  * base diffuse outside.
  */
+/**
+ * The shared overlay options plus what only the immersive globe reads.
+ * `dataRegion` (AYNI): the rectangle of the frame that holds the map, for
+ * a value-encoded release whose frames carry a calibration strip under
+ * it (`dashRelease.ts`). Absent — every other dataset — means the whole
+ * frame, exactly as before.
+ */
+export interface VrOverlayOptions extends DatasetOverlayOptions {
+  readonly dataRegion?: VrUvRegion
+}
+
 export type VrDatasetTexture =
   | {
       readonly kind: 'video'
       readonly element: HTMLVideoElement
-      readonly options?: DatasetOverlayOptions
+      readonly options?: VrOverlayOptions
     }
   | {
       readonly kind: 'image'
@@ -249,7 +261,7 @@ export type VrDatasetTexture =
        *  from the dataset's video by the globe-thumbnail generator.
        *  All are valid `THREE.Texture` sources. */
       readonly element: HTMLImageElement | HTMLCanvasElement | ImageBitmap
-      readonly options?: DatasetOverlayOptions
+      readonly options?: VrOverlayOptions
     }
 
 export interface PhotorealEarthOptions {
@@ -476,6 +488,8 @@ export function createPhotorealEarth(
   /** 1 when the dataset texture's luma is a measurement rather than a
    *  colour, and `uOverlayColorLut` should decode it. */
   const overlayDataEncodedUniform = { value: 0 }
+  /** (u0, v0, uScale, vScale) — the map's rectangle within the frame; identity by default. */
+  const overlayUvRegionUniform = { value: new THREE_.Vector4(0, 0, 1, 1) }
   // `uOverlayBaseMap` always points at a valid texture so the sampler
   // binding is never null. `baseEarthTexture` is the always-loaded
   // monochrome specular fallback (the same one `material.map` starts
@@ -576,6 +590,7 @@ export function createPhotorealEarth(
     shader.uniforms.uOverlayBaseMap = overlayBaseMapUniform
     shader.uniforms.uOverlayDataEncoded = overlayDataEncodedUniform
     shader.uniforms.uOverlayColorLut = overlayColorLutUniform
+    shader.uniforms.uOverlayUvRegion = overlayUvRegionUniform
 
     shader.vertexShader = shader.vertexShader.replace(
       '#include <common>',
@@ -603,7 +618,8 @@ export function createPhotorealEarth(
        uniform int uOverlayHasBase;
        uniform sampler2D uOverlayBaseMap;
        uniform int uOverlayDataEncoded;
-       uniform sampler2D uOverlayColorLut;`,
+       uniform sampler2D uOverlayColorLut;
+       uniform vec4 uOverlayUvRegion;   // (u0, v0, uScale, vScale)`,
     )
     // Replace the standard <map_fragment> chunk (which is just
     // `sampledDiffuseColor = texture2D(map, vMapUv); diffuseColor *= …`)
@@ -667,7 +683,7 @@ export function createPhotorealEarth(
              // flipY), so the box's north edge maps to bv 1, not 0.
              float bv = (lat - bs) / max(bn - bs, 1e-6);
              if (uOverlayFlipY == 1) bv = 1.0 - bv;
-             sampledDiffuseColor = texture2D(map, vec2(bu, bv));
+             sampledDiffuseColor = texture2D(map, uOverlayUvRegion.xy + vec2(bu, bv) * uOverlayUvRegion.zw);
            } else if (uOverlayHasBase == 1) {
              sampledDiffuseColor = texture2D(uOverlayBaseMap, vMapUv);
              sampledDataset = false;
@@ -681,7 +697,9 @@ export function createPhotorealEarth(
            float lon = (vMapUv.x - 0.5) * 360.0;
            float fu = fract((lon - uOverlayLonOrigin) / 360.0 + 0.5);
            float fv = (uOverlayFlipY == 1) ? (1.0 - vMapUv.y) : vMapUv.y;
-           sampledDiffuseColor = texture2D(map, vec2(fu, fv));
+           // uOverlayUvRegion confines the lookup to the map's part of
+           // the frame (identity unless a release says otherwise).
+           sampledDiffuseColor = texture2D(map, uOverlayUvRegion.xy + vec2(fu, fv) * uOverlayUvRegion.zw);
          }
          // §7.2 colour correction — applied to the SAMPLED DIFFUSE
          // (not gl_FragColor at the end of the pipeline) so the
@@ -1266,7 +1284,9 @@ export function createPhotorealEarth(
     tex.magFilter = filter
   }
 
-  function applyOverlayOptions(options: DatasetOverlayOptions | undefined): void {
+  function applyOverlayOptions(options: VrOverlayOptions | undefined): void {
+    const region = options?.dataRegion
+    overlayUvRegionUniform.value.set(region?.u0 ?? 0, region?.v0 ?? 0, region?.us ?? 1, region?.vs ?? 1)
     if (!options) {
       overlayHasBboxUniform.value = 0
       overlayBboxUniform.value.set(0, 0, 0, 0)

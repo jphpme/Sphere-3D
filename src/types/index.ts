@@ -146,6 +146,18 @@ export interface Dataset {
    */
   timelineLink?: string
 
+  /**
+   * AYNI — set only on a value-encoded release row, which the immersive
+   * (VR/AR) globe alone can draw. `releaseDescriptorLink` is the
+   * `latest.json` pointer the loader follows to the current release;
+   * `vrValueEncoding` is that release's encoding, filled in at load.
+   * These rows never enter the catalog the 2D views list, and nothing
+   * outside the immersive session reads either field. See
+   * `services/dashRelease.ts`.
+   */
+  releaseDescriptorLink?: string
+  vrValueEncoding?: import('./release-encoding').ReleaseEncoding
+
   /** When true, country/region borders render on by default for this
    * dataset (sparse transparent DASH overlays). */
   defaultBordersVisible?: boolean

@@ -609,57 +609,91 @@ async function fetchRealtimeDashIndex(): Promise<RealtimeDashIndex | null> {
 }
 
 /**
+ * AYNI — the value-encoded release rows from the last index read. They
+ * are kept out of the catalog the 2D views list (`fetchDatasets`) and
+ * reach only the immersive session, through
+ * `DataService.getImmersiveOnlyDatasets`: the VR/AR globe decodes their
+ * luma through the release's palette (`dashRelease.ts`), while the 2D
+ * map and 3D browser globe would show a grayscale frame with a
+ * calibration strip across the bottom.
+ */
+let immersiveOnlyDatasets: Dataset[] = []
+
+/** One index row as a `Dataset`, given the URL the loader starts from. */
+function realtimeDashDataset(
+  entry: RealtimeDashEntry,
+  i: number,
+  baseUrl: string,
+  generatedAt: string | undefined,
+  dataLink: string,
+): Dataset {
+  const isForecast =
+    entry.dataProductType === 'forecast' ||
+    entry.type === 'forecast' ||
+    /\/forecast\//.test(entry.mpd ?? entry.releaseDescriptorUrl ?? '')
+  const title = prefixedRealtimeDashTitle(entry.display_name ?? entry.name ?? entry.id, isForecast)
+  const categories = entry.categories ?? []
+  const tags = Array.from(new Set([
+    isForecast ? 'Forecast' : 'Real Time',
+    'DASH',
+    ...categories,
+    ...(entry.units ? [entry.units] : []),
+  ]))
+  return {
+    id: `R2_DASH_${entry.id}`,
+    title,
+    format: 'application/dash+xml',
+    dataLink,
+    organization: entry.organization || (entry.provider ? entry.provider.toUpperCase() : 'Cloudflare R2'),
+    abstractTxt: entry.description,
+    thumbnailLink: resolveRealtimeDashAsset(entry.thumbnail, baseUrl),
+    legendLink: resolveRealtimeDashAsset(entry.colorbar, baseUrl),
+    // The stream's time axis, for the VR date track. Resolved here
+    // rather than at the point of use so nothing downstream needs to
+    // know about the R2 layout or the configured base URL. A release
+    // row gets its .dsa when the release is resolved at load.
+    timelineLink: resolveRealtimeDashAsset(entry.dsa, baseUrl),
+    tags,
+    realtimeKind: isForecast ? 'forecast' : 'real-time',
+    defaultBordersVisible: true,
+    weight: 10_000 - i,
+    enriched: {
+      description: entry.description,
+      categories: { Source: [isForecast ? 'Forecast' : 'Real Time'], Topic: categories },
+      keywords: tags,
+      dateAdded: generatedAt,
+    },
+  } satisfies Dataset
+}
+
+/**
  * Fetch the realtime DASH catalog index and map it into `Dataset`
  * rows. The index is written by the R2 catalog publisher; a missing
  * index (404) or an unreachable one is non-fatal — the app continues
- * with the static catalog alone.
+ * with the static catalog alone. Release-descriptor rows are set aside
+ * for the immersive session (`immersiveOnlyDatasets`) rather than
+ * returned.
  */
 async function fetchRealtimeDashDatasets(): Promise<Dataset[]> {
   try {
     const index = await fetchRealtimeDashIndex()
+    immersiveOnlyDatasets = []
     if (!index) return []
     const entries = index.datasets ?? []
     const baseUrl = realtimeDashBaseUrl(index)
+    immersiveOnlyDatasets = entries
+      .filter(entry => !!entry.id && !entry.mpd && !!entry.releaseDescriptorUrl && entry.valueEncoded === true)
+      .map((entry, i) => {
+        const latest = resolveRealtimeDashAsset(entry.releaseDescriptorUrl, baseUrl) ?? entry.releaseDescriptorUrl!
+        // dataLink stays the pointer until the loader resolves the release:
+        // anything that tried to play it unresolved fails the MPD preflight
+        // rather than playing the wrong thing.
+        return { ...realtimeDashDataset(entry, i, baseUrl, index.generatedAt, latest), releaseDescriptorLink: latest }
+      })
     return entries
       .filter((entry): entry is RealtimeDashEntry & { mpd: string } => !!entry.id && !!entry.mpd)
-      .map((entry, i) => {
-        const isForecast =
-          entry.dataProductType === 'forecast' ||
-          entry.type === 'forecast' ||
-          /\/forecast\//.test(entry.mpd)
-        const title = prefixedRealtimeDashTitle(entry.display_name ?? entry.name ?? entry.id, isForecast)
-        const categories = entry.categories ?? []
-        const tags = Array.from(new Set([
-          isForecast ? 'Forecast' : 'Real Time',
-          'DASH',
-          ...categories,
-          ...(entry.units ? [entry.units] : []),
-        ]))
-        return {
-          id: `R2_DASH_${entry.id}`,
-          title,
-          format: 'application/dash+xml',
-          dataLink: resolveRealtimeDashAsset(entry.mpd, baseUrl) ?? entry.mpd,
-          organization: entry.organization || (entry.provider ? entry.provider.toUpperCase() : 'Cloudflare R2'),
-          abstractTxt: entry.description,
-          thumbnailLink: resolveRealtimeDashAsset(entry.thumbnail, baseUrl),
-          legendLink: resolveRealtimeDashAsset(entry.colorbar, baseUrl),
-          // The stream's time axis, for the VR date track. Resolved here
-          // rather than at the point of use so nothing downstream needs to
-          // know about the R2 layout or the configured base URL.
-          timelineLink: resolveRealtimeDashAsset(entry.dsa, baseUrl),
-          tags,
-          realtimeKind: isForecast ? 'forecast' : 'real-time',
-          defaultBordersVisible: true,
-          weight: 10_000 - i,
-          enriched: {
-            description: entry.description,
-            categories: { Source: [isForecast ? 'Forecast' : 'Real Time'], Topic: categories },
-            keywords: tags,
-            dateAdded: index.generatedAt,
-          },
-        } satisfies Dataset
-      })
+      .map((entry, i) =>
+        realtimeDashDataset(entry, i, baseUrl, index.generatedAt, resolveRealtimeDashAsset(entry.mpd, baseUrl) ?? entry.mpd))
   } catch (error) {
     logger.warn('[DataService] Could not load real-time DASH index, continuing without it', error)
     return []
@@ -1123,6 +1157,19 @@ export class DataService {
    * The resolution order lives in `src/utils/datasetUrl.ts` so the
    * URL grammar and this lookup can't drift apart.
    */
+  /**
+   * AYNI — value-encoded release rows, for the immersive session only.
+   * Not part of `fetchDatasets`, so no 2D surface lists or searches them.
+   */
+  getImmersiveOnlyDatasets(): readonly Dataset[] {
+    return immersiveOnlyDatasets
+  }
+
+  /** Look up one of {@link getImmersiveOnlyDatasets} by id. */
+  getImmersiveOnlyDatasetById(id: string): Dataset | undefined {
+    return immersiveOnlyDatasets.find(d => d.id === id)
+  }
+
   getDatasetById(id: string): Dataset | undefined {
     if (!this.cache) {
       return undefined

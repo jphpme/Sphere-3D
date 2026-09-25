@@ -113,7 +113,7 @@ import {
 import { initVrButton } from './ui/vrButton'
 import { flyToOnGlobe, isVrActive } from './services/vrSession'
 import type { VrDatasetTexture } from './services/vrScene'
-import { overlayOptionsFromDataset } from './services/datasetOverlayOptions'
+import { resolveDashRelease, vrOverlayOptionsFor } from './services/dashRelease'
 import { publishGlobeState } from './services/multiOutput/globeStateEvents'
 import {
   displayForMirror,
@@ -1142,6 +1142,20 @@ class InteractiveSphere {
     }
   }
 
+  /**
+   * AYNI — follow a release row's `latest.json` to the release current
+   * right now, and point the row at its MPD, its `.dsa` (date track and
+   * Orbit) and its value encoding (the VR palette and crop). Resolved at
+   * every load, not once, because the publisher replaces releases as
+   * data arrives.
+   */
+  private async resolveImmersiveRelease(dataset: Dataset): Promise<void> {
+    const release = await resolveDashRelease(dataset.releaseDescriptorLink!)
+    dataset.dataLink = release.mpdUrl
+    dataset.timelineLink = release.dsaUrl ?? undefined
+    dataset.vrValueEncoding = release.encoding ?? undefined
+  }
+
   /** Resolve, render, and apply a dataset (image or video) to the sphere. */
   private async displayDataset(
     datasetId: string,
@@ -1150,7 +1164,12 @@ class InteractiveSphere {
     loadStartWall: number = Date.now(),
   ): Promise<void> {
     const dataset = dataService.getDatasetById(datasetId)
+      // AYNI: a value-encoded release row exists only for the immersive
+      // session; outside one its id is as unknown as any other.
+      ?? (isVrActive() ? dataService.getImmersiveOnlyDatasetById(datasetId) : undefined)
     if (!dataset) throw new Error(`Dataset not found: ${datasetId}`)
+    const immersiveOnly = !!dataset.releaseDescriptorLink
+    if (immersiveOnly) await this.resolveImmersiveRelease(dataset)
 
     // §9.2 — count a user-initiated open as a visit for the
     // Continue-exploring row. Tours never reach this path (they go
@@ -1160,7 +1179,9 @@ class InteractiveSphere {
     // deliberate "I opened this" signal. viewSeconds still accrues
     // separately from info-panel reading time (datasetLoader).
     const isPlaylistAutoAdvance = trigger === 'url' && getActivePlaylistPlayback() != null
-    if (!isPlaylistAutoAdvance) {
+    // An immersive-only row would otherwise surface in the 2D
+    // Continue-exploring row, which cannot open it.
+    if (!isPlaylistAutoAdvance && !immersiveOnly) {
       recordVisit(dataset.id)
     }
 
@@ -2617,7 +2638,7 @@ class InteractiveSphere {
       // path through the shader.
       let spec: VrDatasetTexture | null = null
       if (dataset) {
-        const options = overlayOptionsFromDataset(dataset)
+        const options = vrOverlayOptionsFor(dataset)
         if (image) spec = { kind: 'image', element: image, options }
         else if (video) spec = { kind: 'video', element: video, options }
       }
@@ -2707,8 +2728,12 @@ class InteractiveSphere {
 
       // --- Phase 3 in-VR browse ---
       getDatasets: () => {
-        return this.appState.datasets
-          .filter(d => dataService.isSupportedDataset(d) && !d.isHidden)
+        // AYNI: plus the value-encoded release rows, which only this
+        // globe decodes (dashRelease.ts); the 2D browse never lists them.
+        return [
+          ...this.appState.datasets.filter(d => dataService.isSupportedDataset(d) && !d.isHidden),
+          ...dataService.getImmersiveOnlyDatasets(),
+        ]
           .map(d => {
             // Mirror the 2D browse UI (browseUI.ts line 79-90):
             // chips are the UNION of enriched.categories keys and
@@ -2791,6 +2816,11 @@ class InteractiveSphere {
 
       onSessionEnd: () => {
         endImmersiveVoice()
+        // AYNI: a value-encoded release stream is drawn in colour only by
+        // the immersive globe. Leaving it loaded would hand the 2D views
+        // its raw grayscale frames, so the app returns to the default
+        // globe instead.
+        if (this.appState.currentDataset?.releaseDescriptorLink) void this.goHome()
         this.announce('Exited VR')
         // Resume the 2D perf sampler now that VR has handed the
         // GPU back. The sampler stayed paused for the duration of
