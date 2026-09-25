@@ -13,7 +13,8 @@ import {
   submitFeedback,
 } from './chatUI'
 import type { ChatCallbacks } from './chatUI'
-import { loadConfig } from '../services/docentService'
+import { loadConfig, saveConfig } from '../services/docentService'
+import { registerTtsEngine, resetVoiceEngines, type TtsEngine } from '../services/voiceService'
 import {
   clearDegraded,
   markDegraded,
@@ -1327,5 +1328,45 @@ describe('§A6 — the Analyze chip', () => {
     clearChat()
     const view = await renderChip({ type: 'show-analysis', scope: 'view' })
     expect(view!.textContent).not.toBe(whole!.textContent)
+  })
+})
+
+describe('spoken replies: synthesis ahead of playback', () => {
+  afterEach(() => resetVoiceEngines())
+
+  it('asks the engine to prepare the next sentences while the current one plays', async () => {
+    const finishers: Array<() => void> = []
+    const speak = vi.fn((_text: string) => new Promise<void>((resolve) => { finishers.push(resolve) }))
+    const prefetch = vi.fn()
+    // `local` sorts first in `auto`, ahead of whatever the browser registers.
+    registerTtsEngine({
+      provider: 'local',
+      supportsLanguage: () => true,
+      isAvailable: () => true,
+      speak,
+      prefetch,
+      cancel: vi.fn(),
+    } satisfies TtsEngine)
+    saveConfig({ ...loadConfig(), voiceAutoSpeak: true })
+    const { processMessage } = await import('../services/docentService')
+    vi.mocked(processMessage).mockImplementation(async function* () {
+      yield { type: 'delta' as const, text: 'One is first. Two comes next. Three is later. Four is last.' }
+      yield { type: 'done' as const, fallback: false }
+    })
+    initChatUI(makeCallbacks())
+    ;(document.getElementById('chat-input') as HTMLTextAreaElement).value = 'tell me a story'
+    ;(document.getElementById('chat-send') as HTMLButtonElement).click()
+
+    // The first sentence is playing and hasn't finished...
+    await vi.waitFor(() => expect(speak).toHaveBeenCalledTimes(1))
+    expect(speak.mock.calls[0]![0]).toBe('One is first.')
+    // ...and the two after it are already being prepared, but no further.
+    const prepared = () => new Set(prefetch.mock.calls.map(([text]) => text))
+    expect(prepared()).toEqual(new Set(['One is first.', 'Two comes next.', 'Three is later.']))
+
+    // Each sentence that starts moves the lookahead along by one.
+    finishers[0]!()
+    await vi.waitFor(() => expect(speak).toHaveBeenCalledTimes(2))
+    expect(prepared().has('Four is last.')).toBe(true)
   })
 })
