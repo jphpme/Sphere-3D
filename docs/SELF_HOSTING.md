@@ -1130,12 +1130,12 @@ Everything referenced below now exists. Pages → your project →
 > **If the dashboard refuses the edit**, it says *"Bindings for this
 > project are being managed through `wrangler.toml`"* — which happens as
 > soon as the repository carries that file. The table below is then not a
-> dashboard checklist but a **completeness requirement on the file**: a
+> dashboard checklist but a **completeness requirement on the file**. A
 > binding missing from `wrangler.toml` (or left commented out) does not
-> exist in the deployment, and the fix is to add the block and redeploy
-> rather than to look for a UI that no longer offers the control. Not
-> hypothetical: `AI` was wired by hand in the dashboard, the project moved
-> to file-managed bindings, and every AI feature went dark at once — Orbit
+> exist in the deployment. The fix is to add the block and redeploy,
+> not to look for a UI that no longer offers the control. This has
+> happened: `AI` was wired by hand in the dashboard. Then the project moved
+> to file-managed bindings, and every AI feature went dark at once. Orbit
 > answered from its local engine with "AI service unavailable",
 > `/api/models` returned 503, and `/api/v1/search` kept returning **200**
 > with a degraded warning. Three symptoms, one missing block.

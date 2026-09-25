@@ -33,21 +33,29 @@ const read = (p: string): string => readFileSync(resolve(REPO_ROOT, p), 'utf8')
  * person to clone, not on whoever adds the block. The deploy-time
  * contract lives in `scripts/lib/expected-bindings.ts`, which
  * `npm run check:pages-bindings` audits against the real project.
+ *
+ * AYNI fork: the invariant is inverted here. The ayni-vr Pages project
+ * is file-managed — the dashboard refuses binding edits once the repo
+ * carries `wrangler.toml` — so a binding absent from this file is
+ * absent from production, and losing `[ai]` took every AI feature on
+ * vr.ayni.eu.com down at once (b09db658). The cost upstream avoids is
+ * accepted: `npm run dev:functions` needs `wrangler login`, while
+ * `npm run dev` and `MOCK_AI=true` stay offline. The test now guards
+ * against an upstream merge silently dropping the block.
  */
 describe('the offline dev loop', () => {
-  it('wrangler.toml declares no AI binding', () => {
-    const offending = read('wrangler.toml')
+  it('wrangler.toml declares the AI binding (AYNI: file-managed Pages project)', () => {
+    const declared = read('wrangler.toml')
       .split('\n')
-      .map((line, i) => ({ line: line.trim(), n: i + 1 }))
-      .filter(({ line }) => /^\[ai\]/.test(line))
+      .map(line => line.trim())
+      .filter(line => /^\[ai\]/.test(line))
 
     expect(
-      offending,
-      'An [ai] binding makes `wrangler pages dev` require Cloudflare credentials, ' +
-        'which breaks `npm run dev:functions` on a fresh clone. Wire AI in the Pages ' +
-        'dashboard and record it in scripts/lib/expected-bindings.ts instead; use ' +
-        '`npm run dev:functions:ai` to exercise it locally.',
-    ).toEqual([])
+      declared,
+      'The ayni-vr Pages project takes its bindings from wrangler.toml alone. Without ' +
+        'an [ai] block, Orbit chat, /api/models and search lose Workers AI in production ' +
+        '(see docs/SELF_HOSTING.md, "If the dashboard refuses the edit").',
+    ).toHaveLength(1)
   })
 
   // Removing the block without leaving a way back would trade one
