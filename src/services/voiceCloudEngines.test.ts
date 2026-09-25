@@ -108,6 +108,122 @@ describe('cloud TTS', () => {
     await cloudTtsEngine.speak('Again', { lang: 'en' })
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
+
+  describe('synthesis ahead of playback', () => {
+    const played: string[] = []
+    class RecordingAudio extends FakeAudio {
+      play() { played.push(this.src); return super.play() }
+    }
+    const audioFor = (text: string): string => btoa(text)
+    const bodyText = (init: RequestInit): string => (JSON.parse(init.body as string) as { text: string }).text
+
+    beforeEach(() => {
+      played.length = 0
+      cloudTtsEngine.cancel() // drop anything a previous test prepared
+      vi.stubGlobal('Audio', RecordingAudio as unknown as typeof Audio)
+    })
+
+    /** A /synthesize that answers each text's audio once `release(text)` is called. */
+    function heldSynth() {
+      const waiting = new Map<string, () => void>()
+      const fetchMock = vi.fn((_url: string, init: RequestInit) => new Promise<Response>((resolve, reject) => {
+        const text = bodyText(init)
+        init.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))
+        waiting.set(text, () => resolve(new Response(JSON.stringify({ audio: audioFor(text) }), { status: 200 })))
+      }))
+      return { fetchMock, release: (text: string) => waiting.get(text)?.() }
+    }
+
+    it('uses the prefetched audio instead of requesting the sentence again', async () => {
+      const fetchMock = vi.fn(async (_url: string, init: RequestInit) =>
+        new Response(JSON.stringify({ audio: audioFor(bodyText(init)) }), { status: 200 }))
+      vi.stubGlobal('fetch', fetchMock)
+
+      cloudTtsEngine.prefetch!('Second sentence.', { lang: 'en' })
+      await cloudTtsEngine.speak('Second sentence.', { lang: 'en' })
+
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      expect(played).toEqual([`data:audio/mpeg;base64,${audioFor('Second sentence.')}`])
+    })
+
+    it('synthesizes the next sentence while the current one is still on its way', async () => {
+      const { fetchMock, release } = heldSynth()
+      vi.stubGlobal('fetch', fetchMock)
+
+      const first = cloudTtsEngine.speak('One.', { lang: 'en' })
+      cloudTtsEngine.prefetch!('Two.', { lang: 'en' })
+      // Both requests are in flight before the first has answered.
+      expect(fetchMock.mock.calls.map(([, init]) => bodyText(init))).toEqual(['One.', 'Two.'])
+
+      release('One.')
+      release('Two.')
+      await first
+      await cloudTtsEngine.speak('Two.', { lang: 'en' })
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      expect(played).toHaveLength(2)
+    })
+
+    it('retries a gateway error once, so a sentence is not silently skipped', async () => {
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(new Response('upstream hiccup', { status: 502 }))
+        .mockResolvedValueOnce(new Response(JSON.stringify({ audio: 'QUJD' }), { status: 200 }))
+      vi.stubGlobal('fetch', fetchMock)
+
+      await cloudTtsEngine.speak('Hello.', { lang: 'en' })
+
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      expect(played).toHaveLength(1)
+    })
+
+    it('does not retry a client error or the kill switch', async () => {
+      const fetchMock = vi.fn(async () => new Response(JSON.stringify({ code: 'bad_request' }), { status: 400 }))
+      vi.stubGlobal('fetch', fetchMock)
+
+      await cloudTtsEngine.speak('Hello.', { lang: 'en' })
+
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      expect(played).toEqual([])
+    })
+
+    it('stays silent when stopped while the sentence was being synthesized', async () => {
+      const { fetchMock, release } = heldSynth()
+      vi.stubGlobal('fetch', fetchMock)
+
+      const speaking = cloudTtsEngine.speak('Too late.', { lang: 'en' })
+      cloudTtsEngine.cancel()
+      release('Too late.')
+      await speaking
+
+      expect(played).toEqual([])
+    })
+
+    it('abandons prepared sentences on cancel and fetches afresh afterwards', async () => {
+      const { fetchMock, release } = heldSynth()
+      vi.stubGlobal('fetch', fetchMock)
+
+      cloudTtsEngine.prefetch!('Later.', { lang: 'en' })
+      const [, firstInit] = fetchMock.mock.calls[0] as [string, RequestInit]
+      cloudTtsEngine.cancel()
+      expect(firstInit.signal?.aborted).toBe(true)
+
+      const speaking = cloudTtsEngine.speak('Later.', { lang: 'en' })
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      release('Later.')
+      await speaking
+      expect(played).toHaveLength(1)
+    })
+
+    it('caps how far ahead it synthesizes', () => {
+      const { fetchMock } = heldSynth()
+      vi.stubGlobal('fetch', fetchMock)
+
+      for (const text of ['A.', 'B.', 'C.', 'D.', 'E.']) cloudTtsEngine.prefetch!(text, { lang: 'en' })
+      // Idempotent per text, too.
+      cloudTtsEngine.prefetch!('A.', { lang: 'en' })
+
+      expect(fetchMock).toHaveBeenCalledTimes(3)
+    })
+  })
 })
 
 describe('cloud STT', () => {

@@ -26,7 +26,7 @@ import { isAvailable as isAppleIntelligenceAvailable } from '../services/appleIn
 import { setLogLevel, logger } from '../utils/logger'
 import { emit, startDwell, type DwellHandle } from '../analytics'
 import { enMessages, t, getLocale, type MessageKey } from '../i18n'
-import { resolveSttEngine, resolveTtsEngine, resolveStreamingSttEngine, voiceSupportForLocale, splitIntoSpokenChunks, toSpokenForm, baseLanguage, listVoiceLanguageOptions, type SttSession, type TtsEngine } from '../services/voiceService'
+import { resolveSttEngine, resolveTtsEngine, resolveStreamingSttEngine, voiceSupportForLocale, splitIntoSpokenChunks, toSpokenForm, baseLanguage, listVoiceLanguageOptions, type SttSession, type TtsEngine, type TtsSpeakOptions } from '../services/voiceService'
 import { HandsFreeController, isWakeWordConfigured } from './voiceHandsFree'
 import { registerBrowserVoiceEngines, primeBrowserTts, listBrowserVoices, curateVoices, onBrowserVoicesChanged } from '../services/voiceBrowserEngines'
 import { registerCloudVoiceEngines } from '../services/voiceCloudEngines'
@@ -1097,18 +1097,23 @@ function pumpSpeech(fullText: string, final: boolean): void {
   const rate = cfg.voiceRate
   const voice = cfg.voiceName
   const engine = ttsEngine
+  const opts = { lang, rate, voice }
   for (let i = spokenChunkCount; i < upto; i++) {
     const sentence = sentences[i]
     if (!sentence) continue
     emitTtsOnce()
+    speechAhead.push(sentence)
+    prefetchSpeech(engine, opts)
     ttsChain = ttsChain.then(() => {
       if (!(speakingActive && session === ttsSessionId)) return undefined
+      speechAhead.shift()
+      prefetchSpeech(engine, opts)
       // The HUD captions the sentence as it is spoken, not as it streams.
       if (immersiveTurn) {
         immersivePhase = 'speaking'
         immersiveCaption = sentence
       }
-      return engine.speak(sentence, { lang, rate, voice })
+      return engine.speak(sentence, opts)
     })
   }
   spokenChunkCount = Math.max(spokenChunkCount, upto)
@@ -1119,9 +1124,26 @@ function pumpSpeech(fullText: string, final: boolean): void {
   }
 }
 
+/**
+ * Sentences queued for speech that have not started yet, in order. The
+ * first {@link SPEECH_LOOKAHEAD} are handed to the engine's `prefetch`
+ * so a synthesized voice has the next sentence ready when the current
+ * one ends — for the cloud engine that removes a 1.5-2.3 s silence at
+ * every sentence boundary. Two rather than one because a short sentence
+ * can finish playing before the next one's synthesis does.
+ */
+let speechAhead: string[] = []
+const SPEECH_LOOKAHEAD = 2
+
+function prefetchSpeech(engine: TtsEngine, opts: TtsSpeakOptions): void {
+  if (!engine.prefetch) return
+  for (const sentence of speechAhead.slice(0, SPEECH_LOOKAHEAD)) engine.prefetch(sentence, opts)
+}
+
 /** Stop speech immediately (Stop control / barge-in / new reply). */
 function stopSpeaking(): void {
   speakingActive = false
+  speechAhead = []
   ttsEngine?.cancel()
   ttsChain = Promise.resolve()
   setStopSpeakingVisible(false)
@@ -1163,11 +1185,19 @@ function speakMessage(text: string): void {
   const lang = cfg.voiceLang || getLocale()
   const rate = cfg.voiceRate
   const voice = cfg.voiceName
-  let chain = engine.speak(first, { lang, rate, voice })
+  const opts = { lang, rate, voice }
+  let chain = engine.speak(first, opts)
+  speechAhead = chunks.slice(1).filter(Boolean)
+  prefetchSpeech(engine, opts)
   for (let i = 1; i < chunks.length; i++) {
     const sentence = chunks[i]
     if (!sentence) continue
-    chain = chain.then(() => (speakingActive && session === ttsSessionId ? engine.speak(sentence, { lang, rate, voice }) : undefined))
+    chain = chain.then(() => {
+      if (!(speakingActive && session === ttsSessionId)) return undefined
+      speechAhead.shift()
+      prefetchSpeech(engine, opts)
+      return engine.speak(sentence, opts)
+    })
   }
   ttsChain = chain.then(() => { if (speakingActive && session === ttsSessionId) setStopSpeakingVisible(false) })
 }
