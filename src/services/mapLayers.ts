@@ -102,13 +102,15 @@ const SAMPLE_H = 32
 /**
  * Fraction of a frame that hides the Earth: pixels with alpha above one
  * half for an alpha stream, or — for a value-encoded frame, whose alpha
- * is always opaque — codes at or above `lumaNoData`. Sampled on a 64x32
+ * is always opaque — codes the palette draws at least half opaque (a
+ * palette can make low values transparent too, so "has a value" is not
+ * "covers the Earth"). Sampled on a 64x32
  * copy, which is plenty for "most of the sphere". Null when the frame
  * cannot be read (not decoded yet, or a cross-origin taint).
  */
 export function measureCoverage(
   source: CanvasImageSource & { readonly width?: number },
-  mode: { kind: 'alpha' } | { kind: 'luma'; noDataBelow: number; crop?: { x: number; y: number; width: number; height: number } },
+  mode: { kind: 'alpha' } | { kind: 'palette'; lut: Uint8Array; crop?: { x: number; y: number; width: number; height: number } },
 ): number | null {
   try {
     const canvas = document.createElement('canvas')
@@ -116,26 +118,26 @@ export function measureCoverage(
     canvas.height = SAMPLE_H
     const ctx = canvas.getContext('2d', { willReadFrequently: true })
     if (!ctx) return null
-    if (mode.kind === 'luma' && mode.crop) {
+    if (mode.kind === 'palette' && mode.crop) {
       const c = mode.crop
       ctx.drawImage(source, c.x, c.y, c.width, c.height, 0, 0, SAMPLE_W, SAMPLE_H)
     } else {
       ctx.drawImage(source, 0, 0, SAMPLE_W, SAMPLE_H)
     }
     const px = ctx.getImageData(0, 0, SAMPLE_W, SAMPLE_H).data
-    return coverageOfPixels(px, mode.kind === 'luma' ? { noDataBelow: mode.noDataBelow } : null)
+    return coverageOfPixels(px, mode.kind === 'palette' ? mode.lut : null)
   } catch {
     return null
   }
 }
 
 /** The counting half of {@link measureCoverage}, separate so it can be tested without a canvas. */
-export function coverageOfPixels(rgba: Uint8ClampedArray | Uint8Array, luma: { noDataBelow: number } | null): number {
+export function coverageOfPixels(rgba: Uint8ClampedArray | Uint8Array, lut: Uint8Array | null): number {
   let covered = 0
   const n = rgba.length / 4
   for (let i = 0; i < n; i++) {
     const o = i * 4
-    if (luma ? rgba[o]! >= luma.noDataBelow : rgba[o + 3]! > 127) covered++
+    if (lut ? lut[rgba[o]! * 4 + 3]! > 127 : rgba[o + 3]! > 127) covered++
   }
   return n ? covered / n : 0
 }

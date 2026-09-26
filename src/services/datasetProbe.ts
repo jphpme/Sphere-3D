@@ -15,6 +15,7 @@
  */
 
 import type { DatasetOverlayOptions } from '../types'
+import { valueAtCode } from './dashRelease'
 import { isTransparentLuma, lumaToValue, type ColorScale } from '../types/color-scale'
 import { t } from '../i18n'
 import { formatNumber } from '../i18n/format'
@@ -66,7 +67,7 @@ export function latLonToTexelUv(
     }
     let v = (n - lat) / (n - s)
     if (flipY) v = 1 - v
-    return { u, v }
+    return cropped({ u, v }, options?.cropRect)
   }
 
   const lonOrigin = typeof options?.lonOrigin === 'number' && Number.isFinite(options.lonOrigin)
@@ -77,7 +78,12 @@ export function latLonToTexelUv(
   const raw = (lon - lonOrigin) / 360 + 0.5
   const u = ((raw % 1) + 1) % 1
   const vTop = (90 - lat) / 180
-  return { u, v: flipY ? 1 - vTop : vTop }
+  return cropped({ u, v: flipY ? 1 - vTop : vTop }, options?.cropRect)
+}
+
+/** AYNI: a release's map is a rectangle of its frame (`cropRect`); identity otherwise. */
+function cropped(uv: TexelUv, crop: DatasetOverlayOptions['cropRect']): TexelUv {
+  return crop ? { u: crop.u0 + uv.u * crop.us, v: crop.v0 + uv.v * crop.vs } : uv
 }
 
 /**
@@ -273,6 +279,18 @@ export function probeDatasetValue(
   if (!uv) return null
   const luma = sample(source, uv)
   if (luma === null) return null
+  // AYNI: a value-encoded release decodes by its own rules (log and
+  // classified kinds are not linear, and no-data has its own codes).
+  const release = options?.releaseEncoding
+  if (release) {
+    const value = valueAtCode(release, luma)
+    return {
+      value: value ?? release.vmin,
+      units: release.units ?? undefined,
+      noData: value === null,
+      quantisationStep: (release.vmax - release.vmin) / (release.dataMaxCode - release.dataMinCode),
+    }
+  }
   return {
     value: lumaToValue(luma, scale),
     units: scale.units,

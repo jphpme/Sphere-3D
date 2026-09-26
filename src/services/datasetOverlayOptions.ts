@@ -19,6 +19,7 @@
 import type { Dataset, DatasetOverlayOptions } from '../types'
 import { RENDER_ENCODING_DATA_LUMA } from '../types/color-scale'
 import type { DisplayColorScale } from '../types/unit-scale'
+import { releaseBoundingBox, releaseColorScale, releaseCropRect } from './dashRelease'
 
 /**
  * Is a `celestialBody` string the SOS convention for "Earth"?
@@ -75,6 +76,24 @@ export function overlayOptionsFromDataset(
   const hasNonEarthBody = !isEarthBody(dataset.celestialBody)
   const colorScale = dataEncodedScale(dataset)
   const hasAlphaStream = carriesAlphaStream(dataset)
+  // AYNI: a resolved value-encoded release brings its exact palette, the
+  // map's rectangle within its frame, and its decoding rules — to the
+  // browser globe and the immersive one alike.
+  const release = dataset.releaseEncoding
+  if (release) {
+    return {
+      boundingBox: releaseBoundingBox(release) ?? dataset.boundingBox,
+      lonOrigin: dataset.lonOrigin,
+      isFlippedInY: dataset.isFlippedInY,
+      celestialBody: dataset.celestialBody,
+      colorScale: releaseColorScale(release),
+      ...(hasAlphaStream ? { hasAlphaStream: true } : {}),
+      cropRect: releaseCropRect(release),
+      releaseEncoding: release,
+      datasetId: dataset.id,
+      datasetTitle: dataset.title,
+    }
+  }
   if (!hasBbox && !hasLonOrigin && !hasFlip && !hasNonEarthBody && !colorScale && !hasAlphaStream) {
     return undefined
   }

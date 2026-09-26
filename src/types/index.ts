@@ -147,16 +147,14 @@ export interface Dataset {
   timelineLink?: string
 
   /**
-   * AYNI — set only on a value-encoded release row, which the immersive
-   * (VR/AR) globe alone can draw. `releaseDescriptorLink` is the
-   * `latest.json` pointer the loader follows to the current release;
-   * `vrValueEncoding` is that release's encoding, filled in at load.
-   * These rows never enter the catalog the 2D views list, and nothing
-   * outside the immersive session reads either field. See
-   * `services/dashRelease.ts`.
+   * AYNI — set only on a value-encoded release row. `releaseDescriptorLink`
+   * is the `latest.json` pointer the loader follows to the current
+   * release; `releaseEncoding` is that release's encoding, filled in at
+   * load, which gives both globes its palette, crop and decoding rules
+   * (overlayOptionsFromDataset). See `services/dashRelease.ts`.
    */
   releaseDescriptorLink?: string
-  vrValueEncoding?: import('./release-encoding').ReleaseEncoding
+  releaseEncoding?: import('./release-encoding').ReleaseEncoding
 
   /** When true, country/region borders render on by default for this
    * dataset (sparse transparent DASH overlays). */
@@ -428,6 +426,18 @@ export interface DatasetOverlayOptions {
    *  blending is enabled *only* for a data-encoded LUT or for one of
    *  these streams. */
   hasAlphaStream?: boolean
+  /**
+   * AYNI — the rectangle of the frame that holds the map, in image space
+   * (v == 0 is the top row): a value-encoded release carries a
+   * calibration strip below its map. Absent means the whole frame.
+   */
+  cropRect?: { u0: number; v0: number; us: number; vs: number }
+  /**
+   * AYNI — a value-encoded release's own code layout, so a value readout
+   * decodes exactly as the palette does (log and classified kinds are
+   * not linear). Plain data, so the bundle stays cloneable.
+   */
+  releaseEncoding?: import('./release-encoding').ReleaseEncoding
   /** Which dataset these options were built from.
    *
    *  Carried so a *frame* can say what it is, rather than a reader

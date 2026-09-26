@@ -903,6 +903,7 @@ const datasetFragSrc = `#version 300 es
   uniform bool uFlipY;
   uniform bool uDataEncoded;
   uniform sampler2D uColorLut; // 256x1 RGBA palette
+  uniform vec4 uDatasetCrop; // AYNI: (u0, v0, uScale, vScale) of the map within the frame
   in vec2 vUV;
   out vec4 fragColor;
 
@@ -957,6 +958,10 @@ const datasetFragSrc = `#version 300 es
       float v = uFlipY ? (1.0 - vUV.y) : vUV.y;
       sampleUV = vec2(u, v);
     }
+
+    // AYNI: a value-encoded release's map is a rectangle of its frame
+    // (a calibration strip sits below it). Identity for everything else.
+    sampleUV = uDatasetCrop.xy + sampleUV * uDatasetCrop.zw;
 
     if (uDataEncoded) {
       // Luma is the measurement. Look the value up in the palette
@@ -1205,6 +1210,8 @@ const TINT_CODE: Record<MapLayerTint, number> = { source: 0, white: 1, black: 2 
 
 interface DatasetProgram {
   program: WebGLProgram
+  /** AYNI: uDatasetCrop (the map's rectangle within a release frame). */
+  cropLoc: WebGLUniformLocation | null
   matrixLoc: WebGLUniformLocation | null
   texLoc: WebGLUniformLocation | null
   radiusScaleLoc: WebGLUniformLocation | null
@@ -1607,6 +1614,7 @@ export function createEarthTileLayer(): EarthTileLayerControl {
           flipYLoc: gl2.getUniformLocation(datasetProg, 'uFlipY'),
           dataEncodedLoc: gl2.getUniformLocation(datasetProg, 'uDataEncoded'),
           colorLutLoc: gl2.getUniformLocation(datasetProg, 'uColorLut'),
+          cropLoc: gl2.getUniformLocation(datasetProg, 'uDatasetCrop'),
         }
       }
 
@@ -2059,6 +2067,8 @@ export function createEarthTileLayer(): EarthTileLayerControl {
         }
         gl2.uniform1f(dataset.lonOriginLoc, datasetOptions?.lonOrigin ?? 0)
         gl2.uniform1i(dataset.flipYLoc, datasetOptions?.isFlippedInY ? 1 : 0)
+        const crop = datasetOptions?.cropRect
+        gl2.uniform4f(dataset.cropLoc, crop?.u0 ?? 0, crop?.v0 ?? 0, crop?.us ?? 1, crop?.vs ?? 1)
         gl2.activeTexture(gl2.TEXTURE0)
         gl2.bindTexture(gl2.TEXTURE_2D, datasetTex)
         gl2.uniform1i(dataset.texLoc, 0)

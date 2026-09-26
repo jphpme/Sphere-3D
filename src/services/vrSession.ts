@@ -132,11 +132,6 @@ function sampleVrProbe(
 ): string | null {
   const spec = ctx.getDatasetTexture()
   if (!spec?.options?.colorScale) return null
-  // AYNI: a value-encoded release (dashRelease.ts) crops its map out of
-  // a taller frame and has its own no-data codes. The shared probe maps
-  // the whole frame, so it would read the wrong row and call no-data a
-  // value; say nothing rather than a wrong number.
-  if (spec.options.dataRegion) return null
   const uv = interaction.globeHoverUv()
   if (!uv) return null
   const sampler = getSharedLumaSampler()

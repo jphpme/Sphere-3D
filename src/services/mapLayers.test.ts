@@ -70,8 +70,11 @@ describe('coverageOfPixels', () => {
     expect(coverageOfPixels(px([0, 0, 0, 0], [9, 9, 9, 255], [9, 9, 9, 200], [9, 9, 9, 40]), null)).toBe(0.5)
   })
 
-  it('counts data codes of a value-encoded frame, whose alpha is always opaque', () => {
-    expect(coverageOfPixels(px([0, 0, 0, 255], [19, 19, 19, 255], [20, 20, 20, 255], [200, 200, 200, 255]), { noDataBelow: 20 })).toBe(0.5)
+  it('counts what the palette draws for a value-encoded frame, not every code with a value', () => {
+    // A palette that is clear below code 40 (AOD below 0.1, say) and opaque above.
+    const lut = new Uint8Array(256 * 4)
+    for (let c = 40; c < 256; c++) lut[c * 4 + 3] = 255
+    expect(coverageOfPixels(px([0, 0, 0, 255], [30, 30, 30, 255], [45, 45, 45, 255], [200, 200, 200, 255]), lut)).toBe(0.5)
   })
 })
 

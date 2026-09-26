@@ -68,7 +68,7 @@ import { createTimelineTrackUI, type TimelineTrackUIHandle } from './ui/timeline
 import { registerAnalysisSource } from './services/docentAnalysisTools'
 import { buildHistogram } from './services/datasetStats'
 import { DEFAULT_DISPLAY, type ColorScaleDisplay } from './services/colorScaleDisplay'
-import { RENDER_ENCODING_DATA_LUMA } from './types/color-scale'
+import { RENDER_ENCODING_DATA_LUMA, buildColorScaleLut } from './types/color-scale'
 import { initHelpUI, setActiveDataset as setHelpActiveDataset } from './ui/helpUI'
 import { showDisclosureBannerIfNeeded } from './ui/disclosureBanner'
 import {
@@ -124,7 +124,8 @@ import {
 import { initVrButton } from './ui/vrButton'
 import { flyToOnGlobe, isVrActive } from './services/vrSession'
 import type { VrDatasetTexture } from './services/vrScene'
-import { resolveDashRelease, vrOverlayOptionsFor } from './services/dashRelease'
+import { buildReleaseLut, resolveDashRelease } from './services/dashRelease'
+import { vrOverlayOptionsFor } from './services/vrOverlayOptions'
 import { publishGlobeState } from './services/multiOutput/globeStateEvents'
 import {
   displayForMirror,
@@ -1179,7 +1180,7 @@ class InteractiveSphere {
     const layers = await fetchLayerCatalog()
     if (gen !== this.mapLayerGen || layers.length === 0) return
     const transparent =
-      carriesAlphaStream(dataset) || dataset.renderEncoding === RENDER_ENCODING_DATA_LUMA || !!dataset.vrValueEncoding
+      carriesAlphaStream(dataset) || dataset.renderEncoding === RENDER_ENCODING_DATA_LUMA || !!dataset.releaseEncoding
     const coverage = transparent ? await this.measureDatasetCoverage(dataset, slot) : null
     if (gen !== this.mapLayerGen) return
     await this.applyMapLayers(defaultLayers(layers, { transparent, coverage }), slot, gen)
@@ -1199,15 +1200,13 @@ class InteractiveSphere {
       })
       if (source.readyState < 2) return null
     }
-    const release = dataset.vrValueEncoding
+    // A value-encoded frame counts what its palette actually draws.
+    const release = dataset.releaseEncoding
     if (release) {
-      return measureCoverage(source, { kind: 'luma', noDataBelow: release.nodataThresholdCode, crop: release.dataRegion })
+      return measureCoverage(source, { kind: 'palette', lut: buildReleaseLut(release), crop: release.dataRegion })
     }
     const scale = dataset.renderEncoding === RENDER_ENCODING_DATA_LUMA ? dataset.colorScale : undefined
-    if (scale) {
-      const noDataBelow = scale.dataMinLuma ?? Math.ceil((scale.transparentRange ?? 0) * 255)
-      return noDataBelow > 0 ? measureCoverage(source, { kind: 'luma', noDataBelow }) : 1
-    }
+    if (scale) return measureCoverage(source, { kind: 'palette', lut: buildColorScaleLut(scale) })
     return measureCoverage(source, { kind: 'alpha' })
   }
 
@@ -1238,15 +1237,16 @@ class InteractiveSphere {
   /**
    * AYNI — follow a release row's `latest.json` to the release current
    * right now, and point the row at its MPD, its `.dsa` (date track and
-   * Orbit) and its value encoding (the VR palette and crop). Resolved at
+   * the docent) and its value encoding (palette, crop and decoding, on
+   * the browser globe and the immersive one). Resolved at
    * every load, not once, because the publisher replaces releases as
    * data arrives.
    */
-  private async resolveImmersiveRelease(dataset: Dataset): Promise<void> {
+  private async resolveRelease(dataset: Dataset): Promise<void> {
     const release = await resolveDashRelease(dataset.releaseDescriptorLink!)
     dataset.dataLink = release.mpdUrl
     dataset.timelineLink = release.dsaUrl ?? undefined
-    dataset.vrValueEncoding = release.encoding ?? undefined
+    dataset.releaseEncoding = release.encoding ?? undefined
   }
 
   /** Resolve, render, and apply a dataset (image or video) to the sphere. */
@@ -1257,12 +1257,10 @@ class InteractiveSphere {
     loadStartWall: number = Date.now(),
   ): Promise<void> {
     const dataset = dataService.getDatasetById(datasetId)
-      // AYNI: a value-encoded release row exists only for the immersive
-      // session; outside one its id is as unknown as any other.
-      ?? (isVrActive() ? dataService.getImmersiveOnlyDatasetById(datasetId) : undefined)
     if (!dataset) throw new Error(`Dataset not found: ${datasetId}`)
-    const immersiveOnly = !!dataset.releaseDescriptorLink
-    if (immersiveOnly) await this.resolveImmersiveRelease(dataset)
+    // AYNI: a value-encoded release row is resolved to its current MPD,
+    // .dsa and encoding at every load.
+    if (dataset.releaseDescriptorLink) await this.resolveRelease(dataset)
 
     // §9.2 — count a user-initiated open as a visit for the
     // Continue-exploring row. Tours never reach this path (they go
@@ -1272,9 +1270,7 @@ class InteractiveSphere {
     // deliberate "I opened this" signal. viewSeconds still accrues
     // separately from info-panel reading time (datasetLoader).
     const isPlaylistAutoAdvance = trigger === 'url' && getActivePlaylistPlayback() != null
-    // An immersive-only row would otherwise surface in the 2D
-    // Continue-exploring row, which cannot open it.
-    if (!isPlaylistAutoAdvance && !immersiveOnly) {
+    if (!isPlaylistAutoAdvance) {
       recordVisit(dataset.id)
     }
 
@@ -2824,12 +2820,8 @@ class InteractiveSphere {
 
       // --- Phase 3 in-VR browse ---
       getDatasets: () => {
-        // AYNI: plus the value-encoded release rows, which only this
-        // globe decodes (dashRelease.ts); the 2D browse never lists them.
-        return [
-          ...this.appState.datasets.filter(d => dataService.isSupportedDataset(d) && !d.isHidden),
-          ...dataService.getImmersiveOnlyDatasets(),
-        ]
+        return this.appState.datasets
+          .filter(d => dataService.isSupportedDataset(d) && !d.isHidden)
           .map(d => {
             // Mirror the 2D browse UI (browseUI.ts line 79-90):
             // chips are the UNION of enriched.categories keys and
@@ -2914,11 +2906,6 @@ class InteractiveSphere {
 
       onSessionEnd: () => {
         endImmersiveVoice()
-        // AYNI: a value-encoded release stream is drawn in colour only by
-        // the immersive globe. Leaving it loaded would hand the 2D views
-        // its raw grayscale frames, so the app returns to the default
-        // globe instead.
-        if (this.appState.currentDataset?.releaseDescriptorLink) void this.goHome()
         this.announce('Exited VR')
         // Resume the 2D perf sampler now that VR has handed the
         // GPU back. The sampler stayed paused for the duration of

@@ -11,12 +11,9 @@ import {
   releaseUvRegion,
   resolveDashRelease,
   valueAtCode,
-  vrOverlayOptionsFor,
   type ReleaseEncoding,
 } from './dashRelease'
 import { buildColorScaleLut } from '../types/color-scale'
-import { overlayOptionsFromDataset } from './datasetOverlayOptions'
-import type { Dataset } from '../types'
 
 const GEO = { latTop: 90, latBottom: -90, lonLeft: -180, lonRight: 180, pixelCenter: true }
 const CODES = { nodataCode: 0, nodataThresholdCode: 20, dataMinCode: 32, dataMaxCode: 235 }
@@ -240,20 +237,5 @@ describe('resolveDashRelease', () => {
   it('names the step that failed', async () => {
     const fetchImpl = vi.fn(async () => new Response('', { status: 404 }))
     await expect(resolveDashRelease(LATEST, fetchImpl as unknown as typeof fetch)).rejects.toThrow(/Release pointer .* 404/)
-  })
-})
-
-describe('vrOverlayOptionsFor', () => {
-  const dataset = { id: 'R2_DASH_x', title: 'x', format: 'application/dash+xml', dataLink: 'x.mpd' } as Dataset
-
-  it('leaves every other dataset exactly as the shared options draw it', () => {
-    expect(vrOverlayOptionsFor(dataset)).toEqual(overlayOptionsFromDataset(dataset))
-  })
-
-  it('adds the release\'s palette and crop for a resolved release', () => {
-    const options = vrOverlayOptionsFor({ ...dataset, vrValueEncoding: encoding() })
-    expect(options?.dataRegion).toEqual({ u0: 0, v0: 16 / 466, us: 1, vs: 450 / 466 })
-    expect(options?.colorScale?.stops).toHaveLength(256)
-    expect(options?.boundingBox).toBeUndefined()
   })
 })

@@ -230,7 +230,13 @@ describe('AYNI — a release frame\'s map rectangle (dashRelease.ts)', () => {
     for (const lookup of lookups) expect(lookup).toMatch(/uSecUvRegion\.xy\s*\+.*uSecUvRegion\.zw/)
   })
 
-  it('leaves the 2D globe\'s shaders alone', () => {
+  it('crops the browser globe\'s dataset lookup through uDatasetCrop, before the pinned sample', () => {
+    // The 2D shader works in image space, so it has its own uniform rather
+    // than the VR one; the crop rewrites sampleUV, leaving the pinned
+    // `fragColor = texture(uDatasetTex, sampleUV);` line as it was.
+    const cropAt = TWO_D.search(/sampleUV\s*=\s*uDatasetCrop\.xy\s*\+\s*sampleUV\s*\*\s*uDatasetCrop\.zw/)
+    expect(cropAt).toBeGreaterThan(-1)
+    expect(TWO_D.indexOf('if (uDataEncoded)', cropAt)).toBeGreaterThan(cropAt)
     expect(TWO_D).not.toMatch(/UvRegion|dataRegion/)
   })
 })

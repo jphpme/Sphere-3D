@@ -2,7 +2,7 @@
 // Copyright 2026 The Zyra Project
 
 /**
- * AYNI — value-encoded DASH releases, for the immersive (VR/AR) globe only.
+ * AYNI — value-encoded DASH releases, on the browser globe and the immersive one.
  *
  * The stream host publishes some streams as immutable releases rather
  * than a fixed MPD: the index row names a `latest.json` pointer, which
@@ -13,13 +13,14 @@
  * strip rather than map, and the colours come from a palette the
  * release declares.
  *
- * This module resolves a release and turns its encoding into what the
- * VR globe already knows how to draw — a 256-entry palette indexed by
- * the raw luma code (`photorealEarth`'s data-encoded branch) — plus the
- * UV rectangle the map actually occupies. It deliberately produces a
- * VR-only description: nothing here sets `Dataset.renderEncoding`, so
- * the 2D map and the 3D browser globe keep drawing these frames exactly
- * as they draw any other video.
+ * This module resolves a release and turns its encoding into what both
+ * globes already know how to draw — a 256-entry palette indexed by the
+ * raw luma code (the data-encoded branches of earthTileLayer and
+ * photorealEarth) — plus the rectangle of the frame the map occupies,
+ * and the exact decoder the value readout uses. overlayOptionsFromDataset
+ * carries it all. `Dataset.renderEncoding` is left unset, so the analysis
+ * tools (which read the whole frame and decode linearly) and the
+ * generated colorbar stay off for these streams.
  *
  * The code layout is the publisher's, read from the file rather than
  * assumed: codes below `nodataThresholdCode` are no data (transparent,
@@ -32,9 +33,6 @@
 
 import type { ColorScale, ColorScaleStop } from '../types/color-scale'
 import type { ReleaseClass, ReleaseEncoding, ReleaseEncodingKind } from '../types/release-encoding'
-import type { Dataset } from '../types'
-import type { VrOverlayOptions } from './photorealEarth'
-import { overlayOptionsFromDataset } from './datasetOverlayOptions'
 import { COLOR_SCALE_LUT_SIZE } from '../types/color-scale'
 
 export type { ReleaseClass, ReleaseEncoding, ReleaseEncodingKind } from '../types/release-encoding'
@@ -265,9 +263,19 @@ export function releaseColorScale(enc: ReleaseEncoding): ColorScale {
     stops,
     vmin: enc.vmin - enc.dataMinCode * slope,
     vmax: enc.vmin + (top - enc.dataMinCode) * slope,
+    // Records "no data below the threshold" for anything that asks the
+    // scale (isTransparentLuma). buildColorScaleLut zeroes the same codes
+    // the palette already made transparent, so the LUT is unchanged.
+    transparentRange: enc.nodataThresholdCode / top,
   }
   if (enc.units) scale.units = enc.units
   return scale
+}
+
+/** Where the map sits in the frame in image space (v == 0 is the top row), as the browser globe and the value readout sample it. */
+export function releaseCropRect(enc: ReleaseEncoding): { u0: number; v0: number; us: number; vs: number } {
+  const { x, y, width, height } = enc.dataRegion
+  return { u0: x / enc.frameWidth, v0: y / enc.frameHeight, us: width / enc.frameWidth, vs: height / enc.frameHeight }
 }
 
 /** Where the map sits in the frame, in THREE's flipped-Y UV space. */
@@ -323,28 +331,5 @@ export async function resolveDashRelease(
     mpdUrl: new URL(mpd, releaseUrl).toString(),
     dsaUrl: typeof dsa === 'string' && dsa ? new URL(dsa, releaseUrl).toString() : null,
     encoding: parseReleaseEncoding(release),
-  }
-}
-
-// ---------------------------------------------------------------------------
-// The immersive globe's view of a dataset
-// ---------------------------------------------------------------------------
-
-/**
- * The overlay options the VR/AR globe draws a dataset with: the shared
- * ones, plus — for a resolved release — its exact palette, the map's
- * rectangle inside the frame, and a bounding box when the release is
- * regional. Every other dataset gets exactly the shared options, so the
- * immersive globe draws it as before; and the 2D views never call this.
- */
-export function vrOverlayOptionsFor(dataset: Dataset): VrOverlayOptions | undefined {
-  const shared = overlayOptionsFromDataset(dataset)
-  const enc = dataset.vrValueEncoding
-  if (!enc) return shared
-  return {
-    ...shared,
-    colorScale: releaseColorScale(enc),
-    dataRegion: releaseUvRegion(enc),
-    ...(releaseBoundingBox(enc) ? { boundingBox: releaseBoundingBox(enc)! } : {}),
   }
 }

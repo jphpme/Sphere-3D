@@ -23,6 +23,9 @@ import {
   type TexelUv,
   type ProbeSource,
 } from './datasetProbe'
+import { parseReleaseEncoding } from './dashRelease'
+import { overlayOptionsFromDataset } from './datasetOverlayOptions'
+import type { Dataset } from '../types'
 import type { ColorScale, DatasetOverlayOptions } from '../types'
 
 const SCALE: ColorScale = {
@@ -384,5 +387,35 @@ describe('a reading does not print digits the transport cannot carry', () => {
 
   it('says no data regardless of the step', () => {
     expect(formatProbeReading({ value: 0, noData: true, quantisationStep: STEP })).toBeTruthy()
+  })
+})
+
+describe('AYNI — a value-encoded release', () => {
+  // Lightning: log 1..3000 flashes/hr, map 4096x2048 above a strip, frame 4096x2064.
+  const enc = parseReleaseEncoding({
+    representation: { width: 4096, height: 2064 },
+    valueEncoding: {
+      kind: 'luma8-log', units: 'flashes/hr', vmin: 1, vmax: 3000,
+      nodataCode: 0, nodataThresholdCode: 20, dataMinCode: 32, dataMaxCode: 235,
+      dataRegion: { x: 0, y: 0, width: 4096, height: 2048 },
+      geo: { latTop: 90, latBottom: -90, lonLeft: -180, lonRight: 180 },
+      presentation: { alphaMode: 'binary', defaultPalette: { stops: [{ t: 0, rgba: [0, 0, 0, 255] }, { t: 1, rgba: [255, 255, 255, 255] }] } },
+    },
+  })!
+  const options = overlayOptionsFromDataset({ id: 'R2_DASH_l', title: 'Lightning', format: 'application/dash+xml', dataLink: 'x.mpd', releaseEncoding: enc } as Dataset)
+
+  it('reads the map rows, never the calibration strip under them', () => {
+    // The south pole is the map's last row, not the frame's.
+    expect(latLonToTexelUv(-90, 0, options)!.v).toBeCloseTo(2048 / 2064, 9)
+    expect(latLonToTexelUv(90, 0, options)!.v).toBeCloseTo(0, 9)
+  })
+
+  it('decodes by the release\'s own rules: geometric for a log stream, and no data below the threshold', () => {
+    const at = (code: number) => probeDatasetValue(0, 0, {} as never, () => code, options)!
+    expect(at(133.5).value).toBeCloseTo(Math.sqrt(3000), 6)
+    expect(at(235).value).toBeCloseTo(3000, 6)
+    expect(at(10).noData).toBe(true)
+    expect(at(40).noData).toBe(false)
+    expect(at(40).units).toBe('flashes/hr')
   })
 })

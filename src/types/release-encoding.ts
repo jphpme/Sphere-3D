@@ -4,7 +4,7 @@
 /**
  * AYNI — the shape of a value-encoded DASH release's `valueEncoding`,
  * as `services/dashRelease.ts` parses it. Kept in `types/` so
- * `Dataset.vrValueEncoding` can name it without the types folder
+ * `Dataset.releaseEncoding` can name it without the types folder
  * importing service code (which the Pages Functions and CLI builds,
  * sharing `types/`, cannot compile).
  */

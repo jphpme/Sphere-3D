@@ -1123,6 +1123,10 @@ export class MapRenderer implements GlobeRenderer {
   } | null {
     const options = this.probeOptions
     if (!this.probeSource || !options?.colorScale) return null
+    // AYNI: the analysis tools read the whole frame and decode linearly; a
+    // value-encoded release has a calibration strip under its map and may
+    // be log or classified. Off for those until the tools learn both.
+    if (options.releaseEncoding) return null
     const sampler = getSharedLumaSampler()
     if (!sampler) return null
     const snapshot = sampler.snapshot(this.probeSource)

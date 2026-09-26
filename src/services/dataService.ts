@@ -608,17 +608,6 @@ async function fetchRealtimeDashIndex(): Promise<RealtimeDashIndex | null> {
   return null
 }
 
-/**
- * AYNI — the value-encoded release rows from the last index read. They
- * are kept out of the catalog the 2D views list (`fetchDatasets`) and
- * reach only the immersive session, through
- * `DataService.getImmersiveOnlyDatasets`: the VR/AR globe decodes their
- * luma through the release's palette (`dashRelease.ts`), while the 2D
- * map and 3D browser globe would show a grayscale frame with a
- * calibration strip across the bottom.
- */
-let immersiveOnlyDatasets: Dataset[] = []
-
 /** One index row as a `Dataset`, given the URL the loader starts from. */
 function realtimeDashDataset(
   entry: RealtimeDashEntry,
@@ -677,23 +666,25 @@ function realtimeDashDataset(
 async function fetchRealtimeDashDatasets(): Promise<Dataset[]> {
   try {
     const index = await fetchRealtimeDashIndex()
-    immersiveOnlyDatasets = []
     if (!index) return []
     const entries = index.datasets ?? []
     const baseUrl = realtimeDashBaseUrl(index)
-    immersiveOnlyDatasets = entries
-      .filter(entry => !!entry.id && !entry.mpd && !!entry.releaseDescriptorUrl && entry.valueEncoded === true)
-      .map((entry, i) => {
-        const latest = resolveRealtimeDashAsset(entry.releaseDescriptorUrl, baseUrl) ?? entry.releaseDescriptorUrl!
-        // dataLink stays the pointer until the loader resolves the release:
-        // anything that tried to play it unresolved fails the MPD preflight
-        // rather than playing the wrong thing.
-        return { ...realtimeDashDataset(entry, i, baseUrl, index.generatedAt, latest), releaseDescriptorLink: latest }
-      })
-    return entries
+    const direct = entries
       .filter((entry): entry is RealtimeDashEntry & { mpd: string } => !!entry.id && !!entry.mpd)
       .map((entry, i) =>
         realtimeDashDataset(entry, i, baseUrl, index.generatedAt, resolveRealtimeDashAsset(entry.mpd, baseUrl) ?? entry.mpd))
+    // Value-encoded releases (dashRelease.ts): the row names a latest.json
+    // pointer, resolved to the current MPD, .dsa and encoding at load.
+    // dataLink stays the pointer until then, so anything that tried to
+    // play it unresolved fails the MPD preflight instead of playing the
+    // wrong thing.
+    const releases = entries
+      .filter(entry => !!entry.id && !entry.mpd && !!entry.releaseDescriptorUrl && entry.valueEncoded === true)
+      .map((entry, i) => {
+        const latest = resolveRealtimeDashAsset(entry.releaseDescriptorUrl, baseUrl) ?? entry.releaseDescriptorUrl!
+        return { ...realtimeDashDataset(entry, direct.length + i, baseUrl, index.generatedAt, latest), releaseDescriptorLink: latest }
+      })
+    return [...direct, ...releases]
   } catch (error) {
     logger.warn('[DataService] Could not load real-time DASH index, continuing without it', error)
     return []
@@ -1157,19 +1148,6 @@ export class DataService {
    * The resolution order lives in `src/utils/datasetUrl.ts` so the
    * URL grammar and this lookup can't drift apart.
    */
-  /**
-   * AYNI — value-encoded release rows, for the immersive session only.
-   * Not part of `fetchDatasets`, so no 2D surface lists or searches them.
-   */
-  getImmersiveOnlyDatasets(): readonly Dataset[] {
-    return immersiveOnlyDatasets
-  }
-
-  /** Look up one of {@link getImmersiveOnlyDatasets} by id. */
-  getImmersiveOnlyDatasetById(id: string): Dataset | undefined {
-    return immersiveOnlyDatasets.find(d => d.id === id)
-  }
-
   getDatasetById(id: string): Dataset | undefined {
     if (!this.cache) {
       return undefined
