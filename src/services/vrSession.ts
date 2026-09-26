@@ -41,6 +41,7 @@ import { getSharedLumaSampler } from './glLumaSampler'
 import { createVrZoomOverlay, type VrZoomOverlayHandle } from '../ui/vrZoomOverlay'
 import { createVrPlacementTouch, type VrPlacementTouchHandle } from '../ui/vrPlacementTouch'
 import { createVrRotateTouch, type VrRotateTouchHandle } from '../ui/vrRotateTouch'
+import { tiltGlobe } from './vrGlobeTilt'
 import { createVrDebugPanel, type VrDebugPanelHandle } from './vrDebugPanel'
 import { MAX_GLOBE_SCALE, MIN_GLOBE_SCALE } from './vrScene'
 import { createVrPlacement, type VrPlacementHandle } from './vrPlacement'
@@ -1508,13 +1509,18 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
   // vrInteraction's isScreenInput / domTouchActive guards for how the
   // XR grab, pinch and thumbstick paths stand down on this device.
   if (handheldAr && domOverlayActive) {
-    logger.info('[VR] handheld rotate layer mounted — one finger spins the globe')
+    logger.info('[VR] handheld rotate layer mounted — one finger spins and tilts the globe')
     rotateTouch = createVrRotateTouch({
       onRotate: (delta) => {
         // Object3D.rotateY is about the globe's LOCAL Y — its own
         // axis, whatever orientation it currently has. scene.update
         // copies the quaternion to any secondary globes.
         scene.globe.rotateY(delta)
+      },
+      // AYNI: the same drag's vertical travel tilts the globe toward or
+      // away from the viewer, bounded short of upside down (vrGlobeTilt).
+      onTilt: (delta) => {
+        tiltGlobe(THREE_, scene.globe, camera, delta)
       },
     })
     rotateTouchMounted = true

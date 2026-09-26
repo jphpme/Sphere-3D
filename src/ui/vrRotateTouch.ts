@@ -9,6 +9,11 @@
  * exactly one job once the globe has been placed:
  *
  *   - **One finger drags sideways → the globe spins on its own axis.**
+ *   - **The same finger drags up or down → the globe tilts toward or
+ *     away from the viewer** (AYNI, 2026-09-26), so the poles can be
+ *     brought into view. Both come from the one drag, like a trackball:
+ *     no mode to pick, and a sideways swipe's small vertical wobble tilts
+ *     only by as much as the finger actually moved.
  *
  * Nothing else. There is no two-finger gesture of any kind — a second
  * finger is ignored outright, it neither scales nor moves nor rotates
@@ -51,6 +56,14 @@ export interface VrRotateTouchOptions {
    * finger moves toward the screen's right edge.
    */
   readonly onRotate: (deltaRadians: number) => void
+  /**
+   * AYNI: tilt to apply about a horizontal axis across the viewer's
+   * line of sight, in radians, for the finger travel since the previous
+   * event. Positive when the finger moves toward the screen's bottom
+   * edge, which brings the globe's top toward the viewer. Optional; a
+   * host that leaves it out keeps the spin-only behaviour.
+   */
+  readonly onTilt?: (deltaRadians: number) => void
 }
 
 /** Returned handle. Caller arms it outside Place mode and disposes on
@@ -78,6 +91,13 @@ export const ROTATE_DRAG_THRESHOLD_PX = 10
 export const RADIANS_PER_SCREEN_WIDTH = Math.PI * 2
 
 /**
+ * How far one full screen height of finger travel tilts the globe: half
+ * a turn. Tilt is bounded (the host stops it short of upside down), so it
+ * wants finer control than the unbounded spin.
+ */
+export const RADIANS_PER_SCREEN_HEIGHT = Math.PI
+
+/**
  * Controls whose touches belong to the control, not to the globe.
  * Mirrors the guard in `vrPlacementTouch`, plus a bare
  * `button`/`input` catch-all.
@@ -94,6 +114,12 @@ export function dragToRotation(dxPx: number, screenWidthPx: number): number {
   return (dxPx / screenWidthPx) * RADIANS_PER_SCREEN_WIDTH
 }
 
+/** Pure maths: vertical finger travel to a tilt delta. */
+export function dragToTilt(dyPx: number, screenHeightPx: number): number {
+  if (!(screenHeightPx > 0)) return 0
+  return (dyPx / screenHeightPx) * RADIANS_PER_SCREEN_HEIGHT
+}
+
 /** Create the handheld-AR rotate layer. Pure DOM — no Three.js. */
 export function createVrRotateTouch(
   opts: VrRotateTouchOptions,
@@ -106,7 +132,9 @@ export function createVrRotateTouch(
   // rule, enforced by never looking at a second identifier.
   let activeTouchId: number | null = null
   let startX = 0
+  let startY = 0
   let lastX = 0
+  let lastY = 0
   let dragging = false
 
   function findTouch(ev: TouchEvent): Touch | null {
@@ -130,7 +158,9 @@ export function createVrRotateTouch(
     if (!touch) return
     activeTouchId = touch.identifier
     startX = touch.clientX
+    startY = touch.clientY
     lastX = touch.clientX
+    lastY = touch.clientY
     dragging = false
   }
 
@@ -139,20 +169,30 @@ export function createVrRotateTouch(
     const touch = findTouch(ev)
     if (!touch) return
     if (!dragging) {
-      if (Math.abs(touch.clientX - startX) < ROTATE_DRAG_THRESHOLD_PX) return
+      // Distance in either direction: a purely vertical drag is a tilt,
+      // and must become a drag as readily as a sideways one.
+      if (Math.hypot(touch.clientX - startX, touch.clientY - startY) < ROTATE_DRAG_THRESHOLD_PX) return
       dragging = true
       // Start counting from where the threshold was crossed so the
       // globe does not jump by the dead-zone distance.
       lastX = touch.clientX
+      lastY = touch.clientY
     }
     // Only now — a recognised drag — claim the touch so the browser does
     // not scroll or zoom the page underneath.
     if (ev.cancelable) ev.preventDefault()
     const dx = touch.clientX - lastX
+    const dy = touch.clientY - lastY
     lastX = touch.clientX
-    if (dx === 0) return
-    const delta = dragToRotation(dx, window.innerWidth)
-    if (delta !== 0) opts.onRotate(delta)
+    lastY = touch.clientY
+    if (dx !== 0) {
+      const delta = dragToRotation(dx, window.innerWidth)
+      if (delta !== 0) opts.onRotate(delta)
+    }
+    if (dy !== 0 && opts.onTilt) {
+      const tilt = dragToTilt(dy, window.innerHeight)
+      if (tilt !== 0) opts.onTilt(tilt)
+    }
   }
 
   function onTouchEnd(ev: TouchEvent): void {

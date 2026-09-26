@@ -3,10 +3,12 @@
 
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import {
+  RADIANS_PER_SCREEN_HEIGHT,
   RADIANS_PER_SCREEN_WIDTH,
   ROTATE_DRAG_THRESHOLD_PX,
   createVrRotateTouch,
   dragToRotation,
+  dragToTilt,
 } from './vrRotateTouch'
 
 /** Build a TouchEvent-shaped object that the handlers can read. The
@@ -138,6 +140,56 @@ describe('vrRotateTouch', () => {
     handle.dispose()
     fire('touchstart', [{ id: 1, x: 100 }])
     fire('touchmove', [{ id: 1, x: 400 }])
+    expect(onRotate).not.toHaveBeenCalled()
+  })
+})
+
+describe('AYNI — tilt from the same drag', () => {
+  const handles: Array<{ dispose(): void }> = []
+  afterEach(() => {
+    for (const h of handles.splice(0)) h.dispose()
+  })
+
+  function make() {
+    const onRotate = vi.fn()
+    const onTilt = vi.fn()
+    const handle = createVrRotateTouch({ onRotate, onTilt })
+    handle.setEnabled(true)
+    handles.push(handle)
+    return { onRotate, onTilt }
+  }
+
+  it('maps a full screen height of travel to half a turn', () => {
+    expect(dragToTilt(800, 800)).toBeCloseTo(RADIANS_PER_SCREEN_HEIGHT)
+    expect(dragToTilt(-400, 800)).toBeCloseTo(-Math.PI / 2)
+    expect(dragToTilt(100, 0)).toBe(0)
+  })
+
+  it('a vertical drag tilts, and is a drag as readily as a sideways one', () => {
+    const { onRotate, onTilt } = make()
+    fire('touchstart', [{ id: 1, x: 100, y: 100 }])
+    fire('touchmove', [{ id: 1, x: 100, y: 100 + ROTATE_DRAG_THRESHOLD_PX }])
+    fire('touchmove', [{ id: 1, x: 100, y: 100 + ROTATE_DRAG_THRESHOLD_PX + 60 }])
+    // Downward travel is positive: the globe's top comes toward the viewer.
+    expect(onTilt).toHaveBeenLastCalledWith(dragToTilt(60, window.innerHeight))
+    expect(onRotate).not.toHaveBeenCalled()
+  })
+
+  it('a diagonal drag spins and tilts at once, each by its own axis of travel', () => {
+    const { onRotate, onTilt } = make()
+    fire('touchstart', [{ id: 1, x: 100, y: 100 }])
+    fire('touchmove', [{ id: 1, x: 120, y: 120 }])
+    fire('touchmove', [{ id: 1, x: 170, y: 90 }])
+    expect(onRotate).toHaveBeenLastCalledWith(dragToRotation(50, window.innerWidth))
+    expect(onTilt).toHaveBeenLastCalledWith(dragToTilt(-30, window.innerHeight))
+  })
+
+  it('a second finger still does nothing', () => {
+    const { onRotate, onTilt } = make()
+    fire('touchstart', [{ id: 1, x: 100, y: 100 }])
+    fire('touchstart', [{ id: 2, x: 300, y: 300 }])
+    fire('touchmove', [{ id: 2, x: 300, y: 500 }])
+    expect(onTilt).not.toHaveBeenCalled()
     expect(onRotate).not.toHaveBeenCalled()
   })
 })
