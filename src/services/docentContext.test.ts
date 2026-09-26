@@ -186,7 +186,7 @@ describe('getListFeaturedDatasetsTool (Phase 1c)', () => {
 describe('buildSystemPrompt', () => {
   it('includes docent role description', () => {
     const prompt = buildSystemPrompt(datasets, null)
-    expect(prompt).toContain('Orbit')
+    expect(prompt).toContain('Ayni Chatbot')
   })
 
   it('places the language directive BEFORE the role description for non-English locales', async () => {
@@ -200,7 +200,7 @@ describe('buildSystemPrompt', () => {
     try {
       const prompt = buildSystemPrompt(datasets, null)
       const directiveIdx = prompt.indexOf('Responde en')
-      const roleIdx = prompt.indexOf('You are Orbit')
+      const roleIdx = prompt.indexOf('You are Ayni Chatbot')
       expect(directiveIdx).toBeGreaterThanOrEqual(0)
       expect(roleIdx).toBeGreaterThan(directiveIdx)
     } finally {
@@ -215,7 +215,7 @@ describe('buildSystemPrompt', () => {
     expect(prompt).not.toContain('Respond in English')
     expect(prompt).not.toContain('Responde en')
     // Sanity: still starts with the role description.
-    expect(prompt.trimStart().startsWith('You are Orbit')).toBe(true)
+    expect(prompt.trimStart().startsWith('You are Ayni Chatbot')).toBe(true)
   })
 
   it('exposes a per-turn language reminder that anchors the directive close to generation', async () => {
@@ -997,5 +997,31 @@ describe('§A6 — the published scale in the dataset context', () => {
   it('says nothing for a dataset that carries no scale', () => {
     const ctx = buildCurrentDatasetContext({ id: 'X', title: 'Old Picture' } as unknown as Dataset)
     expect(ctx).not.toContain('Value scale')
+  })
+})
+
+describe('AYNI identity (Ayni Chatbot)', () => {
+  const prompt = buildSystemPrompt([], null)
+
+  it('speaks as Ayni Chatbot for AYNI by Pachamama Studios', () => {
+    expect(prompt).toContain('You are Ayni Chatbot, the digital docent of AYNI by Pachamama Studios')
+    expect(prompt).toContain('Quechua word for community and reciprocity')
+    expect(prompt).toContain('When asked who made AYNI, this app, or a visualization, the answer is Pachamama Studios.')
+  })
+
+  it('credits the data to its source and the visualization to Pachamama Studios', () => {
+    expect(prompt).toContain('Name the source as the data provider, and Pachamama Studios as the maker of the visualization.')
+    expect(prompt).toContain('Never say an agency made AYNI or a visualization.')
+  })
+
+  it('no longer introduces itself as upstream\'s docent', () => {
+    expect(prompt).not.toMatch(/You are Orbit/)
+    expect(prompt).not.toMatch(/datasets from NOAA/)
+    expect(prompt).not.toMatch(/terraviz|zyra/i)
+  })
+
+  it('offers the websites only when asked, and never as a seller', () => {
+    expect(prompt).toContain('Only when asked, offer Pachamama Studios\' websites: pachamama-studios.com (the company) and ayni.eu.com (AYNI products).')
+    expect(prompt).toContain('Never sound like a seller')
   })
 })

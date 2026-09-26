@@ -110,7 +110,9 @@ describe('describeStreamForDocent', () => {
     expect(text).toContain('Time coverage: 2026-08-22 15:30 UTC to 2026-09-21 15:15 UTC — one frame every 15 minutes, 2880 frames')
     expect(text).toContain('Last updated: 2026-09-21 15:40 UTC')
     expect(text).toContain('2237 of 2880 frames are real data; 643 are gaps filled by repeating the previous frame')
-    expect(text).toContain('Original data source: https://opensky-network.org/')
+    expect(text).toContain('Original data source (data provider, not the maker of the visualization): https://opensky-network.org/')
+    // AYNI: the visualization is credited to Pachamama Studios, the data to its source.
+    expect(text).toContain('Visualization: produced by Pachamama Studios (pipeline "Real-Time New"); data from https://opensky-network.org/')
     expect(text).toContain('Availability last checked: 2026-09-21 15:40 UTC')
   })
 
@@ -145,7 +147,7 @@ describe('describeStreamForDocent', () => {
 
   it('describes what it has when the descriptor has no time axis', () => {
     const text = describeStreamForDocent(parseDsaMetadata({ creator: 'Someone' }), null, 12)
-    expect(text).toContain('Creator (as the descriptor names it): Someone')
+    expect(text).toContain('Visualization: produced by Pachamama Studios (pipeline "Someone")')
     expect(text).not.toContain('Time coverage')
     expect(text).not.toContain('Frame on screen')
   })

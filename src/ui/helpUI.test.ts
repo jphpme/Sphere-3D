@@ -103,7 +103,7 @@ describe('helpUI', () => {
       const guide = document.getElementById('help-tabpanel-guide')!
       expect(guide.innerHTML).toContain('Navigating the globe')
       expect(guide.innerHTML).toContain('Guided tours')
-      expect(guide.innerHTML).toContain('Talking to Orbit')
+      expect(guide.innerHTML).toContain('Talking to Ayni Chatbot')
     })
 
     it('traps Tab focus inside the dialog', () => {

@@ -57,7 +57,7 @@ describe('voiceCaption', () => {
   it('prompts before anything is heard, then shows the transcript', () => {
     expect(voiceCaption({ phase: 'listening', caption: '' })).toEqual({
       label: 'Listening…',
-      text: 'Ask Orbit about the data, then tap the mic to send.',
+      text: 'Ask Ayni Chatbot about the data, then tap the mic to send.',
     })
     expect(voiceCaption({ phase: 'listening', caption: 'where is the ozone hole' })?.text)
       .toBe('where is the ozone hole')
@@ -67,12 +67,12 @@ describe('voiceCaption', () => {
     expect(voiceCaption({ phase: 'thinking', caption: 'where is the ozone hole' }))
       .toEqual({ label: 'Thinking…', text: 'where is the ozone hole' })
     expect(voiceCaption({ phase: 'speaking', caption: 'Over Antarctica.' }))
-      .toEqual({ label: 'Orbit', text: 'Over Antarctica.' })
+      .toEqual({ label: 'Ayni Chatbot', text: 'Over Antarctica.' })
   })
 
   it('keeps a finished reply up while it lingers, and says when hearing failed', () => {
     expect(voiceCaption({ phase: 'idle', caption: 'Over Antarctica.' }))
-      .toEqual({ label: 'Orbit', text: 'Over Antarctica.' })
+      .toEqual({ label: 'Ayni Chatbot', text: 'Over Antarctica.' })
     expect(voiceCaption({ phase: 'error', caption: '' })?.text)
       .toBe('Couldn’t hear that. Tap the mic to try again.')
   })

@@ -176,8 +176,16 @@ export function describeStreamForDocent(
   const product = meta?.productType
 
   if (product) lines.push(`Product type: ${product}`)
-  if (meta?.creator) lines.push(`Creator (as the descriptor names it): ${meta.creator}`)
-  if (meta?.sourceUrl) lines.push(`Original data source: ${meta.sourceUrl}`)
+  // Every stream with a .dsa is one of Pachamama Studios' own: the
+  // visualization is theirs, the data is the source's. Said here, beside
+  // the facts, so the credit is right even when the prompt's general
+  // identity section gets less of the model's attention.
+  if (meta) {
+    const pipeline = meta.creator ? ` (pipeline "${meta.creator}")` : ''
+    const data = meta.sourceUrl ? `; data from ${meta.sourceUrl}` : ''
+    lines.push(`Visualization: produced by Pachamama Studios${pipeline}${data}`)
+  }
+  if (meta?.sourceUrl) lines.push(`Original data source (data provider, not the maker of the visualization): ${meta.sourceUrl}`)
   if (meta?.units) lines.push(`Units: ${meta.units}`)
   if (meta?.keywords.length) lines.push(`Descriptor keywords: ${meta.keywords.join(', ')}`)
 

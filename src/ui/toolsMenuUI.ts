@@ -234,7 +234,9 @@ export function initToolsMenu(
   // leaks between invocations.
   isOpen = false
 
-  const gateMeetOrbit = isTauri()
+  // AYNI: the docent is "Ayni Chatbot", and /orbit is upstream's page for
+  // its Orbit character, so the link is never offered here.
+  const gateMeetOrbit = true
 
   const { onSetLayout, onOpenBrowse, onOpenOrbitSettings, onToggleDatasetInfo, onToggleLegend, onOpenCredits, onOpenOutputs, announce } = callbacks
   const currentLayout = viewports.getLayout()

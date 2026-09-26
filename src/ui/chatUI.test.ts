@@ -824,7 +824,7 @@ describe('welcome state copy', () => {
     initChatUI(makeCallbacks())
     clearChat() // ensure welcome state regardless of prior module state
     const messages = document.getElementById('chat-messages')
-    expect(messages?.textContent).toContain('Orbit')
+    expect(messages?.textContent).toContain('Ayni Chatbot')
   })
 
   it('renders domain-specific suggestion buttons', () => {
