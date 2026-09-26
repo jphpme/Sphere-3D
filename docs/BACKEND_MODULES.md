@@ -231,6 +231,9 @@ design rationale in the `docs/CATALOG_*` plan docs.
 | `functions/api/v1/_lib/r2-public-url.ts` | Build a publicly-readable URL for an R2 object key |
 | `functions/api/v1/_lib/image-upload.ts` | Shared validation for small direct image uploads (base64-in-JSON): png/jpeg/webp allowlist, magic-byte check against the claimed type, bounded decode, sha256 for content-addressed keys — used by the node-profile logo and tour-media routes |
 | `functions/api/v1/_lib/r2-store.ts` | R2 storage helpers — Phase 1b |
+| `functions/api/layers/_catalog.ts` | AYNI — the basemaps and overlays in the signed AYNI catalog (`ayni-catalog-production`, bound read-only as `LAYERS_R2`): the `builtin-*` datasets of the newest stable release, each a basemap or an overlay by its `.dsa` `composition.roles`, remembered per isolate for 5 minutes. `isServableLayerFile` limits serving to those layers' images, so the rest of the desktop catalog is never reachable through the site |
+| `functions/api/layers/index.ts` | AYNI — `GET /api/layers`: the layer list for the globe's layer stack (id, title, kind, image URL); 503 without `LAYERS_R2`, which the client treats as "no layers" |
+| `functions/api/layers/file/[sha].ts` | AYNI — `GET /api/layers/file/:sha`: one layer image from the private catalog bucket, immutable-cached; 404 for any hash that is not a current layer's image |
 | `functions/api/v1/_lib/search-datasets.ts` | Vector search over the dataset catalog — Phase 1c |
 | `functions/api/v1/_lib/snapshot.ts` | KV-backed snapshot cache for the public catalog response |
 | `functions/api/v1/_lib/sphere-thumbnail-job.ts` | Sphere-thumbnail generation job — Phase 1b |

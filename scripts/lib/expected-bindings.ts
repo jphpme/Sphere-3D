@@ -103,6 +103,14 @@ export const EXPECTED_BINDINGS: ExpectedBinding[] = [
     hint: 'R2 bucket for sphere thumbnails, image data refs, and tour JSON.',
   },
   {
+    name: 'LAYERS_R2',
+    type: 'r2',
+    environments: BOTH,
+    hint:
+      'AYNI: the signed catalog bucket (ayni-catalog-production), read-only. Without it ' +
+      '/api/layers answers 503 and the globe draws datasets without basemaps or overlays.',
+  },
+  {
     name: 'AI',
     type: 'ai',
     environments: BOTH,

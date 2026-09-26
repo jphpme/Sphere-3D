@@ -1157,6 +1157,50 @@ function syncColorLut(
   return lut
 }
 
+// AYNI — basemap and overlay passes around the dataset (see setMapLayers).
+// Same sphere and vertex shader as the dataset; the layer image is a
+// plain equirectangular picture (-180..180, north on the top row), so it
+// samples at vUV directly. `uTint` redraws line art in white or black
+// whatever its own colour: 0 = as published, 1 = white, 2 = black.
+const mapLayerFragSrc = `#version 300 es
+  precision highp float;
+  uniform sampler2D uLayerTex;
+  uniform int uTint;
+  uniform float uOpacity;
+  in vec2 vUV;
+  out vec4 fragColor;
+
+  void main() {
+    vec4 c = texture(uLayerTex, vUV);
+    vec3 rgb = uTint == 1 ? vec3(1.0) : (uTint == 2 ? vec3(0.0) : c.rgb);
+    fragColor = vec4(rgb, c.a * uOpacity);
+  }
+`
+
+/** How an overlay's lines are coloured: as published, or redrawn white / black. */
+export type MapLayerTint = 'source' | 'white' | 'black'
+
+/**
+ * AYNI — the layers stacked around the dataset: one basemap drawn under
+ * it (seen wherever the dataset is transparent) and overlays drawn above
+ * it, in order.
+ */
+export interface MapLayerImages {
+  basemap: HTMLImageElement | HTMLCanvasElement | null
+  overlays: ReadonlyArray<{ image: HTMLImageElement | HTMLCanvasElement; tint: MapLayerTint; opacity?: number }>
+}
+
+interface MapLayerProgram {
+  program: WebGLProgram
+  matrixLoc: WebGLUniformLocation | null
+  radiusScaleLoc: WebGLUniformLocation | null
+  texLoc: WebGLUniformLocation | null
+  tintLoc: WebGLUniformLocation | null
+  opacityLoc: WebGLUniformLocation | null
+}
+
+const TINT_CODE: Record<MapLayerTint, number> = { source: 0, white: 1, black: 2 }
+
 // --- Layer implementation ---
 
 interface DatasetProgram {
@@ -1295,6 +1339,12 @@ export interface EarthTileLayerControl {
   ): void
   /** Display an equirectangular video as a dataset overlay on the globe. */
   setDatasetVideo(video: HTMLVideoElement, options?: DatasetOverlayOptions): void
+  /**
+   * AYNI — the basemap under the dataset and the overlays above it; null
+   * for none. Drawn only while a dataset is shown: without one the globe
+   * is the default Earth, which has its own base and effects.
+   */
+  setMapLayers(layers: MapLayerImages | null): void
   /** Force a one-shot video texture re-upload (e.g. after scrubbing while paused). */
   requestVideoUpdate(): void
   /**
@@ -1360,6 +1410,51 @@ export function createEarthTileLayer(): EarthTileLayerControl {
   /** 256x1 RGBA palette for a data-encoded dataset, or null when the
    *  texture is an ordinary picture. Doubles as the mode flag. */
   let datasetColorLut: WebGLTexture | null = null
+  // AYNI map layers (setMapLayers). Textures are keyed by the image they
+  // came from, so switching layers never re-uploads one already on the
+  // GPU; a texture that leaves the stack is deleted.
+  let mapLayerProg: MapLayerProgram | null = null
+  const mapLayerTextures = new Map<HTMLImageElement | HTMLCanvasElement, WebGLTexture>()
+  let basemapLayerTex: WebGLTexture | null = null
+  let overlayLayers: Array<{ tex: WebGLTexture; tint: MapLayerTint; opacity: number }> = []
+
+  function drawMapLayer(
+    gl2: WebGL2RenderingContext,
+    prog: MapLayerProgram,
+    tex: WebGLTexture,
+    tint: MapLayerTint,
+    opacity: number,
+    matrix: Parameters<WebGL2RenderingContext['uniformMatrix4fv']>[2],
+  ): void {
+    gl2.useProgram(prog.program)
+    gl2.uniformMatrix4fv(prog.matrixLoc, false, matrix)
+    gl2.uniform1f(prog.radiusScaleLoc, terrainRadiusScale)
+    gl2.activeTexture(gl2.TEXTURE0)
+    gl2.bindTexture(gl2.TEXTURE_2D, tex)
+    gl2.uniform1i(prog.texLoc, 0)
+    gl2.uniform1i(prog.tintLoc, TINT_CODE[tint])
+    gl2.uniform1f(prog.opacityLoc, opacity)
+    gl2.drawElements(gl2.TRIANGLES, indexCount, gl2.UNSIGNED_SHORT, 0)
+  }
+
+  /** The GPU texture for a layer image, uploading it the first time. */
+  function mapLayerTexture(gl2: WebGL2RenderingContext, image: HTMLImageElement | HTMLCanvasElement): WebGLTexture | null {
+    const known = mapLayerTextures.get(image)
+    if (known) return known
+    const tex = gl2.createTexture()
+    if (!tex) return null
+    gl2.bindTexture(gl2.TEXTURE_2D, tex)
+    gl2.pixelStorei(gl2.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false)
+    gl2.texImage2D(gl2.TEXTURE_2D, 0, gl2.RGBA, gl2.RGBA, gl2.UNSIGNED_BYTE, fitImageToMaxTextureSize(gl2, image))
+    // Thin line art stays legible zoomed out only with mipmaps.
+    gl2.generateMipmap(gl2.TEXTURE_2D)
+    gl2.texParameteri(gl2.TEXTURE_2D, gl2.TEXTURE_MIN_FILTER, gl2.LINEAR_MIPMAP_LINEAR)
+    gl2.texParameteri(gl2.TEXTURE_2D, gl2.TEXTURE_MAG_FILTER, gl2.LINEAR)
+    gl2.texParameteri(gl2.TEXTURE_2D, gl2.TEXTURE_WRAP_S, gl2.REPEAT)
+    gl2.texParameteri(gl2.TEXTURE_2D, gl2.TEXTURE_WRAP_T, gl2.CLAMP_TO_EDGE)
+    mapLayerTextures.set(image, tex)
+    return tex
+  }
   /** Viewing state, not dataset state: the palette / stretch / threshold
    *  the user has chosen. Deliberately NOT reset when the dataset
    *  changes — a viewer who picked a colourblind-safe ramp expects it to
@@ -1512,6 +1607,19 @@ export function createEarthTileLayer(): EarthTileLayerControl {
           flipYLoc: gl2.getUniformLocation(datasetProg, 'uFlipY'),
           dataEncodedLoc: gl2.getUniformLocation(datasetProg, 'uDataEncoded'),
           colorLutLoc: gl2.getUniformLocation(datasetProg, 'uColorLut'),
+        }
+      }
+
+      // --- AYNI: basemap / overlay program (setMapLayers) ---
+      const mapLayerProgram = compileProgram(gl2, datasetVertSrc, mapLayerFragSrc, 'mapLayer')
+      if (mapLayerProgram) {
+        mapLayerProg = {
+          program: mapLayerProgram,
+          matrixLoc: gl2.getUniformLocation(mapLayerProgram, 'uMatrix'),
+          radiusScaleLoc: gl2.getUniformLocation(mapLayerProgram, 'uRadiusScale'),
+          texLoc: gl2.getUniformLocation(mapLayerProgram, 'uLayerTex'),
+          tintLoc: gl2.getUniformLocation(mapLayerProgram, 'uTint'),
+          opacityLoc: gl2.getUniformLocation(mapLayerProgram, 'uOpacity'),
         }
       }
 
@@ -1925,6 +2033,15 @@ export function createEarthTileLayer(): EarthTileLayerControl {
         } else {
           gl2.disable(gl2.BLEND)
         }
+        // AYNI: the basemap goes down first, opaque, so the dataset's own
+        // blending (a transparent stream, a value-encoded palette's alpha)
+        // composites over a map rather than over black.
+        if (mapLayerProg && basemapLayerTex) {
+          const blendWas = gl2.isEnabled(gl2.BLEND)
+          gl2.disable(gl2.BLEND)
+          drawMapLayer(gl2, mapLayerProg, basemapLayerTex, 'source', 1, matrix)
+          if (blendWas) gl2.enable(gl2.BLEND)
+        }
         gl2.useProgram(dataset.program)
         gl2.uniformMatrix4fv(dataset.matrixLoc, false, matrix)
         gl2.uniform1f(dataset.radiusScaleLoc, terrainRadiusScale)
@@ -1961,6 +2078,14 @@ export function createEarthTileLayer(): EarthTileLayerControl {
         // inside the box too, because its alpha is a measurement
         // rather than a styling choice.
         gl2.drawElements(gl2.TRIANGLES, indexCount, gl2.UNSIGNED_SHORT, 0)
+
+        // AYNI: overlays (borders, coastlines, grids, labels) go on top, in
+        // order, with straight alpha: the uploads pin premultiply off.
+        if (mapLayerProg && overlayLayers.length > 0) {
+          gl2.enable(gl2.BLEND)
+          gl2.blendFuncSeparate(gl2.SRC_ALPHA, gl2.ONE_MINUS_SRC_ALPHA, gl2.ONE, gl2.ONE_MINUS_SRC_ALPHA)
+          for (const o of overlayLayers) drawMapLayer(gl2, mapLayerProg, o.tex, o.tint, o.opacity, matrix)
+        }
 
         // Restore GL state and return — no earth effects when dataset is active
         gl2.bindVertexArray(null)
@@ -2221,6 +2346,9 @@ export function createEarthTileLayer(): EarthTileLayerControl {
       unsubscribeShaderSettings = null
       const gl2 = gl as WebGL2RenderingContext
       if (dataset) gl2.deleteProgram(dataset.program)
+      if (mapLayerProg) gl2.deleteProgram(mapLayerProg.program)
+      for (const tex of mapLayerTextures.values()) gl2.deleteTexture(tex)
+      mapLayerTextures.clear()
       if (darken) gl2.deleteProgram(darken.program)
       if (lights) gl2.deleteProgram(lights.program)
       if (specular) gl2.deleteProgram(specular.program)
@@ -2439,6 +2567,26 @@ export function createEarthTileLayer(): EarthTileLayerControl {
       // Callers should pass `options` whenever the new dataset has
       // 3d metadata; omit only for the legacy fast-path case.
       datasetOptions = options ?? null
+      mapRef?.triggerRepaint()
+    },
+    setMapLayers(layers) {
+      if (!glRef) return
+      const gl2 = glRef as WebGL2RenderingContext
+      const wanted = new Set<HTMLImageElement | HTMLCanvasElement>()
+      if (layers?.basemap) wanted.add(layers.basemap)
+      for (const o of layers?.overlays ?? []) wanted.add(o.image)
+      for (const [image, tex] of mapLayerTextures) {
+        if (!wanted.has(image)) {
+          gl2.deleteTexture(tex)
+          mapLayerTextures.delete(image)
+        }
+      }
+      basemapLayerTex = layers?.basemap ? mapLayerTexture(gl2, layers.basemap) : null
+      overlayLayers = []
+      for (const o of layers?.overlays ?? []) {
+        const tex = mapLayerTexture(gl2, o.image)
+        if (tex) overlayLayers.push({ tex, tint: o.tint, opacity: o.opacity ?? 1 })
+      }
       mapRef?.triggerRepaint()
     },
     setDatasetVideo(video: HTMLVideoElement, options?: DatasetOverlayOptions) {

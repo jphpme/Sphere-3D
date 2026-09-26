@@ -21,6 +21,7 @@
 import type * as THREE from 'three'
 import { createVrScene, type VrSceneHandle, type VrDatasetTexture } from './vrScene'
 import { createVrHud, type VrHudHandle, type VrVoiceState } from './vrHud'
+import type { MapLayerImages } from './earthTileLayer'
 import { createVrBrowse, type VrBrowseHandle } from './vrBrowse'
 import { createVrTourControls, type VrTourControlsHandle } from './vrTourControls'
 import { createVrTourOverlay, type VrTourOverlayHandle } from './vrTourOverlay'
@@ -297,6 +298,14 @@ export interface VrSessionContext {
   /** The HUD mic was tapped: start listening, send, or stop speaking, depending on the turn. */
   toggleVoice?(): void
 
+  // --- AYNI: layer stack ---
+  /**
+   * The basemap + overlays for the primary globe (mapLayers.ts), or null.
+   * Polled per XR frame and applied only when the object changes, so the
+   * host hands back the same object until the stack actually changes.
+   */
+  getMapLayerImages?(): MapLayerImages | null
+
   /** Optional — fired after the session ends + resources are torn down. */
   onSessionEnd?: () => void
 }
@@ -392,6 +401,8 @@ interface ActiveSession {
 }
 
 let active: ActiveSession | null = null
+/** AYNI: the layer stack last handed to the scene; undefined = none yet this session. */
+let appliedMapLayers: MapLayerImages | null | undefined = undefined
 
 /**
  * Loading handover timings, in render-loop seconds. If texture readiness
@@ -556,6 +567,7 @@ export type VrMode = 'vr' | 'ar'
  * the surrounding "void" changes from black to the user's room.
  */
 export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promise<void> {
+  appliedMapLayers = undefined
   if (active) {
     logger.warn(`[VR] enterImmersive(${mode}) called while a session is already active`)
     return
@@ -1733,6 +1745,12 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     active.scene.setPanelCount(panelCount)
     active.scene.setTexture(ctx.getDatasetTexture())
     syncSecondaryTextures(active.scene, ctx, panelCount)
+    // AYNI: the layer stack follows the 2D app's, applied on change only.
+    const mapLayers = ctx.getMapLayerImages?.() ?? null
+    if (mapLayers !== appliedMapLayers) {
+      appliedMapLayers = mapLayers
+      active.scene.setMapLayers(mapLayers)
+    }
 
     // Poll the 2D catalog only while the browse panel is open, and
     // only at 1 Hz once open — main.ts rebuilds the catalog array

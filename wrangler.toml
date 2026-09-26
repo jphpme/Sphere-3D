@@ -151,6 +151,14 @@ id = "fc9ecc345f8a4f078469ceba7d9c78fe"
 binding = "CATALOG_R2"
 bucket_name = "terraviz-assets"
 
+# AYNI — the signed AYNI catalog (Pachamama Studios), read-only here: the
+# basemaps and overlays the globe stacks around a dataset are its
+# `builtin-*` layer datasets. The bucket stays private; only
+# functions/api/layers/ serves from it, one content-hashed file at a time.
+[[r2_buckets]]
+binding = "LAYERS_R2"
+bucket_name = "ayni-catalog-production"
+
 # Vectorize index for the docent's semantic search, Phase 1c
 # onward. Holds 768-dim embeddings — one per published dataset —
 # produced from `@cf/baai/bge-base-en-v1.5` against the canonical

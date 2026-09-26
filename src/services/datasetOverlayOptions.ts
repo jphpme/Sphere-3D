@@ -109,7 +109,7 @@ export function overlayOptionsFromDataset(
  *  Two signals, because both travel on exactly these rows: the DASH
  *  format `fetchRealtimeDashDatasets` mints, and the `realtimeKind`
  *  tag that says the row came from the realtime registry. */
-function carriesAlphaStream(dataset: Dataset): boolean {
+export function carriesAlphaStream(dataset: Dataset): boolean {
   return dataset.format === 'application/dash+xml' || dataset.realtimeKind !== undefined
 }
 

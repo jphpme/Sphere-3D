@@ -335,6 +335,7 @@ export function initToolsMenu(
           <span class="tools-menu-item-label">${tHtml('tools.toggles.legend')}</span>
         </button>
       </section>
+      <section class="tools-menu-section" id="tools-menu-layers" hidden></section>
       <section class="tools-menu-section" aria-label="${tAttr('tools.uiScale.section.aria')}">
         <h4 class="tools-menu-section-title">${tHtml('tools.uiScale.section')}</h4>
         <div class="tools-menu-uiscale-row" role="group" aria-label="${tAttr('tools.uiScale.aria')}">

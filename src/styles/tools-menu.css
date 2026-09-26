@@ -459,3 +459,11 @@
         max-height: calc(100vh - calc(7rem * var(--ui-scale)) - env(safe-area-inset-bottom));
     }
 }
+
+/* AYNI — layer picker labels (mapLayersUI.ts) */
+.tools-menu-layers-label {
+  display: block;
+  margin-block: 6px 2px;
+  font-size: 0.8rem;
+  opacity: 0.8;
+}

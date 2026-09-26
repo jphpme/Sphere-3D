@@ -12,7 +12,7 @@ import maplibregl from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 
 import type { Map as MaplibreMap, StyleSpecification, CustomLayerInterface } from 'maplibre-gl'
-import { createEarthTileLayer, computeSunLightPosition, type EarthTileLayerControl } from './earthTileLayer'
+import { createEarthTileLayer, computeSunLightPosition, type EarthTileLayerControl, type MapLayerImages } from './earthTileLayer'
 import { isEarthBody } from './datasetOverlayOptions'
 import type {
   Dataset,
@@ -378,6 +378,8 @@ export class MapRenderer implements GlobeRenderer {
    * call gets the same per-dataset hints (bbox / lonOrigin /
    * isFlippedInY / celestialBody) the caller passed at request time. */
   private pendingDatasetOptions: DatasetOverlayOptions | null = null
+  /** AYNI: layers asked for before the earth layer existed; applied on load. */
+  private pendingMapLayers: MapLayerImages | null | undefined = undefined
   /** 0-based slot index for this renderer within its ViewportManager.
    * Reported on `camera_settled` / `map_click` so downstream queries
    * can separate primary vs secondary-panel activity. Defaults to 0
@@ -703,6 +705,11 @@ export class MapRenderer implements GlobeRenderer {
       this.pendingVideo = null
       this.pendingDatasetOptions = null
       this.applyBaseLayerVisibility(opts)
+    }
+
+    if (this.pendingMapLayers !== undefined) {
+      this.earthLayer.setMapLayers(this.pendingMapLayers)
+      this.pendingMapLayers = undefined
     }
 
     logger.info('[MapRenderer] Earth tile + capture + skybox layers added, labels moved above')
@@ -1460,6 +1467,19 @@ export class MapRenderer implements GlobeRenderer {
     const visibility = showBase ? 'visible' : 'none'
     try { this.map?.setLayoutProperty('blue-marble-layer', 'visibility', visibility) } catch { /* noop */ }
     try { this.map?.setLayoutProperty('black-marble-layer', 'visibility', visibility) } catch { /* noop */ }
+  }
+
+  /**
+   * AYNI: the basemap under the dataset and the overlays above it (see
+   * EarthTileLayerControl.setMapLayers). Buffered until the earth layer
+   * exists, like the dataset itself.
+   */
+  setMapLayers(layers: MapLayerImages | null): void {
+    if (!this.earthLayer) {
+      this.pendingMapLayers = layers
+      return
+    }
+    this.earthLayer.setMapLayers(layers)
   }
 
   updateTexture(

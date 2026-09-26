@@ -359,6 +359,13 @@ export interface PhotorealEarthHandle {
    */
   setTexture(spec: VrDatasetTexture | null, onReady?: () => void): void
   /**
+   * AYNI — the layer stack's basemap, drawn under the dataset wherever it
+   * is transparent (an alpha stream, a value-encoded palette's no-data,
+   * outside a regional box). Null reverts to the photoreal base. Takes
+   * effect on the next `setTexture`, which the session calls every frame.
+   */
+  setBasemap(image: HTMLImageElement | HTMLCanvasElement | null): void
+  /**
    * Current subsolar unit direction in world space — a reference to
    * the internal uniform's Vector3, refreshed by `update()` every
    * ~SUN_UPDATE_INTERVAL_MS to match the real UTC subsolar point.
@@ -490,6 +497,10 @@ export function createPhotorealEarth(
   const overlayDataEncodedUniform = { value: 0 }
   /** (u0, v0, uScale, vScale) — the map's rectangle within the frame; identity by default. */
   const overlayUvRegionUniform = { value: new THREE_.Vector4(0, 0, 1, 1) }
+  /** 1 when a layer basemap is set: a picture dataset's alpha then reveals it. */
+  const overlayAlphaMixUniform = { value: 0 }
+  let layerBasemapImage: HTMLImageElement | HTMLCanvasElement | null = null
+  let layerBasemapTexture: THREE.Texture | null = null
   // `uOverlayBaseMap` always points at a valid texture so the sampler
   // binding is never null. `baseEarthTexture` is the always-loaded
   // monochrome specular fallback (the same one `material.map` starts
@@ -591,6 +602,7 @@ export function createPhotorealEarth(
     shader.uniforms.uOverlayDataEncoded = overlayDataEncodedUniform
     shader.uniforms.uOverlayColorLut = overlayColorLutUniform
     shader.uniforms.uOverlayUvRegion = overlayUvRegionUniform
+    shader.uniforms.uOverlayAlphaMix = overlayAlphaMixUniform
 
     shader.vertexShader = shader.vertexShader.replace(
       '#include <common>',
@@ -619,7 +631,8 @@ export function createPhotorealEarth(
        uniform sampler2D uOverlayBaseMap;
        uniform int uOverlayDataEncoded;
        uniform sampler2D uOverlayColorLut;
-       uniform vec4 uOverlayUvRegion;   // (u0, v0, uScale, vScale)`,
+       uniform vec4 uOverlayUvRegion;   // (u0, v0, uScale, vScale)
+       uniform int uOverlayAlphaMix;    // AYNI: composite picture alpha over the layer basemap`,
     )
     // Replace the standard <map_fragment> chunk (which is just
     // `sampledDiffuseColor = texture2D(map, vMapUv); diffuseColor *= …`)
@@ -754,6 +767,12 @@ export function createPhotorealEarth(
            perceptual = mix(vec3(vrLuma), perceptual, uSaturation);
            perceptual = clamp(perceptual, 0.0, 1.0);
            sampledDiffuseColor.rgb = pow(perceptual, vec3(2.2));
+           // AYNI: a transparent picture (an alpha stream) shows the
+           // layer basemap through its clear regions instead of black.
+           if (uOverlayAlphaMix == 1 && sampledDataset) {
+             vec3 layerBase = texture2D(uOverlayBaseMap, vMapUv).rgb;
+             sampledDiffuseColor = vec4(mix(layerBase, sampledDiffuseColor.rgb, sampledDiffuseColor.a), 1.0);
+           }
          }
          diffuseColor *= sampledDiffuseColor;
        #endif`,
@@ -1288,6 +1307,7 @@ export function createPhotorealEarth(
     const region = options?.dataRegion
     overlayUvRegionUniform.value.set(region?.u0 ?? 0, region?.v0 ?? 0, region?.us ?? 1, region?.vs ?? 1)
     if (!options) {
+      overlayAlphaMixUniform.value = 0
       overlayHasBboxUniform.value = 0
       overlayBboxUniform.value.set(0, 0, 0, 0)
       overlayLonOriginUniform.value = 0
@@ -1326,6 +1346,14 @@ export function createPhotorealEarth(
         ? options.lonOrigin
         : 0
     overlayFlipYUniform.value = options.isFlippedInY ? 1 : 0
+    // AYNI: a layer basemap is the base for every Earth dataset — under
+    // transparent data, and outside a regional box.
+    overlayAlphaMixUniform.value = 0
+    if (layerBasemapTexture && isEarthBody(options.celestialBody)) {
+      overlayBaseMapUniform.value = layerBasemapTexture
+      overlayHasBaseUniform.value = 1
+      overlayAlphaMixUniform.value = 1
+    }
   }
 
   /**
@@ -1525,6 +1553,19 @@ export function createPhotorealEarth(
       for (const obj of objects) scene.remove(obj)
     },
 
+    setBasemap(image) {
+      if (image === layerBasemapImage) return
+      layerBasemapTexture?.dispose()
+      layerBasemapImage = image
+      layerBasemapTexture = null
+      if (image) {
+        const tex = new THREE_.Texture(image)
+        tex.colorSpace = THREE_.SRGBColorSpace
+        tex.anisotropy = 4
+        tex.needsUpdate = true
+        layerBasemapTexture = tex
+      }
+    },
     setTexture(spec, onReady) {
       // Skip texture-swap work if the spec is unchanged — repeated
       // polls from the session loop are a no-op in the steady state.
@@ -1795,6 +1836,9 @@ export function createPhotorealEarth(
     },
 
     dispose() {
+      layerBasemapTexture?.dispose()
+      layerBasemapTexture = null
+      layerBasemapImage = null
       // Tell every in-flight async loader (cloud texture fetch,
       // progressive diffuse/lights tiers) to drop their result on
       // the floor instead of attaching it to a torn-down scene.

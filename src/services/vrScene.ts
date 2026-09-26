@@ -39,6 +39,8 @@ import {
   type VrOverlayOptions,
 } from './photorealEarth'
 import type { VrUvRegion } from './dashRelease'
+import type { MapLayerImages } from './earthTileLayer'
+import { createVrMapOverlays, type VrMapOverlaysHandle } from './vrMapOverlays'
 import { createVrBorders, type VrBordersHandle } from './vrBorders'
 import {
   buildColorScaleLut,
@@ -136,6 +138,12 @@ export interface VrSceneHandle {
    */
   setTexture(spec: VrDatasetTexture | null, onReady?: () => void): void
   /**
+   * AYNI — the layer stack on the primary globe: a basemap under the
+   * dataset and overlay shells above it (mapLayers.ts decides which).
+   * Null removes both. Secondary globes keep their plain datasets.
+   */
+  setMapLayers(layers: MapLayerImages | null): void
+  /**
    * Toggle the country/coastline borders overlay on every globe
    * in the current layout. Shared across all globes so the user
    * can't accidentally get borders on some slots and not others.
@@ -197,6 +205,8 @@ export function createVrScene(
     radius: GLOBE_RADIUS,
     position: globePosition,
   })
+  /** AYNI: the layer stack's overlay shells, created on first use. */
+  let mapOverlays: VrMapOverlaysHandle | null = null
   // Everything the Earth factory adds (globe, atmosphere shell, sun
   // sprites, ground shadow, lights) lives under one group so the whole
   // presentation can be hidden while the loading scene is up. Hiding
@@ -635,6 +645,14 @@ export function createVrScene(
       earth.setTexture(spec, onReady)
     },
 
+    setMapLayers(layers) {
+      earth.setBasemap(layers?.basemap ?? null)
+      if (!mapOverlays && layers?.overlays.length) {
+        mapOverlays = createVrMapOverlays(THREE_, earth.globe, GLOBE_RADIUS)
+      }
+      mapOverlays?.set(layers?.overlays ?? [])
+    },
+
     setBordersVisible(visible) {
       // Idempotent — repeated calls with the same value are a cheap
       // no-op inside the handle (visibility flag comparison).
@@ -689,6 +707,8 @@ export function createVrScene(
     },
 
     dispose() {
+      mapOverlays?.dispose()
+      mapOverlays = null
       unsubscribeDiffuse()
       earth.removeFrom(earthRoot)
       scene.remove(earthRoot)

@@ -278,5 +278,14 @@
   "vr.voice.thinking": "Label on the in-VR/AR caption strip while Ayni Chatbot is composing a reply; the user's question is shown under it. One or two words.",
   "vr.zoomSlider.aria": "ARIA label for the in-AR vertical zoom slider on phones. Describes its function for screen readers; not visible text.",
   "vr.zoomSlider.label": "Visible label printed above the in-AR zoom slider on phones. Single short word — the column it sits in is narrow.",
-  "vr.zoomSlider.title": "Tooltip on the in-AR zoom slider when hovered with a pointer. Brief — appears as a native browser tooltip."
+  "vr.zoomSlider.title": "Tooltip on the in-AR zoom slider when hovered with a pointer. Brief — appears as a native browser tooltip.",
+  "tools.layers.aria": "Accessible name of the Tools-menu section for choosing the basemap and overlays drawn around a dataset.",
+  "tools.layers.basemap": "Label for the picker choosing the map drawn under the dataset (seen where the data is transparent). One word if possible.",
+  "tools.layers.basemap.none": "Basemap picker option meaning no basemap is drawn.",
+  "tools.layers.overlays": "Label above the list of overlays (borders, coastlines, grids, labels) that can be drawn on top of the dataset.",
+  "tools.layers.tint": "Label for the picker choosing the colour overlay lines are drawn in: white, black, or their original colours.",
+  "tools.layers.tint.black": "Overlay colour option: draw overlay lines in black.",
+  "tools.layers.tint.source": "Overlay colour option: draw overlays in the colours they were published with.",
+  "tools.layers.tint.white": "Overlay colour option: draw overlay lines in white.",
+  "tools.layers.title": "Visible heading of the Tools-menu section for basemaps and overlays. Short."
 }

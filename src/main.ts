@@ -9,6 +9,17 @@
  */
 
 import { MapRenderer } from './services/mapRenderer'
+import {
+  NO_LAYERS,
+  defaultLayers,
+  fetchLayerCatalog,
+  measureCoverage,
+  resolveLayerImages,
+  type LayerSelection,
+} from './services/mapLayers'
+import type { MapLayerImages } from './services/earthTileLayer'
+import { carriesAlphaStream } from './services/datasetOverlayOptions'
+import { mountLayerPicker, type LayerPickerHandle } from './ui/mapLayersUI'
 import { ViewportManager, type ViewLayout } from './services/viewportManager'
 
 // CSS entry point — all component styles imported in dependency order.
@@ -412,6 +423,17 @@ class InteractiveSphere {
    */
   private dsaTimelines: DsaTimelineCache = createDsaTimelineCache()
 
+  // --- AYNI: layer stack (services/mapLayers.ts) ---
+  /** The basemap + overlays chosen for the loaded dataset. */
+  private mapLayerSelection: LayerSelection = NO_LAYERS
+  /** Their decoded images; the same object until the stack changes, which the VR poll relies on. */
+  private mapLayerImages: MapLayerImages | null = null
+  /** The slot the stack belongs to (the one its dataset loaded into). */
+  private mapLayerSlot = 0
+  /** Bumped by every apply / clear, so a slow one never lands over a newer one. */
+  private mapLayerGen = 0
+  private layerPicker: LayerPickerHandle | null = null
+
   /**
    * The 2D transport's date track. Mounted into `#playback-controls` at
    * boot, hidden until the primary dataset declares a time axis, and fed
@@ -541,6 +563,10 @@ class InteractiveSphere {
         getCurrentDataset: () => this.appState.currentDataset ?? null,
         fullscreen: this.fullscreen ?? undefined,
       })
+      // AYNI: the Layers section of the Tools menu. A choice there applies to
+      // the loaded dataset's slot and holds until the next dataset loads.
+      this.layerPicker = mountLayerPicker(selection => { void this.applyMapLayers(selection, this.mapLayerSlot) })
+      void fetchLayerCatalog().then(layers => this.layerPicker?.update(layers, this.mapLayerSelection))
       void initAccountUI()
       // Catalog ↔ sphere tab control — only becomes visible when
       // `?catalog=true` is in the URL (see the show/hide calls in
@@ -1143,6 +1169,73 @@ class InteractiveSphere {
   }
 
   /**
+   * AYNI — the layers a dataset starts with: a basemap under anything
+   * with transparency, and borders on top of whatever hides most of the
+   * Earth (mapLayers.defaultLayers). Coverage is read from the first
+   * decoded frame, so a video waits for one — briefly.
+   */
+  private async applyDefaultMapLayers(dataset: Dataset, slot: number): Promise<void> {
+    const gen = ++this.mapLayerGen
+    const layers = await fetchLayerCatalog()
+    if (gen !== this.mapLayerGen || layers.length === 0) return
+    const transparent =
+      carriesAlphaStream(dataset) || dataset.renderEncoding === RENDER_ENCODING_DATA_LUMA || !!dataset.vrValueEncoding
+    const coverage = transparent ? await this.measureDatasetCoverage(dataset, slot) : null
+    if (gen !== this.mapLayerGen) return
+    await this.applyMapLayers(defaultLayers(layers, { transparent, coverage }), slot, gen)
+  }
+
+  /** Fraction of the slot's first frame that hides the Earth, or null if it cannot be read. */
+  private async measureDatasetCoverage(dataset: Dataset, slot: number): Promise<number | null> {
+    const panel = this.panelStates[slot]
+    const video = panel?.hlsService?.getVideo() ?? null
+    const source: HTMLImageElement | HTMLVideoElement | null = panel?.image ?? video
+    if (!source) return null
+    if (source instanceof HTMLVideoElement && source.readyState < 2) {
+      await new Promise<void>(resolve => {
+        const done = () => { clearTimeout(timer); resolve() }
+        const timer = setTimeout(done, 8000)
+        source.addEventListener('loadeddata', done, { once: true })
+      })
+      if (source.readyState < 2) return null
+    }
+    const release = dataset.vrValueEncoding
+    if (release) {
+      return measureCoverage(source, { kind: 'luma', noDataBelow: release.nodataThresholdCode, crop: release.dataRegion })
+    }
+    const scale = dataset.renderEncoding === RENDER_ENCODING_DATA_LUMA ? dataset.colorScale : undefined
+    if (scale) {
+      const noDataBelow = scale.dataMinLuma ?? Math.ceil((scale.transparentRange ?? 0) * 255)
+      return noDataBelow > 0 ? measureCoverage(source, { kind: 'luma', noDataBelow }) : 1
+    }
+    return measureCoverage(source, { kind: 'alpha' })
+  }
+
+  /** Put a selection on the slot's globe (and the VR globe, which polls mapLayerImages). */
+  private async applyMapLayers(selection: LayerSelection, slot: number, gen = ++this.mapLayerGen): Promise<void> {
+    this.mapLayerSelection = selection
+    this.mapLayerSlot = slot
+    const layers = await fetchLayerCatalog()
+    this.layerPicker?.update(layers, selection)
+    const images = await resolveLayerImages(layers, selection)
+    if (gen !== this.mapLayerGen) return
+    this.mapLayerImages = images.basemap || images.overlays.length ? images : null
+    const renderer = this.viewports.getRendererAt(slot)
+    if (renderer instanceof MapRenderer) renderer.setMapLayers(this.mapLayerImages)
+  }
+
+  /** No dataset, no layers: the default Earth has its own base and effects. */
+  private clearMapLayers(): void {
+    this.mapLayerGen++
+    this.mapLayerSelection = NO_LAYERS
+    this.mapLayerImages = null
+    for (const r of this.viewports.getAll()) {
+      if (r instanceof MapRenderer) r.setMapLayers(null)
+    }
+    void fetchLayerCatalog().then(layers => this.layerPicker?.update(layers, NO_LAYERS))
+  }
+
+  /**
    * AYNI — follow a release row's `latest.json` to the release current
    * right now, and point the row at its MPD, its `.dsa` (date track and
    * Orbit) and its value encoding (the VR palette and crop). Resolved at
@@ -1291,6 +1384,7 @@ class InteractiveSphere {
 
     // Fetch and cache the legend image; generate a text description for non-vision mode.
     initLegendForDataset(dataset, loadConfig())
+    void this.applyDefaultMapLayers(dataset, targetSlot)
 
     // Auto-start a tour if the dataset has one associated via runTourOnLoad.
     // Skip if a tour is already running (the tour engine triggered this load).
@@ -1504,12 +1598,14 @@ class InteractiveSphere {
 
     this.viewports.setPanelLoading(targetSlot, false)
     initLegendForDataset(dataset, loadConfig())
+    void this.applyDefaultMapLayers(dataset, targetSlot)
     // No runTourOnLoad check — the tour engine is in control
   }
 
   /** Reset the globe to default Earth for a tour — like goHome but keeps UI clean (no browse panel). */
   private async unloadForTour(): Promise<void> {
     await this.unloadAllPanels()
+    this.clearMapLayers()
     clearLegendCache()
     this.appState.currentDataset = null
     this.showPlaybackControls(false)
@@ -2813,6 +2909,8 @@ class InteractiveSphere {
       // chatUI owns the turn (see toggleImmersiveVoice).
       getVoiceState: () => getImmersiveVoiceState(),
       toggleVoice: () => toggleImmersiveVoice(),
+      // AYNI: the same layer stack on the VR globe (polled per frame).
+      getMapLayerImages: () => this.mapLayerImages,
 
       onSessionEnd: () => {
         endImmersiveVoice()
@@ -4284,6 +4382,7 @@ class InteractiveSphere {
       this.emitLayerUnloadedForSlot(i, 'home')
     }
     await this.unloadAllPanels()
+    this.clearMapLayers()
     clearLegendCache()
     this.appState.currentDataset = null
     this.showPlaybackControls(false)
