@@ -25,9 +25,17 @@ const SEGMENTS = 64
 const TINT_CODE: Record<MapLayerTint, number> = { source: 0, white: 1, black: 2 }
 
 export interface VrMapOverlay {
-  readonly image: HTMLImageElement | HTMLCanvasElement
+  /** A picture, or a real-time overlay stream's video (a VideoTexture keeps it current). */
+  readonly image: HTMLImageElement | HTMLCanvasElement | HTMLVideoElement
   readonly tint: MapLayerTint
   readonly opacity?: number
+  /**
+   * A value-encoded stream's 256-entry RGBA palette, indexed by the raw
+   * luma code, and the map's rectangle in the frame in image space (rows
+   * from the top), as earthTileLayer takes them. Absent for a picture.
+   */
+  readonly lut?: Uint8Array
+  readonly crop?: { u0: number; v0: number; us: number; vs: number }
 }
 
 export interface VrMapOverlaysHandle {
@@ -41,13 +49,20 @@ export function createVrMapOverlays(
   globe: THREE.Mesh,
   globeRadius: number,
 ): VrMapOverlaysHandle {
-  let shells: Array<{ mesh: THREE.Mesh; texture: THREE.Texture; material: THREE.ShaderMaterial; geometry: THREE.SphereGeometry }> = []
+  let shells: Array<{
+    mesh: THREE.Mesh
+    texture: THREE.Texture
+    lutTexture: THREE.DataTexture | null
+    material: THREE.ShaderMaterial
+    geometry: THREE.SphereGeometry
+  }> = []
   let current: readonly VrMapOverlay[] = []
 
   function clear(): void {
     for (const s of shells) {
       globe.remove(s.mesh)
       s.texture.dispose()
+      s.lutTexture?.dispose()
       s.material.dispose()
       s.geometry.dispose()
     }
@@ -55,15 +70,40 @@ export function createVrMapOverlays(
   }
 
   function shell(overlay: VrMapOverlay, index: number) {
-    const texture = new THREE_.Texture(overlay.image)
-    texture.colorSpace = THREE_.SRGBColorSpace
-    texture.anisotropy = 4
+    const texture = overlay.image instanceof HTMLVideoElement
+      ? new THREE_.VideoTexture(overlay.image)
+      : new THREE_.Texture(overlay.image)
+    let lutTexture: THREE.DataTexture | null = null
+    if (overlay.lut) {
+      // Codes, not colours: no colour-space decode and no filtering that
+      // would average neighbouring codes into a value nobody measured.
+      texture.colorSpace = THREE_.NoColorSpace
+      texture.minFilter = THREE_.NearestFilter
+      texture.magFilter = THREE_.NearestFilter
+      texture.generateMipmaps = false
+      lutTexture = new THREE_.DataTexture(overlay.lut, 256, 1, THREE_.RGBAFormat)
+      lutTexture.colorSpace = THREE_.SRGBColorSpace
+      lutTexture.minFilter = THREE_.NearestFilter
+      lutTexture.magFilter = THREE_.NearestFilter
+      lutTexture.needsUpdate = true
+    } else {
+      texture.colorSpace = THREE_.SRGBColorSpace
+      texture.anisotropy = 4
+    }
     texture.needsUpdate = true
+    // THREE flips Y on upload, so v counts from the bottom of the frame.
+    const crop = overlay.crop
+    const region = crop
+      ? new THREE_.Vector4(crop.u0, 1 - (crop.v0 + crop.vs), crop.us, crop.vs)
+      : new THREE_.Vector4(0, 0, 1, 1)
     const material = new THREE_.ShaderMaterial({
       uniforms: {
         uMap: { value: texture },
         uTint: { value: TINT_CODE[overlay.tint] },
         uOpacity: { value: overlay.opacity ?? 1 },
+        uEncoded: { value: lutTexture !== null },
+        uLut: { value: lutTexture },
+        uRegion: { value: region },
       },
       vertexShader: `
         varying vec2 vUv;
@@ -77,9 +117,15 @@ export function createVrMapOverlays(
         uniform sampler2D uMap;
         uniform int uTint;
         uniform float uOpacity;
+        uniform bool uEncoded;
+        uniform sampler2D uLut;
+        uniform vec4 uRegion;
         varying vec2 vUv;
         void main() {
-          vec4 tex = texture2D(uMap, vUv);
+          vec2 uv = uRegion.xy + vUv * uRegion.zw;
+          vec4 tex = uEncoded
+            ? texture2D(uLut, vec2((floor(texture2D(uMap, uv).r * 255.0 + 0.5) + 0.5) / 256.0, 0.5))
+            : texture2D(uMap, uv);
           float a = tex.a * uOpacity;
           if (a < 0.01) discard;
           vec3 rgb = uTint == 1 ? vec3(1.0) : (uTint == 2 ? vec3(0.0) : tex.rgb);
@@ -105,13 +151,16 @@ export function createVrMapOverlays(
     // After the globe and the borders shell, in stack order.
     mesh.renderOrder = 2 + index
     globe.add(mesh)
-    return { mesh, texture, material, geometry }
+    return { mesh, texture, lutTexture, material, geometry }
   }
 
   return {
     set(overlays) {
       const same = overlays.length === current.length &&
-        overlays.every((o, i) => o.image === current[i]!.image && o.tint === current[i]!.tint && (o.opacity ?? 1) === (current[i]!.opacity ?? 1))
+        overlays.every((o, i) => {
+          const c = current[i]!
+          return o.image === c.image && o.tint === c.tint && (o.opacity ?? 1) === (c.opacity ?? 1) && o.lut === c.lut
+        })
       if (same) return
       current = overlays
       clear()

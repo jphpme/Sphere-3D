@@ -124,7 +124,7 @@ import {
 import { initVrButton } from './ui/vrButton'
 import { flyToOnGlobe, isVrActive } from './services/vrSession'
 import type { VrDatasetTexture } from './services/vrScene'
-import { buildReleaseLut, resolveDashRelease } from './services/dashRelease'
+import { buildReleaseLut, releaseCropRect, resolveDashRelease } from './services/dashRelease'
 import { vrOverlayOptionsFor } from './services/vrOverlayOptions'
 import { publishGlobeState } from './services/multiOutput/globeStateEvents'
 import {
@@ -434,6 +434,21 @@ class InteractiveSphere {
   /** Bumped by every apply / clear, so a slow one never lands over a newer one. */
   private mapLayerGen = 0
   private layerPicker: LayerPickerHandle | null = null
+  /**
+   * AYNI: the real-time overlay stream playing over the dataset (the
+   * REALTIME_OVERLAY_PLAN's Phase 1: one base + one video overlay, which
+   * is what a phone's decoder budget allows). Its own player and video
+   * element; kept across base-dataset changes, stopped on None or home.
+   */
+  private rtOverlay: {
+    id: string
+    hls: HLSService
+    video: HTMLVideoElement
+    /** A value-encoded release's palette and map rectangle (earthTileLayer.MapOverlayLayer). */
+    lut?: Uint8Array
+    crop?: { u0: number; v0: number; us: number; vs: number }
+  } | null = null
+  private rtOverlayGen = 0
 
   /**
    * The 2D transport's date track. Mounted into `#playback-controls` at
@@ -566,7 +581,10 @@ class InteractiveSphere {
       })
       // AYNI: the Layers section of the Tools menu. A choice there applies to
       // the loaded dataset's slot and holds until the next dataset loads.
-      this.layerPicker = mountLayerPicker(selection => { void this.applyMapLayers(selection, this.mapLayerSlot) })
+      this.layerPicker = mountLayerPicker(
+        selection => { void this.applyMapLayers(selection, this.mapLayerSlot) },
+        id => { void this.setRtOverlay(id) },
+      )
       void fetchLayerCatalog().then(layers => this.layerPicker?.update(layers, this.mapLayerSelection))
       void initAccountUI()
       // Catalog ↔ sphere tab control — only becomes visible when
@@ -1218,13 +1236,87 @@ class InteractiveSphere {
     this.layerPicker?.update(layers, selection)
     const images = await resolveLayerImages(layers, selection)
     if (gen !== this.mapLayerGen) return
-    this.mapLayerImages = images.basemap || images.overlays.length ? images : null
+    // The real-time overlay sits right above the dataset, under any
+    // borders or labels, so those stay readable over moving data.
+    const overlays = [
+      ...(this.rtOverlay
+        ? [{ image: this.rtOverlay.video as HTMLVideoElement, tint: 'source' as const, lut: this.rtOverlay.lut, crop: this.rtOverlay.crop }]
+        : []),
+      ...images.overlays,
+    ]
+    this.refreshRtOverlayPicker()
+    this.mapLayerImages = images.basemap || overlays.length ? { basemap: images.basemap, overlays } : null
     const renderer = this.viewports.getRendererAt(slot)
     if (renderer instanceof MapRenderer) renderer.setMapLayers(this.mapLayerImages)
   }
 
+  /**
+   * AYNI: play a real-time overlay stream over the dataset, or stop the
+   * one playing (null). A failed stream leaves no overlay rather than a
+   * half-started one.
+   */
+  private async setRtOverlay(id: string | null): Promise<void> {
+    const gen = ++this.rtOverlayGen
+    this.stopRtOverlay()
+    const dataset = id ? dataService.getDatasetById(id) : undefined
+    if (dataset?.rtOverlayCandidate) {
+      const hls = new HLSService()
+      const video = hls.createVideo()
+      video.loop = true
+      // dash.js may end a static presentation rather than honour `loop`.
+      video.addEventListener('ended', () => { video.currentTime = 0; void video.play().catch(() => {}) })
+      let encoded: { lut: Uint8Array; crop: { u0: number; v0: number; us: number; vs: number } } | null = null
+      try {
+        // A value-encoded release (Global Cloud Cover) is followed to its
+        // current MPD and palette, like a base dataset at load.
+        let mpdUrl = dataset.dataLink
+        if (dataset.releaseDescriptorLink) {
+          const release = await resolveDashRelease(dataset.releaseDescriptorLink)
+          if (!release.encoding) throw new Error('release has no value encoding')
+          mpdUrl = release.mpdUrl
+          encoded = { lut: buildReleaseLut(release.encoding), crop: releaseCropRect(release.encoding) }
+        }
+        await hls.loadDash(mpdUrl, video, this.isMobile)
+        await video.play().catch(() => {})
+      } catch (err) {
+        logger.warn('[App] real-time overlay failed to start:', err)
+        hls.destroy()
+        video.remove()
+        if (gen === this.rtOverlayGen) this.refreshRtOverlayPicker()
+        return
+      }
+      if (gen !== this.rtOverlayGen) {
+        hls.destroy()
+        video.remove()
+        return
+      }
+      this.rtOverlay = { id: dataset.id, hls, video, ...(encoded ?? {}) }
+      logger.info('[App] real-time overlay playing:', dataset.id)
+    }
+    await this.applyMapLayers(this.mapLayerSelection, this.mapLayerSlot)
+  }
+
+  private stopRtOverlay(): void {
+    const rt = this.rtOverlay
+    if (!rt) return
+    this.rtOverlay = null
+    rt.hls.destroy()
+    rt.video.remove()
+  }
+
+  /** The picker's overlay choices: global transparent streams other than the dataset itself. */
+  private refreshRtOverlayPicker(): void {
+    const current = this.appState.currentDataset?.id
+    const choices = this.appState.datasets
+      .filter(d => d.rtOverlayCandidate && d.id !== current)
+      .map(d => ({ id: d.id, title: d.title }))
+    this.layerPicker?.updateRtOverlay(choices, this.rtOverlay?.id ?? null)
+  }
+
   /** No dataset, no layers: the default Earth has its own base and effects. */
   private clearMapLayers(): void {
+    this.rtOverlayGen++
+    this.stopRtOverlay()
     this.mapLayerGen++
     this.mapLayerSelection = NO_LAYERS
     this.mapLayerImages = null
@@ -1232,6 +1324,7 @@ class InteractiveSphere {
       if (r instanceof MapRenderer) r.setMapLayers(null)
     }
     void fetchLayerCatalog().then(layers => this.layerPicker?.update(layers, NO_LAYERS))
+    this.refreshRtOverlayPicker()
   }
 
   /**

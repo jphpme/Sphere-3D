@@ -154,6 +154,11 @@ export interface Dataset {
    * (overlayOptionsFromDataset). See `services/dashRelease.ts`.
    */
   releaseDescriptorLink?: string
+  /**
+   * AYNI — a global, alpha-channel real-time stream that can be layered
+   * over another dataset as its real-time overlay.
+   */
+  rtOverlayCandidate?: boolean
   releaseEncoding?: import('./release-encoding').ReleaseEncoding
 
   /** When true, country/region borders render on by default for this

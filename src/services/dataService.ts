@@ -481,8 +481,10 @@ interface RealtimeDashEntry {
   dsa?: string
   /** schema 1.3 — `latest.json` pointer to an immutable release; not resolved yet. */
   releaseDescriptorUrl?: string
-  /** schema 1.3 — frames carry values (luma-encoded), not colours; not decoded yet. */
+  /** schema 1.3 — frames carry values (luma-encoded), not colours. */
   valueEncoded?: boolean
+  /** schema 1.3 — the frames carry an alpha channel (VP9 alpha). */
+  alpha?: boolean
   /** schema 1.2+ — `global` | `regional`. */
   coverage?: string
   /** schema 1.2+ — human-readable org name (e.g. "NOAA Science On a Sphere"). */
@@ -645,6 +647,12 @@ function realtimeDashDataset(
     tags,
     realtimeKind: isForecast ? 'forecast' : 'real-time',
     defaultBordersVisible: true,
+    // AYNI: a global stream with transparency can be layered over
+    // another dataset as its real-time overlay (main.ts): an alpha MPD,
+    // or a value-encoded release whose palette leaves clear areas clear.
+    ...(entry.alpha === true && entry.coverage === 'global' && (entry.mpd || entry.valueEncoded === true)
+      ? { rtOverlayCandidate: true }
+      : {}),
     weight: 10_000 - i,
     enriched: {
       description: entry.description,

@@ -1172,11 +1172,19 @@ const mapLayerFragSrc = `#version 300 es
   uniform sampler2D uLayerTex;
   uniform int uTint;
   uniform float uOpacity;
+  // A value-encoded layer (a release stream): luma is a code, looked up in
+  // its palette, and the map is a rectangle of the frame.
+  uniform bool uLayerEncoded;
+  uniform sampler2D uLayerLut;
+  uniform vec4 uLayerCrop; // (u0, v0, uScale, vScale), image space
   in vec2 vUV;
   out vec4 fragColor;
 
   void main() {
-    vec4 c = texture(uLayerTex, vUV);
+    vec2 uv = uLayerCrop.xy + vUV * uLayerCrop.zw;
+    vec4 c = uLayerEncoded
+      ? texture(uLayerLut, vec2((floor(texture(uLayerTex, uv).r * 255.0 + 0.5) + 0.5) / 256.0, 0.5))
+      : texture(uLayerTex, uv);
     vec3 rgb = uTint == 1 ? vec3(1.0) : (uTint == 2 ? vec3(0.0) : c.rgb);
     fragColor = vec4(rgb, c.a * uOpacity);
   }
@@ -1192,8 +1200,28 @@ export type MapLayerTint = 'source' | 'white' | 'black'
  */
 export interface MapLayerImages {
   basemap: HTMLImageElement | HTMLCanvasElement | null
-  overlays: ReadonlyArray<{ image: HTMLImageElement | HTMLCanvasElement; tint: MapLayerTint; opacity?: number }>
+  overlays: ReadonlyArray<MapOverlayLayer>
 }
+
+/** One overlay in the stack. */
+export interface MapOverlayLayer {
+  image: MapLayerSource
+  tint: MapLayerTint
+  opacity?: number
+  /**
+   * A value-encoded layer's 256-entry RGBA palette, indexed by the raw
+   * luma code (dashRelease.buildReleaseLut), and the map's rectangle in
+   * the frame (image space). Both absent for a picture layer.
+   */
+  lut?: Uint8Array
+  crop?: { u0: number; v0: number; us: number; vs: number }
+}
+
+/**
+ * What a layer is drawn from. A video is a real-time overlay stream
+ * (AYNI): its texture is refreshed from the element every frame.
+ */
+export type MapLayerSource = HTMLImageElement | HTMLCanvasElement | HTMLVideoElement
 
 interface MapLayerProgram {
   program: WebGLProgram
@@ -1202,6 +1230,9 @@ interface MapLayerProgram {
   texLoc: WebGLUniformLocation | null
   tintLoc: WebGLUniformLocation | null
   opacityLoc: WebGLUniformLocation | null
+  encodedLoc: WebGLUniformLocation | null
+  lutLoc: WebGLUniformLocation | null
+  cropLoc: WebGLUniformLocation | null
 }
 
 const TINT_CODE: Record<MapLayerTint, number> = { source: 0, white: 1, black: 2 }
@@ -1421,9 +1452,17 @@ export function createEarthTileLayer(): EarthTileLayerControl {
   // came from, so switching layers never re-uploads one already on the
   // GPU; a texture that leaves the stack is deleted.
   let mapLayerProg: MapLayerProgram | null = null
-  const mapLayerTextures = new Map<HTMLImageElement | HTMLCanvasElement, WebGLTexture>()
+  const mapLayerTextures = new Map<MapLayerSource, WebGLTexture>()
   let basemapLayerTex: WebGLTexture | null = null
-  let overlayLayers: Array<{ tex: WebGLTexture; tint: MapLayerTint; opacity: number }> = []
+  let overlayLayers: Array<{
+    tex: WebGLTexture
+    tint: MapLayerTint
+    opacity: number
+    video: HTMLVideoElement | null
+    lutTex: WebGLTexture | null
+    crop: { u0: number; v0: number; us: number; vs: number } | null
+  }> = []
+  const mapLayerLuts = new Map<Uint8Array, WebGLTexture>()
 
   function drawMapLayer(
     gl2: WebGL2RenderingContext,
@@ -1432,6 +1471,8 @@ export function createEarthTileLayer(): EarthTileLayerControl {
     tint: MapLayerTint,
     opacity: number,
     matrix: Parameters<WebGL2RenderingContext['uniformMatrix4fv']>[2],
+    lutTex: WebGLTexture | null = null,
+    crop: { u0: number; v0: number; us: number; vs: number } | null = null,
   ): void {
     gl2.useProgram(prog.program)
     gl2.uniformMatrix4fv(prog.matrixLoc, false, matrix)
@@ -1441,16 +1482,52 @@ export function createEarthTileLayer(): EarthTileLayerControl {
     gl2.uniform1i(prog.texLoc, 0)
     gl2.uniform1i(prog.tintLoc, TINT_CODE[tint])
     gl2.uniform1f(prog.opacityLoc, opacity)
+    gl2.uniform1i(prog.encodedLoc, lutTex ? 1 : 0)
+    gl2.uniform4f(prog.cropLoc, crop?.u0 ?? 0, crop?.v0 ?? 0, crop?.us ?? 1, crop?.vs ?? 1)
+    if (lutTex) {
+      gl2.activeTexture(gl2.TEXTURE1)
+      gl2.bindTexture(gl2.TEXTURE_2D, lutTex)
+      gl2.uniform1i(prog.lutLoc, 1)
+      gl2.activeTexture(gl2.TEXTURE0)
+    }
     gl2.drawElements(gl2.TRIANGLES, indexCount, gl2.UNSIGNED_SHORT, 0)
   }
 
+  /** The GPU texture for a value-encoded layer's palette. */
+  function mapLayerLutTexture(gl2: WebGL2RenderingContext, lut: Uint8Array): WebGLTexture | null {
+    const known = mapLayerLuts.get(lut)
+    if (known) return known
+    const tex = gl2.createTexture()
+    if (!tex) return null
+    gl2.bindTexture(gl2.TEXTURE_2D, tex)
+    gl2.pixelStorei(gl2.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false)
+    gl2.texImage2D(gl2.TEXTURE_2D, 0, gl2.RGBA, 256, 1, 0, gl2.RGBA, gl2.UNSIGNED_BYTE, lut)
+    gl2.texParameteri(gl2.TEXTURE_2D, gl2.TEXTURE_MIN_FILTER, gl2.NEAREST)
+    gl2.texParameteri(gl2.TEXTURE_2D, gl2.TEXTURE_MAG_FILTER, gl2.NEAREST)
+    gl2.texParameteri(gl2.TEXTURE_2D, gl2.TEXTURE_WRAP_S, gl2.CLAMP_TO_EDGE)
+    gl2.texParameteri(gl2.TEXTURE_2D, gl2.TEXTURE_WRAP_T, gl2.CLAMP_TO_EDGE)
+    mapLayerLuts.set(lut, tex)
+    return tex
+  }
+
   /** The GPU texture for a layer image, uploading it the first time. */
-  function mapLayerTexture(gl2: WebGL2RenderingContext, image: HTMLImageElement | HTMLCanvasElement): WebGLTexture | null {
+  function mapLayerTexture(gl2: WebGL2RenderingContext, image: MapLayerSource): WebGLTexture | null {
     const known = mapLayerTextures.get(image)
     if (known) return known
     const tex = gl2.createTexture()
     if (!tex) return null
     gl2.bindTexture(gl2.TEXTURE_2D, tex)
+    if (image instanceof HTMLVideoElement) {
+      // A stream's frames are uploaded as they play (render); no mipmaps,
+      // which would have to be rebuilt every frame.
+      gl2.texImage2D(gl2.TEXTURE_2D, 0, gl2.RGBA, 1, 1, 0, gl2.RGBA, gl2.UNSIGNED_BYTE, new Uint8Array(4))
+      gl2.texParameteri(gl2.TEXTURE_2D, gl2.TEXTURE_MIN_FILTER, gl2.LINEAR)
+      gl2.texParameteri(gl2.TEXTURE_2D, gl2.TEXTURE_MAG_FILTER, gl2.LINEAR)
+      gl2.texParameteri(gl2.TEXTURE_2D, gl2.TEXTURE_WRAP_S, gl2.REPEAT)
+      gl2.texParameteri(gl2.TEXTURE_2D, gl2.TEXTURE_WRAP_T, gl2.CLAMP_TO_EDGE)
+      mapLayerTextures.set(image, tex)
+      return tex
+    }
     gl2.pixelStorei(gl2.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false)
     gl2.texImage2D(gl2.TEXTURE_2D, 0, gl2.RGBA, gl2.RGBA, gl2.UNSIGNED_BYTE, fitImageToMaxTextureSize(gl2, image))
     // Thin line art stays legible zoomed out only with mipmaps.
@@ -1628,6 +1705,9 @@ export function createEarthTileLayer(): EarthTileLayerControl {
           texLoc: gl2.getUniformLocation(mapLayerProgram, 'uLayerTex'),
           tintLoc: gl2.getUniformLocation(mapLayerProgram, 'uTint'),
           opacityLoc: gl2.getUniformLocation(mapLayerProgram, 'uOpacity'),
+          encodedLoc: gl2.getUniformLocation(mapLayerProgram, 'uLayerEncoded'),
+          lutLoc: gl2.getUniformLocation(mapLayerProgram, 'uLayerLut'),
+          cropLoc: gl2.getUniformLocation(mapLayerProgram, 'uLayerCrop'),
         }
       }
 
@@ -2092,9 +2172,19 @@ export function createEarthTileLayer(): EarthTileLayerControl {
         // AYNI: overlays (borders, coastlines, grids, labels) go on top, in
         // order, with straight alpha: the uploads pin premultiply off.
         if (mapLayerProg && overlayLayers.length > 0) {
+          // A real-time overlay stream: take its current frame, and keep
+          // this panel repainting while it plays even if the dataset is a
+          // still image.
+          for (const o of overlayLayers) {
+            if (!o.video || o.video.readyState < 2) continue
+            gl2.bindTexture(gl2.TEXTURE_2D, o.tex)
+            gl2.pixelStorei(gl2.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false)
+            gl2.texImage2D(gl2.TEXTURE_2D, 0, gl2.RGBA, gl2.RGBA, gl2.UNSIGNED_BYTE, o.video)
+            if (!o.video.paused) mapRef?.triggerRepaint()
+          }
           gl2.enable(gl2.BLEND)
           gl2.blendFuncSeparate(gl2.SRC_ALPHA, gl2.ONE_MINUS_SRC_ALPHA, gl2.ONE, gl2.ONE_MINUS_SRC_ALPHA)
-          for (const o of overlayLayers) drawMapLayer(gl2, mapLayerProg, o.tex, o.tint, o.opacity, matrix)
+          for (const o of overlayLayers) drawMapLayer(gl2, mapLayerProg, o.tex, o.tint, o.opacity, matrix, o.lutTex, o.crop)
         }
 
         // Restore GL state and return — no earth effects when dataset is active
@@ -2359,6 +2449,8 @@ export function createEarthTileLayer(): EarthTileLayerControl {
       if (mapLayerProg) gl2.deleteProgram(mapLayerProg.program)
       for (const tex of mapLayerTextures.values()) gl2.deleteTexture(tex)
       mapLayerTextures.clear()
+      for (const tex of mapLayerLuts.values()) gl2.deleteTexture(tex)
+      mapLayerLuts.clear()
       if (darken) gl2.deleteProgram(darken.program)
       if (lights) gl2.deleteProgram(lights.program)
       if (specular) gl2.deleteProgram(specular.program)
@@ -2582,7 +2674,7 @@ export function createEarthTileLayer(): EarthTileLayerControl {
     setMapLayers(layers) {
       if (!glRef) return
       const gl2 = glRef as WebGL2RenderingContext
-      const wanted = new Set<HTMLImageElement | HTMLCanvasElement>()
+      const wanted = new Set<MapLayerSource>()
       if (layers?.basemap) wanted.add(layers.basemap)
       for (const o of layers?.overlays ?? []) wanted.add(o.image)
       for (const [image, tex] of mapLayerTextures) {
@@ -2593,9 +2685,33 @@ export function createEarthTileLayer(): EarthTileLayerControl {
       }
       basemapLayerTex = layers?.basemap ? mapLayerTexture(gl2, layers.basemap) : null
       overlayLayers = []
+      const wantedLuts = new Set<Uint8Array>()
       for (const o of layers?.overlays ?? []) {
         const tex = mapLayerTexture(gl2, o.image)
-        if (tex) overlayLayers.push({ tex, tint: o.tint, opacity: o.opacity ?? 1 })
+        if (!tex) continue
+        const lutTex = o.lut ? mapLayerLutTexture(gl2, o.lut) : null
+        if (o.lut) {
+          wantedLuts.add(o.lut)
+          // Codes, not colours: neighbouring texels must not be averaged
+          // into a value nobody measured.
+          gl2.bindTexture(gl2.TEXTURE_2D, tex)
+          gl2.texParameteri(gl2.TEXTURE_2D, gl2.TEXTURE_MIN_FILTER, gl2.NEAREST)
+          gl2.texParameteri(gl2.TEXTURE_2D, gl2.TEXTURE_MAG_FILTER, gl2.NEAREST)
+        }
+        overlayLayers.push({
+          tex,
+          tint: o.tint,
+          opacity: o.opacity ?? 1,
+          video: o.image instanceof HTMLVideoElement ? o.image : null,
+          lutTex,
+          crop: o.crop ?? null,
+        })
+      }
+      for (const [lut, tex] of mapLayerLuts) {
+        if (!wantedLuts.has(lut)) {
+          gl2.deleteTexture(tex)
+          mapLayerLuts.delete(lut)
+        }
       }
       mapRef?.triggerRepaint()
     },

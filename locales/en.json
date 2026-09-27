@@ -1860,6 +1860,8 @@
   "tools.layers.basemap": "Basemap",
   "tools.layers.basemap.none": "None",
   "tools.layers.overlays": "Overlays",
+  "tools.layers.rt": "Real-time overlay",
+  "tools.layers.rt.none": "None",
   "tools.layers.tint": "Overlay colour",
   "tools.layers.tint.black": "Black",
   "tools.layers.tint.source": "Original colours",

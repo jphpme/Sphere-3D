@@ -15,9 +15,17 @@ import { t, tAttr, tHtml, type MessageKey } from '../i18n'
 import { escapeAttr, escapeHtml } from './domUtils'
 import type { CatalogLayer, LayerSelection, MapLayerTint } from '../services/mapLayers'
 
+/** A stream that can play over the dataset as its real-time overlay. */
+export interface RtOverlayChoice {
+  readonly id: string
+  readonly title: string
+}
+
 export interface LayerPickerHandle {
   /** Re-render for a catalog and the selection currently applied. */
   update(catalog: readonly CatalogLayer[], selection: LayerSelection): void
+  /** Re-render the real-time overlay choice: the candidates, and the one playing (or null). */
+  updateRtOverlay(choices: readonly RtOverlayChoice[], selectedId: string | null): void
 }
 
 const TINTS: readonly MapLayerTint[] = ['white', 'black', 'source']
@@ -32,14 +40,19 @@ function currentTint(selection: LayerSelection): MapLayerTint {
   return selection.overlays[0]?.tint ?? 'white'
 }
 
-export function mountLayerPicker(onChange: (selection: LayerSelection) => void): LayerPickerHandle {
+export function mountLayerPicker(
+  onChange: (selection: LayerSelection) => void,
+  onRtOverlayChange: (id: string | null) => void = () => {},
+): LayerPickerHandle {
   let catalog: readonly CatalogLayer[] = []
   let selection: LayerSelection = { basemapId: null, overlays: [] }
+  let rtChoices: readonly RtOverlayChoice[] = []
+  let rtSelected: string | null = null
 
   function render(): void {
     const host = document.getElementById('tools-menu-layers')
     if (!host) return
-    host.hidden = catalog.length === 0
+    host.hidden = catalog.length === 0 && rtChoices.length === 0
     if (host.hidden) {
       host.innerHTML = ''
       return
@@ -71,11 +84,21 @@ export function mountLayerPicker(onChange: (selection: LayerSelection) => void):
         <select id="tools-menu-layers-tint" class="tools-menu-language-select" aria-label="${tAttr('tools.layers.tint')}">
           ${TINTS.map(v => `<option value="${v}"${v === tint ? ' selected' : ''}>${tHtml(TINT_LABEL[v])}</option>`).join('')}
         </select>
-      </div>`
+      </div>
+      ${rtChoices.length ? `<div class="tools-menu-language-row">
+        <label for="tools-menu-layers-rt" class="tools-menu-layers-label">${tHtml('tools.layers.rt')}</label>
+        <select id="tools-menu-layers-rt" class="tools-menu-language-select">
+          <option value=""${rtSelected ? '' : ' selected'}>${tHtml('tools.layers.rt.none')}</option>
+          ${rtChoices.map(c => `<option value="${escapeAttr(c.id)}"${c.id === rtSelected ? ' selected' : ''}>${escapeHtml(c.title)}</option>`).join('')}
+        </select>
+      </div>` : ''}`
 
     host.querySelector<HTMLSelectElement>('#tools-menu-layers-basemap')?.addEventListener('change', (e) => {
       const id = (e.target as HTMLSelectElement).value
       onChange({ ...selection, basemapId: id || null })
+    })
+    host.querySelector<HTMLSelectElement>('#tools-menu-layers-rt')?.addEventListener('change', (e) => {
+      onRtOverlayChange((e.target as HTMLSelectElement).value || null)
     })
     host.querySelector<HTMLSelectElement>('#tools-menu-layers-tint')?.addEventListener('change', (e) => {
       const next = (e.target as HTMLSelectElement).value as MapLayerTint
@@ -97,6 +120,11 @@ export function mountLayerPicker(onChange: (selection: LayerSelection) => void):
     update(nextCatalog, nextSelection) {
       catalog = nextCatalog
       selection = nextSelection
+      render()
+    },
+    updateRtOverlay(choices, selectedId) {
+      rtChoices = choices
+      rtSelected = selectedId
       render()
     },
   }

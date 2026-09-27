@@ -397,6 +397,17 @@ interface ActiveSession {
 }
 
 let active: ActiveSession | null = null
+/** AYNI: frames rendered since the debug panel last refreshed (its fps readout). */
+let debugFrameCount = 0
+
+/** A video's size and dropped / decoded frames, for the debug panel. */
+function describeDecode(video: HTMLVideoElement | null): string {
+  if (!video) return '-'
+  const q = typeof video.getVideoPlaybackQuality === 'function' ? video.getVideoPlaybackQuality() : null
+  const drops = q ? ` drop ${q.droppedVideoFrames}/${q.totalVideoFrames}` : ''
+  return `${video.videoWidth}x${video.videoHeight}${video.paused ? ' paused' : ''}${drops}`
+}
+
 /** AYNI: the layer stack last handed to the scene; undefined = none yet this session. */
 let appliedMapLayers: MapLayerImages | null | undefined = undefined
 
@@ -564,6 +575,7 @@ export type VrMode = 'vr' | 'ar'
  */
 export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promise<void> {
   appliedMapLayers = undefined
+  debugFrameCount = 0
   if (active) {
     logger.warn(`[VR] enterImmersive(${mode}) called while a session is already active`)
     return
@@ -1982,9 +1994,18 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     // call, which is why the browse poll is 1 Hz too.
     if (debugPanel) {
       debugPanel.update(active.camera)
+      debugFrameCount++
       if (now - lastDebugRefreshMs > 1000) {
+        // AYNI: frame rate over the last refresh, and each video's decode
+        // health — what a phone test of a real-time overlay needs to see.
+        const fps = (debugFrameCount * 1000) / Math.max(1, now - lastDebugRefreshMs)
+        debugFrameCount = 0
+        const baseSpec = ctx.getDatasetTexture()
+        const baseVideo = baseSpec?.kind === 'video' ? baseSpec.element : null
+        const rtVideo = ctx.getMapLayerImages?.()?.overlays.find(o => o.image instanceof HTMLVideoElement)?.image as HTMLVideoElement | undefined
         lastDebugRefreshMs = now
         debugPanel.setLines([
+          `fps=${fps.toFixed(0)} base ${describeDecode(baseVideo)} | rt ${describeDecode(rtVideo ?? null)}`,
           `${isAr ? 'AR' : 'VR'} class=${sessionTelemetry.inputClass} src=${session.inputSources.length} ` +
             `pad=${hasGamepadInput() ? 'y' : 'n'} domOv=${domOverlayActive ? 'y' : 'n'}`,
           `hand=${handheldAr ? 'y' : 'n'} rotate=${rotateTouchMounted ? 'y' : 'n'} ` +

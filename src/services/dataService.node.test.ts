@@ -463,6 +463,22 @@ describe('DataService — node-mode', () => {
         dataLink: 'https://streams.example/global/forecast/x/released/latest.json',
       })
     })
+
+    it('offers global transparent streams, direct or value-encoded, as real-time overlays', async () => {
+      stubFetch(() => new Response(JSON.stringify({
+        datasets: [
+          row('wind', { alpha: true, coverage: 'global' }),
+          row('opaque', { alpha: false, coverage: 'global' }),
+          row('regional', { alpha: true, coverage: 'regional' }),
+          { id: 'clouds', display_name: 'Global Cloud Cover', alpha: true, coverage: 'global',
+            releaseDescriptorUrl: 'global/realtime/noaa-sos/clouds/latest.json', valueEncoded: true },
+        ],
+      }), { status: 200 }))
+      const svc = new DataService()
+      const datasets = await svc.fetchDatasets()
+      expect(datasets.filter(d => d.rtOverlayCandidate).map(d => d.id).sort())
+        .toEqual(['R2_DASH_clouds', 'R2_DASH_wind'])
+    })
   })
 
   it('routes relative real-time DASH assets through the same-origin proxy', async () => {
