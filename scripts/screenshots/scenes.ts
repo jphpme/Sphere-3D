@@ -201,7 +201,12 @@ async function openGlobe(page: Page): Promise<void> {
  */
 async function openDataEncodedDataset(page: Page): Promise<void> {
   await page.locator('#browse-search').fill('smoke')
-  const card = page.locator('.browse-card').first()
+  // The fixture row by its title, not the first hit: real-time rows from
+  // the bundled index snapshot (served from /assets, which the fixtures
+  // do not pin) rank first, and one of them mentions smoke.
+  const card = page.locator('.browse-card', {
+    has: page.locator('.browse-card-title', { hasText: 'Wildfire Smoke Overhead' }),
+  }).first()
   await card.waitFor({ state: 'visible' })
   // The card's own Load button, not the card: clicking the card body
   // opens its detail rather than loading the dataset, which leaves the
