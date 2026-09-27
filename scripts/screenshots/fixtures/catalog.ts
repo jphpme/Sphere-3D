@@ -130,6 +130,12 @@ export function catalogFixtures(): FixtureRule[] {
   return [
     { url: '/api/v1/catalog', json: { datasets: DATASETS } },
     { url: '/api/v1/tours', json: { tours: [] } },
+    // The fork's bundled real-time index snapshot, pinned empty like the
+    // rest of the content. Its 72 rows' thumbnails point at `/dash/…`,
+    // which the dev server answers with the SPA page, not an image; that
+    // many broken image loads at once held the browser's six connections
+    // long enough that a scene's own dataset never loaded.
+    { url: '/assets/realtime-dash-datasets.json', json: { datasets: [] } },
   ]
 }
 

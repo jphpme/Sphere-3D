@@ -276,6 +276,9 @@ body.browse-open #vr-enter-btn {
     line-height: 1.3;
     animation: vr-notice-in 0.25s ease-out;
     transition: opacity 0.3s ease;
+    /* A note, not a wall: taps and drags reach the globe beneath it.
+       Only the close button takes the pointer. */
+    pointer-events: none;
 }
 .vr-notice.vr-notice-leaving { opacity: 0; }
 .vr-notice-icon {
@@ -294,6 +297,7 @@ body.browse-open #vr-enter-btn {
 }
 .vr-notice-close {
     flex: none;
+    pointer-events: auto;
     min-width: max(32px, calc(32px * var(--ui-scale)));
     min-height: max(32px, calc(32px * var(--ui-scale)));
     padding: 0;

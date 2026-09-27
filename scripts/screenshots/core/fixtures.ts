@@ -89,8 +89,9 @@ export interface InstallFixturesOptions {
 /**
  * Intercept `/api/**` on the page and serve fixtures. Must be called
  * before the scene navigates (route handlers only affect later
- * requests). Non-API requests (catalog snapshot, tiles, assets) are
- * untouched.
+ * requests). Outside `/api`, only a stub rule naming a fixed path
+ * (a string starting with `/`, such as a bundled JSON snapshot) is
+ * served; every other non-API request (tiles, assets) is untouched.
  */
 export async function installFixtures(
   page: Page,
@@ -120,4 +121,18 @@ export async function installFixtures(
       console.warn(`  fixture fulfill skipped: ${msg}`)
     }
   })
+  for (const rule of rules) {
+    if (typeof rule.url !== 'string' || !rule.url.startsWith('/') || rule.url.startsWith('/api/') || rule.passthrough) continue
+    await page.route(`**${rule.url}`, async (route) => {
+      const match = matchFixture([rule], route.request().url(), route.request().method())
+      try {
+        if (match) await route.fulfill(match)
+        else await route.continue()
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        // eslint-disable-next-line no-console
+        console.warn(`  fixture fulfill skipped: ${msg}`)
+      }
+    })
+  }
 }
