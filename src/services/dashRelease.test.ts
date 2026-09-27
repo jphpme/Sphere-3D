@@ -11,6 +11,7 @@ import {
   releaseUvRegion,
   resolveDashRelease,
   valueAtCode,
+  withPaletteOverride,
   type ReleaseEncoding,
 } from './dashRelease'
 import { buildColorScaleLut } from '../types/color-scale'
@@ -232,6 +233,31 @@ describe('resolveDashRelease', () => {
     expect(resolved.mpdUrl).toBe('https://streams.example/global/realtime/x/aod550/releases/r22/stream.mpd')
     expect(resolved.dsaUrl).toBe('https://streams.example/global/realtime/x/aod550/releases/r22/dataset.dsa')
     expect(resolved.encoding?.kind).toBe('luma8-linear')
+  })
+
+  it('draws Global Cloud Cover white, keeping its published fade', async () => {
+    const CLOUDS = 'https://streams.example/global/realtime/noaa-sos/clouds/latest.json'
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === CLOUDS) {
+        return new Response(JSON.stringify({ datasetId: 'de607183ec1dcc5f', releaseDescriptor: { url: 'releases/r1/release.json' } }), { status: 200 })
+      }
+      return new Response(JSON.stringify(release()), { status: 200 })
+    })
+
+    const { encoding: enc } = await resolveDashRelease(CLOUDS, fetchImpl as unknown as typeof fetch)
+    const lut = buildReleaseLut(enc!)
+    const published = buildReleaseLut(encoding())
+    for (const code of [40, 80, 200, 235]) {
+      expect(rgbaAt(lut, code).slice(0, 3)).toEqual([255, 255, 255])
+      expect(alphaAt(lut, code)).toBe(alphaAt(published, code))
+    }
+  })
+
+  it('leaves every other palette as published', () => {
+    const enc = encoding()
+    expect(withPaletteOverride('some-other-id', enc)).toBe(enc)
+    expect(withPaletteOverride(undefined, enc)).toBe(enc)
   })
 
   it('names the step that failed', async () => {

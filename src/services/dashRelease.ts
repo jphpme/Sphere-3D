@@ -297,6 +297,30 @@ export function releaseBoundingBox(enc: ReleaseEncoding): { n: number; s: number
   return global ? null : { n: latTop, s: latBottom, w: lonLeft, e: lonRight }
 }
 
+/** Opaque white end to end: the colour carries nothing, the alpha ramp does. */
+const WHITE_STOPS: readonly ColorScaleStop[] = [
+  { t: 0, rgba: [255, 255, 255, 255] },
+  { t: 1, rgba: [255, 255, 255, 255] },
+]
+
+/**
+ * Published palettes known to be wrong, keyed by index dataset id and
+ * drawn with a stand-in until the publisher fixes them (the same
+ * override AYNI-2 carries). Only the colours are replaced: the
+ * release's alpha mode, ramp, gamma and floor still apply.
+ */
+const PALETTE_OVERRIDES: Readonly<Record<string, readonly ColorScaleStop[]>> = {
+  // Global Cloud Cover (NOAA SOS): the release palette runs white at 0 %
+  // cover to black at 100 %, so thick cloud would draw black.
+  de607183ec1dcc5f: WHITE_STOPS,
+}
+
+/** The encoding with its palette replaced when the dataset has a known-bad one. */
+export function withPaletteOverride(datasetId: unknown, enc: ReleaseEncoding | null): ReleaseEncoding | null {
+  const stops = typeof datasetId === 'string' ? PALETTE_OVERRIDES[datasetId] : undefined
+  return enc && stops ? { ...enc, stops } : enc
+}
+
 // ---------------------------------------------------------------------------
 // Resolution
 // ---------------------------------------------------------------------------
@@ -330,6 +354,6 @@ export async function resolveDashRelease(
   return {
     mpdUrl: new URL(mpd, releaseUrl).toString(),
     dsaUrl: typeof dsa === 'string' && dsa ? new URL(dsa, releaseUrl).toString() : null,
-    encoding: parseReleaseEncoding(release),
+    encoding: withPaletteOverride(latest.datasetId ?? release.datasetId, parseReleaseEncoding(release)),
   }
 }
