@@ -53,6 +53,57 @@ function showVrErrorBanner(message: string): void {
   }
 }
 
+/** How long the "not available here" notice stays up on its own. */
+const VR_NOTICE_MS = 6000
+
+/**
+ * AYNI — a passing note, not an error: a small pill at the top of the
+ * page that fades out by itself. For information the viewer can do
+ * nothing about (this device has no AR/VR), where the red error box
+ * read as if the whole site had failed.
+ */
+function showVrNotice(message: string, waitedMs = 0): void {
+  // Support is known before the Earth has loaded; a note shown under the
+  // loading screen would time out unseen, so it waits for it to go.
+  const loading = document.getElementById('loading-screen')
+  const loadingUp = !!loading && loading.style.display !== 'none' && !loading.classList.contains('fade-out')
+  if (loadingUp && waitedMs < 60_000) {
+    window.setTimeout(() => showVrNotice(message, waitedMs + 250), 250)
+    return
+  }
+  document.querySelector('.vr-notice')?.remove()
+  const el = document.createElement('div')
+  el.className = 'vr-notice'
+  el.setAttribute('role', 'status')
+  const icon = document.createElement('span')
+  icon.className = 'vr-notice-icon'
+  icon.setAttribute('aria-hidden', 'true')
+  icon.textContent = 'i'
+  const text = document.createElement('span')
+  text.textContent = message
+  const close = document.createElement('button')
+  close.type = 'button'
+  close.className = 'vr-notice-close'
+  close.setAttribute('aria-label', t('vr.notice.dismiss'))
+  close.textContent = '×'
+  el.append(icon, text, close)
+  // The first-visit privacy banner holds the same top-centre spot: sit under it.
+  const banner = document.querySelector<HTMLElement>('.disclosure-banner')
+  const bannerBottom = banner && !banner.hidden ? banner.getBoundingClientRect().bottom : 0
+  if (bannerBottom > 0) el.style.top = `${Math.round(bannerBottom + 8)}px`
+  document.body.appendChild(el)
+  let timer = 0
+  const dismiss = () => {
+    window.clearTimeout(timer)
+    el.classList.add('vr-notice-leaving')
+    // Removed after the fade; at once when motion is reduced (no transition runs).
+    el.addEventListener('transitionend', () => el.remove(), { once: true })
+    window.setTimeout(() => el.remove(), 400)
+  }
+  close.addEventListener('click', dismiss)
+  timer = window.setTimeout(dismiss, VR_NOTICE_MS)
+}
+
 /**
  * Wire the immersive-mode button. Safe to call even if the button
  * element is missing from the DOM — logs and no-ops. Safe to call
@@ -87,7 +138,7 @@ export async function initVrButton(ctx: VrSessionContext): Promise<void> {
     // Safari) keep the fully-silent treatment so the banner doesn't
     // become noise for users who were never going to see the button.
     if (isWebXRAvailable()) {
-      showVrErrorBanner(t('vr.error.unsupported'))
+      showVrNotice(t('vr.error.unsupported'))
     }
     return
   }
