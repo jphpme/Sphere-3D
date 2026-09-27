@@ -13,6 +13,7 @@
 
 import { t, tAttr, tHtml, type MessageKey } from '../i18n'
 import { escapeAttr, escapeHtml } from './domUtils'
+import { formatDate } from '../i18n/format'
 import type { CatalogLayer, LayerSelection, MapLayerTint } from '../services/mapLayers'
 
 /** A stream that can play over the dataset as its real-time overlay. */
@@ -26,6 +27,11 @@ export interface LayerPickerHandle {
   update(catalog: readonly CatalogLayer[], selection: LayerSelection): void
   /** Re-render the real-time overlay choice: the candidates, and the one playing (or null). */
   updateRtOverlay(choices: readonly RtOverlayChoice[], selectedId: string | null): void
+  /**
+   * Say the real-time overlay is hidden because the dataset's date is
+   * outside the overlay's dates (given), or clear that (null).
+   */
+  setRtOverlayStatus(outOfRange: { startMs: number; endMs: number } | null): void
 }
 
 const TINTS: readonly MapLayerTint[] = ['white', 'black', 'source']
@@ -48,6 +54,17 @@ export function mountLayerPicker(
   let selection: LayerSelection = { basemapId: null, overlays: [] }
   let rtChoices: readonly RtOverlayChoice[] = []
   let rtSelected: string | null = null
+  let rtStatus: { startMs: number; endMs: number } | null = null
+
+  function rtStatusText(): string {
+    if (!rtStatus) return ''
+    const opts: Intl.DateTimeFormatOptions = { month: 'short', day: 'numeric' }
+    // The end is exclusive: the last date shown is the one just before it.
+    return t('tools.layers.rt.outOfRange', {
+      start: formatDate(rtStatus.startMs, opts),
+      end: formatDate(rtStatus.endMs - 1, opts),
+    })
+  }
 
   function render(): void {
     const host = document.getElementById('tools-menu-layers')
@@ -91,7 +108,8 @@ export function mountLayerPicker(
           <option value=""${rtSelected ? '' : ' selected'}>${tHtml('tools.layers.rt.none')}</option>
           ${rtChoices.map(c => `<option value="${escapeAttr(c.id)}"${c.id === rtSelected ? ' selected' : ''}>${escapeHtml(c.title)}</option>`).join('')}
         </select>
-      </div>` : ''}`
+      </div>
+      <p id="tools-menu-layers-rt-status" class="tools-menu-layers-label" role="status"${rtStatus ? '' : ' hidden'}>${escapeHtml(rtStatusText())}</p>` : ''}`
 
     host.querySelector<HTMLSelectElement>('#tools-menu-layers-basemap')?.addEventListener('change', (e) => {
       const id = (e.target as HTMLSelectElement).value
@@ -125,7 +143,17 @@ export function mountLayerPicker(
     updateRtOverlay(choices, selectedId) {
       rtChoices = choices
       rtSelected = selectedId
+      if (!selectedId) rtStatus = null
       render()
+    },
+    setRtOverlayStatus(outOfRange) {
+      rtStatus = outOfRange
+      // In place, not a re-render: this changes as the base plays, and a
+      // re-render would close a select the viewer has open.
+      const el = document.getElementById('tools-menu-layers-rt-status')
+      if (!el) return
+      el.hidden = !rtStatus
+      el.textContent = rtStatusText()
     },
   }
 }

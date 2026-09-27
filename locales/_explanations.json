@@ -289,5 +289,6 @@
   "tools.layers.tint.white": "Overlay colour option: draw overlay lines in white.",
   "tools.layers.title": "Visible heading of the Tools-menu section for basemaps and overlays. Short.",
   "tools.layers.rt": "Label for the picker choosing a live data stream (for example wind or disaster alerts) drawn on top of the current dataset.",
-  "tools.layers.rt.none": "Real-time overlay picker option meaning no overlay stream is played."
+  "tools.layers.rt.none": "Real-time overlay picker option meaning no overlay stream is played.",
+  "tools.layers.rt.outOfRange": "Note under the real-time overlay picker when the overlay is hidden because the dataset being played is at a date the overlay has no data for. {start} and {end} are short dates (e.g. \"Aug 25\")."
 }

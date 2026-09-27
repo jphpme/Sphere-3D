@@ -36,6 +36,8 @@ export interface VrMapOverlay {
    */
   readonly lut?: Uint8Array
   readonly crop?: { u0: number; v0: number; us: number; vs: number }
+  /** Asked every frame; false draws nothing (a real-time overlay outside its dates). */
+  readonly visible?: () => boolean
 }
 
 export interface VrMapOverlaysHandle {
@@ -148,6 +150,13 @@ export function createVrMapOverlays(
       SEGMENTS,
     )
     const mesh = new THREE_.Mesh(geometry, material)
+    const visible = overlay.visible
+    if (visible) {
+      const opacity = overlay.opacity ?? 1
+      // Zero opacity rather than mesh.visible, which would also stop this
+      // hook from running to turn it back on. The shader discards it all.
+      mesh.onBeforeRender = () => { material.uniforms.uOpacity!.value = visible() ? opacity : 0 }
+    }
     // After the globe and the borders shell, in stack order.
     mesh.renderOrder = 2 + index
     globe.add(mesh)

@@ -62,6 +62,7 @@ import {
 import { createPlaybackSettleWatcher } from './services/playbackSettle'
 import { createDsaTimelineCache, type DsaTimelineCache } from './services/dsaTimelineCache'
 import { dateAtVideoTimeMs, frameAtVideoTime, timelineSpanMs, videoTimeForDateMs } from './services/dsaTimeline'
+import { clockFromRange, clockFromTimeline, decideRtOverlaySync, type LinearClock } from './services/rtOverlaySync'
 import { describeStreamForDocent } from './services/dsaMetadata'
 import { formatPlayheadLabel, type TimelineTrackState } from './services/timelineTrackCanvas'
 import { createTimelineTrackUI, type TimelineTrackUIHandle } from './ui/timelineTrackUI'
@@ -447,8 +448,21 @@ class InteractiveSphere {
     /** A value-encoded release's palette and map rectangle (earthTileLayer.MapOverlayLayer). */
     lut?: Uint8Array
     crop?: { u0: number; v0: number; us: number; vs: number }
+    /** The overlay's .dsa: its dates, for keeping it on the base's date. */
+    timelineUrl?: string
+    /** False while the base's date is outside the overlay's dates. */
+    visible: boolean
   } | null = null
   private rtOverlayGen = 0
+  /**
+   * The overlay follows the base's date (rtOverlaySync), checked on a
+   * timer rather than the playback rAF loop, which WebXR stops while an
+   * immersive session runs.
+   */
+  private rtSyncTimer: ReturnType<typeof setInterval> | null = null
+  /** The base's rate when no overlay paces it, and the last rate the sync set on it. */
+  private rtBaseUserRate = 1
+  private rtBaseRateSet: number | null = null
 
   /**
    * The 2D transport's date track. Mounted into `#playback-controls` at
@@ -1196,7 +1210,13 @@ class InteractiveSphere {
   private async applyDefaultMapLayers(dataset: Dataset, slot: number): Promise<void> {
     const gen = ++this.mapLayerGen
     const layers = await fetchLayerCatalog()
-    if (gen !== this.mapLayerGen || layers.length === 0) return
+    if (gen !== this.mapLayerGen) return
+    if (layers.length === 0) {
+      // No catalog layers (or none reachable): the real-time overlay
+      // choices do not depend on them.
+      this.refreshRtOverlayPicker()
+      return
+    }
     const transparent =
       carriesAlphaStream(dataset) || dataset.renderEncoding === RENDER_ENCODING_DATA_LUMA || !!dataset.releaseEncoding
     const coverage = transparent ? await this.measureDatasetCoverage(dataset, slot) : null
@@ -1238,9 +1258,10 @@ class InteractiveSphere {
     if (gen !== this.mapLayerGen) return
     // The real-time overlay sits right above the dataset, under any
     // borders or labels, so those stay readable over moving data.
+    const rt = this.rtOverlay
     const overlays = [
-      ...(this.rtOverlay
-        ? [{ image: this.rtOverlay.video as HTMLVideoElement, tint: 'source' as const, lut: this.rtOverlay.lut, crop: this.rtOverlay.crop }]
+      ...(rt
+        ? [{ image: rt.video as HTMLVideoElement, tint: 'source' as const, lut: rt.lut, crop: rt.crop, visible: () => rt.visible }]
         : []),
       ...images.overlays,
     ]
@@ -1262,10 +1283,15 @@ class InteractiveSphere {
     if (dataset?.rtOverlayCandidate) {
       const hls = new HLSService()
       const video = hls.createVideo()
-      video.loop = true
+      // Looping is for an overlay with no dates to follow (tickRtOverlay);
       // dash.js may end a static presentation rather than honour `loop`.
-      video.addEventListener('ended', () => { video.currentTime = 0; void video.play().catch(() => {}) })
+      video.addEventListener('ended', () => {
+        if (video.loop) { video.currentTime = 0; void video.play().catch(() => {}) }
+      })
+      // A frame found by a seek while everything is paused still has to reach the globe.
+      video.addEventListener('seeked', () => this.renderer?.getMap()?.triggerRepaint())
       let encoded: { lut: Uint8Array; crop: { u0: number; v0: number; us: number; vs: number } } | null = null
+      let timelineUrl = dataset.timelineLink
       try {
         // A value-encoded release (Global Cloud Cover) is followed to its
         // current MPD and palette, like a base dataset at load.
@@ -1274,10 +1300,13 @@ class InteractiveSphere {
           const release = await resolveDashRelease(dataset.releaseDescriptorLink)
           if (!release.encoding) throw new Error('release has no value encoding')
           mpdUrl = release.mpdUrl
+          timelineUrl = release.dsaUrl ?? undefined
           encoded = { lut: buildReleaseLut(release.encoding), crop: releaseCropRect(release.encoding) }
         }
+        if (timelineUrl) this.dsaTimelines.prefetch(timelineUrl)
+        // Not played here: tickRtOverlay starts it when the base plays,
+        // on the base's date.
         await hls.loadDash(mpdUrl, video, this.isMobile)
-        await video.play().catch(() => {})
       } catch (err) {
         logger.warn('[App] real-time overlay failed to start:', err)
         hls.destroy()
@@ -1290,8 +1319,11 @@ class InteractiveSphere {
         video.remove()
         return
       }
-      this.rtOverlay = { id: dataset.id, hls, video, ...(encoded ?? {}) }
-      logger.info('[App] real-time overlay playing:', dataset.id)
+      this.rtOverlay = { id: dataset.id, hls, video, ...(encoded ?? {}), ...(timelineUrl ? { timelineUrl } : {}), visible: true }
+      logger.info('[App] real-time overlay loaded:', dataset.id)
+      this.rtBaseRateSet = null
+      this.tickRtOverlay()
+      this.rtSyncTimer = setInterval(() => this.tickRtOverlay(), 100)
     }
     await this.applyMapLayers(this.mapLayerSelection, this.mapLayerSlot)
   }
@@ -1300,8 +1332,67 @@ class InteractiveSphere {
     const rt = this.rtOverlay
     if (!rt) return
     this.rtOverlay = null
+    if (this.rtSyncTimer !== null) clearInterval(this.rtSyncTimer)
+    this.rtSyncTimer = null
+    // Hand the base back its own speed if the sync was pacing it.
+    const base = this.hlsService?.video
+    if (base && this.rtBaseRateSet !== null && Math.abs(base.playbackRate - this.rtBaseRateSet) < 1e-3) {
+      base.playbackRate = this.rtBaseUserRate
+    }
+    this.rtBaseRateSet = null
+    this.layerPicker?.setRtOverlayStatus(null)
     rt.hls.destroy()
     rt.video.remove()
+  }
+
+  /** The loaded dataset's date axis, when it has one: its .dsa, else its declared start and end. */
+  private baseClock(dataset: Dataset, video: HTMLVideoElement): LinearClock | null {
+    const url = dataset.timelineLink
+    if (url) {
+      this.dsaTimelines.prefetch(url)
+      const timeline = this.dsaTimelines.get(url)
+      return timeline ? clockFromTimeline(timeline) : null
+    }
+    if (!dataset.startTime || !dataset.endTime) return null
+    return clockFromRange(Date.parse(dataset.startTime), Date.parse(dataset.endTime), video.duration)
+  }
+
+  /** One step of keeping the real-time overlay on the base's date (rtOverlaySync). */
+  private tickRtOverlay(): void {
+    const rt = this.rtOverlay
+    if (!rt) return
+    const dataset = this.appState.currentDataset
+    const base = dataset && dataService.isVideoDataset(dataset) ? this.hlsService?.video ?? null : null
+    // A rate the sync did not set came from someone else (a tour, a new
+    // dataset): that is the base's own speed from now on.
+    if (base && (this.rtBaseRateSet === null || Math.abs(base.playbackRate - this.rtBaseRateSet) > 1e-3)) {
+      this.rtBaseUserRate = base.playbackRate
+    }
+    if (rt.timelineUrl) this.dsaTimelines.prefetch(rt.timelineUrl)
+    const overlayTimeline = rt.timelineUrl ? this.dsaTimelines.get(rt.timelineUrl) : null
+    const overlayClock = overlayTimeline ? clockFromTimeline(overlayTimeline) : null
+    const v = rt.video
+    const d = decideRtOverlaySync({
+      base: base && dataset ? { currentTime: base.currentTime, paused: base.paused, clock: this.baseClock(dataset, base) } : null,
+      overlay: { currentTime: v.currentTime, paused: v.paused, seeking: v.seeking, readyState: v.readyState, clock: overlayClock },
+      baseUserRate: this.rtBaseUserRate,
+    })
+    v.loop = d.mode === 'untimed'
+    if (Math.abs(v.playbackRate - d.overlayRate) > 1e-3) v.playbackRate = d.overlayRate
+    if (d.seekTo !== null) v.currentTime = d.seekTo
+    if (d.playing && v.paused) void v.play().catch(() => {})
+    else if (!d.playing && !v.paused) v.pause()
+    if (base) {
+      if (Math.abs(base.playbackRate - d.baseRate) > 1e-3) base.playbackRate = d.baseRate
+      this.rtBaseRateSet = d.baseRate
+    }
+    if (rt.visible !== d.visible) {
+      rt.visible = d.visible
+      this.renderer?.getMap()?.triggerRepaint()
+      this.layerPicker?.setRtOverlayStatus(
+        d.mode === 'out-of-range' && overlayClock ? { startMs: overlayClock.startMs, endMs: overlayClock.endMs } : null,
+      )
+    }
   }
 
   /** The picker's overlay choices: global transparent streams other than the dataset itself. */

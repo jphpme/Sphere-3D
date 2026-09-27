@@ -1862,6 +1862,7 @@
   "tools.layers.overlays": "Overlays",
   "tools.layers.rt": "Real-time overlay",
   "tools.layers.rt.none": "None",
+  "tools.layers.rt.outOfRange": "Hidden: this overlay covers {start} – {end}, and the dataset is showing another date.",
   "tools.layers.tint": "Overlay colour",
   "tools.layers.tint.black": "Black",
   "tools.layers.tint.source": "Original colours",

@@ -1215,6 +1215,8 @@ export interface MapOverlayLayer {
    */
   lut?: Uint8Array
   crop?: { u0: number; v0: number; us: number; vs: number }
+  /** Asked every frame; false skips the layer (a real-time overlay outside its dates). */
+  visible?: () => boolean
 }
 
 /**
@@ -1461,6 +1463,7 @@ export function createEarthTileLayer(): EarthTileLayerControl {
     video: HTMLVideoElement | null
     lutTex: WebGLTexture | null
     crop: { u0: number; v0: number; us: number; vs: number } | null
+    visible: (() => boolean) | null
   }> = []
   const mapLayerLuts = new Map<Uint8Array, WebGLTexture>()
 
@@ -2176,7 +2179,7 @@ export function createEarthTileLayer(): EarthTileLayerControl {
           // this panel repainting while it plays even if the dataset is a
           // still image.
           for (const o of overlayLayers) {
-            if (!o.video || o.video.readyState < 2) continue
+            if (!o.video || o.video.readyState < 2 || (o.visible && !o.visible())) continue
             gl2.bindTexture(gl2.TEXTURE_2D, o.tex)
             gl2.pixelStorei(gl2.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false)
             gl2.texImage2D(gl2.TEXTURE_2D, 0, gl2.RGBA, gl2.RGBA, gl2.UNSIGNED_BYTE, o.video)
@@ -2184,7 +2187,10 @@ export function createEarthTileLayer(): EarthTileLayerControl {
           }
           gl2.enable(gl2.BLEND)
           gl2.blendFuncSeparate(gl2.SRC_ALPHA, gl2.ONE_MINUS_SRC_ALPHA, gl2.ONE, gl2.ONE_MINUS_SRC_ALPHA)
-          for (const o of overlayLayers) drawMapLayer(gl2, mapLayerProg, o.tex, o.tint, o.opacity, matrix, o.lutTex, o.crop)
+          for (const o of overlayLayers) {
+            if (o.visible && !o.visible()) continue
+            drawMapLayer(gl2, mapLayerProg, o.tex, o.tint, o.opacity, matrix, o.lutTex, o.crop)
+          }
         }
 
         // Restore GL state and return — no earth effects when dataset is active
@@ -2705,6 +2711,7 @@ export function createEarthTileLayer(): EarthTileLayerControl {
           video: o.image instanceof HTMLVideoElement ? o.image : null,
           lutTex,
           crop: o.crop ?? null,
+          visible: o.visible ?? null,
         })
       }
       for (const [lut, tex] of mapLayerLuts) {
