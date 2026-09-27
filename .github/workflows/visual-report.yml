@@ -48,8 +48,8 @@ jobs:
     name: Smoke / interaction tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -72,8 +72,8 @@ jobs:
     name: Capture + diff + report
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -111,7 +111,7 @@ jobs:
       # baseline yet (first run / new repo) is a soft pass.
       - name: Download main baseline
         if: github.event_name == 'pull_request'
-        uses: dawidd6/action-download-artifact@v6
+        uses: dawidd6/action-download-artifact@v17
         continue-on-error: true
         with:
           workflow: visual-report.yml
@@ -136,7 +136,7 @@ jobs:
       # Always surface the HTML report + PNGs (incl. on capture failure).
       - name: Upload report artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: visual-report
           path: report-out/
@@ -161,7 +161,7 @@ jobs:
         if: >-
           github.ref == 'refs/heads/main'
           && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: visual-baseline
           path: report-out/
@@ -185,7 +185,7 @@ jobs:
 
       - name: Post / update PR comment
         if: github.event_name == 'pull_request'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const fs = require('fs')
