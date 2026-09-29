@@ -1656,3 +1656,217 @@ describe('§9.2 visit memory surfaces', () => {
     expect(btn.getAttribute('title')).toBe(btn.getAttribute('aria-label'))
   })
 })
+
+// ---------------------------------------------------------------------------
+// Category tag cloud clamp
+// ---------------------------------------------------------------------------
+describe('Category tag cloud clamp', () => {
+  // happy-dom does no layout, so every size reads 0 and the cloud's
+  // overflow check (scrollHeight vs. clientHeight with `is-clamped`
+  // applied) would never see anything. Stub the three metrics the
+  // check reads, for the tag-cloud row only: chips wrap `perRow` to a
+  // 24px line, the clamp caps the row at 2 lines, and a row inside a
+  // collapsed section isn't laid out (width 0) — the same shape a
+  // browser reports.
+  const LINE = 24
+  const layout = { perRow: 20 }
+  const METRICS = ['clientWidth', 'clientHeight', 'scrollHeight'] as const
+  const saved = new Map<string, PropertyDescriptor | undefined>()
+
+  function inheritedGetter(name: string): (this: HTMLElement) => number {
+    let proto: object | null = HTMLElement.prototype
+    while (proto) {
+      const desc = Object.getOwnPropertyDescriptor(proto, name)
+      if (desc?.get) return desc.get as (this: HTMLElement) => number
+      proto = Object.getPrototypeOf(proto)
+    }
+    return () => 0
+  }
+
+  function stubTagCloudLayout(): void {
+    for (const name of METRICS) {
+      saved.set(name, Object.getOwnPropertyDescriptor(HTMLElement.prototype, name))
+      const fallback = inheritedGetter(name)
+      Object.defineProperty(HTMLElement.prototype, name, {
+        configurable: true,
+        get(this: HTMLElement): number {
+          if (!this.hasAttribute('data-tag-cloud')) return fallback.call(this)
+          if (this.closest('.collapsed')) return 0
+          const lines = Math.ceil(this.querySelectorAll('.browse-chip').length / layout.perRow)
+          const content = lines * LINE
+          if (name === 'clientWidth') return 300
+          if (name === 'scrollHeight') return content
+          return this.classList.contains('is-clamped') ? Math.min(content, 2 * LINE) : content
+        },
+      })
+    }
+  }
+
+  function restoreLayout(): void {
+    for (const name of METRICS) {
+      const desc = saved.get(name)
+      if (desc) Object.defineProperty(HTMLElement.prototype, name, desc)
+      else delete (HTMLElement.prototype as unknown as Record<string, unknown>)[name]
+    }
+    saved.clear()
+  }
+
+  // 14 tags, one per row, so the rail lists Tag01 … Tag14 in order
+  // (equal frequency sorts alphabetically).
+  const cloud = Array.from({ length: 14 }, (_, i) => {
+    const n = String(i + 1).padStart(2, '0')
+    return makeDataset({ id: `d${n}`, title: `Row ${n}`, tags: [`Tag${n}`] })
+  })
+
+  const row = () => document.querySelector('[data-tag-cloud]') as HTMLElement
+  const toggle = () => document.querySelector('[data-tag-cloud-toggle]') as HTMLElement
+  const chip = (label: string) =>
+    Array.from(document.querySelectorAll('.browse-chip'))
+      .find(el => el.textContent === label) as HTMLElement
+  const isShown = (el: HTMLElement) => !el.classList.contains('hidden')
+
+  beforeEach(() => {
+    setupBrowseDOM()
+    window.history.replaceState(null, '', '/')
+    localStorage.removeItem('sos-browse-section-open.v1')
+    layout.perRow = 5 // 14 chips → 3 lines, past the 2-line preview
+    stubTagCloudLayout()
+  })
+
+  afterEach(() => {
+    restoreLayout()
+    vi.unstubAllGlobals()
+    localStorage.removeItem('sos-browse-section-open.v1')
+  })
+
+  it('clamps and shows "Show more" when the chips overflow two rows', () => {
+    showBrowseUI(cloud, makeCallbacks())
+
+    expect(row().classList.contains('is-clamped')).toBe(true)
+    expect(isShown(toggle())).toBe(true)
+    expect(toggle().getAttribute('aria-expanded')).toBe('false')
+    expect(toggle().textContent).toBe('Show more')
+  })
+
+  it('shows no toggle and no clamp when every chip fits in two rows', () => {
+    // A wide panel: the same 14 chips fit on one line.
+    layout.perRow = 20
+    showBrowseUI(cloud, makeCallbacks())
+
+    expect(row().classList.contains('is-clamped')).toBe(false)
+    expect(isShown(toggle())).toBe(false)
+  })
+
+  it('decides from the rendered rows, not the chip count', () => {
+    // Four long tags that wrap one per line still need the clamp.
+    layout.perRow = 1
+    showBrowseUI(cloud.slice(0, 4), makeCallbacks())
+
+    expect(row().classList.contains('is-clamped')).toBe(true)
+    expect(isShown(toggle())).toBe(true)
+  })
+
+  it('flips aria-expanded, the label and the clamp on each toggle click', () => {
+    showBrowseUI(cloud, makeCallbacks())
+
+    toggle().click()
+    expect(row().classList.contains('is-clamped')).toBe(false)
+    expect(toggle().getAttribute('aria-expanded')).toBe('true')
+    expect(toggle().textContent).toBe('Show fewer')
+
+    toggle().click()
+    expect(row().classList.contains('is-clamped')).toBe(true)
+    expect(toggle().getAttribute('aria-expanded')).toBe('false')
+    expect(toggle().textContent).toBe('Show more')
+  })
+
+  it('keeps the expanded state across a rail re-render (chip click)', () => {
+    showBrowseUI(cloud, makeCallbacks())
+    toggle().click()
+    const before = row()
+
+    chip('Tag14').click()
+
+    // The click re-rendered the rail from state (a new row element)…
+    expect(row()).not.toBe(before)
+    expect(chip('Tag14').getAttribute('aria-pressed')).toBe('true')
+    // …and the cloud is still expanded.
+    expect(row().classList.contains('is-clamped')).toBe(false)
+    expect(toggle().getAttribute('aria-expanded')).toBe('true')
+    expect(toggle().textContent).toBe('Show fewer')
+  })
+
+  it('starts expanded when the URL selects a category, and "Show fewer" still works', () => {
+    // A shared link selecting the last chip must not hide it in the
+    // clipped rows.
+    window.history.replaceState(null, '', '/?cat=Tag14')
+    showBrowseUI(cloud, makeCallbacks())
+
+    expect(chip('Tag14').getAttribute('aria-pressed')).toBe('true')
+    expect(row().classList.contains('is-clamped')).toBe(false)
+    expect(toggle().getAttribute('aria-expanded')).toBe('true')
+    expect(toggle().textContent).toBe('Show fewer')
+
+    // The first "Show fewer" click collapses it (flag and row agree)…
+    toggle().click()
+    expect(row().classList.contains('is-clamped')).toBe(true)
+    expect(toggle().textContent).toBe('Show more')
+
+    // …and the user's choice survives the next re-render.
+    chip('Tag01').click()
+    expect(row().classList.contains('is-clamped')).toBe(true)
+  })
+
+  it('expands when keyboard focus enters a clamped chip', () => {
+    showBrowseUI(cloud, makeCallbacks())
+    expect(row().classList.contains('is-clamped')).toBe(true)
+
+    const first = chip('Tag01')
+    first.focus()
+
+    expect(row().classList.contains('is-clamped')).toBe(false)
+    expect(toggle().getAttribute('aria-expanded')).toBe('true')
+    expect(toggle().textContent).toBe('Show fewer')
+    // Expanded in place — focus stays on the chip the user reached.
+    expect(document.activeElement).toBe(first)
+  })
+
+  it('measures the cloud when its collapsed section opens', () => {
+    // Category collapsed at boot: the row can't be measured yet.
+    localStorage.setItem('sos-browse-section-open.v1', JSON.stringify({ category: false }))
+    layout.perRow = 20
+    showBrowseUI(cloud, makeCallbacks())
+
+    const header = document.querySelector(
+      '.browse-filter-section[data-group="category"] .browse-filter-section-header',
+    ) as HTMLElement
+    header.click()
+
+    // Opened and measured: everything fits, so no toggle.
+    expect(row().classList.contains('is-clamped')).toBe(false)
+    expect(isShown(toggle())).toBe(false)
+  })
+
+  it('re-measures when the rail resizes', () => {
+    const observers: ResizeObserverCallback[] = []
+    vi.stubGlobal('ResizeObserver', class {
+      constructor(cb: ResizeObserverCallback) { observers.push(cb) }
+      observe(): void {}
+      unobserve(): void {}
+      disconnect(): void {}
+    })
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => { cb(0); return 0 })
+
+    layout.perRow = 20
+    showBrowseUI(cloud, makeCallbacks())
+    expect(isShown(toggle())).toBe(false)
+    expect(observers).toHaveLength(1)
+
+    // The panel narrows: the same chips now wrap to 3 lines.
+    layout.perRow = 5
+    observers[0]([], {} as ResizeObserver)
+
+    expect(row().classList.contains('is-clamped')).toBe(true)
+    expect(isShown(toggle())).toBe(true)
+  })
+})
