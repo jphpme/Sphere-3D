@@ -185,7 +185,7 @@ canvas {
 }
 .panel-legend:hover {
     background: rgba(13, 13, 18, 0.95);
-    border-color: rgba(77, 166, 255, 0.45);
+    border-color: rgba(34, 197, 94, 0.45);
 }
 .panel-legend img {
     display: block;

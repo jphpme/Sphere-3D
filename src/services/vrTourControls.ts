@@ -36,7 +36,7 @@ const CANVAS_HEIGHT = 180
 const BG_COLOR = 'rgba(13, 13, 18, 0.85)'
 const BORDER_COLOR = 'rgba(255, 255, 255, 0.12)'
 const TEXT_COLOR = '#e8eaf0'
-const ACCENT_COLOR = 'rgba(77, 166, 255, 0.9)'
+const ACCENT_COLOR = 'rgba(34, 197, 94, 0.9)'
 const DIM_COLOR = 'rgba(232, 234, 240, 0.65)'
 
 /**

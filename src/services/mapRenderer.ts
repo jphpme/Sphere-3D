@@ -920,7 +920,7 @@ export class MapRenderer implements GlobeRenderer {
    *  The popup opens automatically so the label is immediately visible. */
   addMarker(lat: number, lng: number, label?: string): maplibregl.Marker | null {
     if (!this.map) return null
-    const marker = new maplibregl.Marker({ color: '#4da6ff' })
+    const marker = new maplibregl.Marker({ color: '#facc15' }) // --color-brand-end
       .setLngLat([lng, lat])
     if (label) {
       const popupContent = document.createElement('div')
@@ -1175,7 +1175,7 @@ export class MapRenderer implements GlobeRenderer {
         properties: {},
         geometry: { type: 'Polygon', coordinates: [ring] },
       } as GeoJSON.Feature,
-      { color: '#4da6ff', opacity: 0 },
+      { color: '#facc15', opacity: 0 },
     )
   }
 
@@ -1695,7 +1695,7 @@ export class MapRenderer implements GlobeRenderer {
       type: 'fill',
       source: sourceId,
       paint: {
-        'fill-color': options?.color ?? 'rgba(77, 166, 255, 0.3)',
+        'fill-color': options?.color ?? 'rgba(250, 204, 21, 0.3)',
         'fill-opacity': options?.opacity ?? 0.3,
       },
     })
@@ -1704,7 +1704,7 @@ export class MapRenderer implements GlobeRenderer {
       type: 'line',
       source: sourceId,
       paint: {
-        'line-color': options?.color ?? '#4da6ff',
+        'line-color': options?.color ?? '#facc15',
         'line-width': 2,
       },
     })

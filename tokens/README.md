@@ -44,7 +44,7 @@ and `.mobile-native` overrides.
 {
   "color": {
     "accent": {
-      "$value": "#4da6ff",       // the token value
+      "$value": "#22c55e",       // the token value
       "$type": "color",          // W3C token type
       "$description": "Primary accent — links, active states"
     }

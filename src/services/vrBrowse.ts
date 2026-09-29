@@ -36,9 +36,9 @@ const BG_COLOR = 'rgba(13, 13, 18, 0.92)'
 const BORDER_COLOR = 'rgba(255, 255, 255, 0.12)'
 const TITLE_COLOR = '#e8eaf0'
 const SUBTITLE_COLOR = 'rgba(232, 234, 240, 0.5)'
-const ACCENT_COLOR = 'rgba(77, 166, 255, 0.9)'
+const ACCENT_COLOR = 'rgba(34, 197, 94, 0.9)'
 const CARD_BG = 'rgba(255, 255, 255, 0.06)'
-const CARD_BG_HOVER = 'rgba(77, 166, 255, 0.15)'
+const CARD_BG_HOVER = 'rgba(34, 197, 94, 0.15)'
 
 const TITLE_BAR_HEIGHT = 60
 const CHIP_ROW_HEIGHT = 48
@@ -240,7 +240,7 @@ function drawCanvas(
   ctx.strokeRect(1, 1, w - 2, h - 2)
 
   // Title bar
-  ctx.fillStyle = 'rgba(77, 166, 255, 0.12)'
+  ctx.fillStyle = 'rgba(34, 197, 94, 0.12)'
   ctx.fillRect(0, 0, w, TITLE_BAR_HEIGHT)
   ctx.strokeStyle = BORDER_COLOR
   ctx.beginPath()
@@ -275,7 +275,7 @@ function drawCanvas(
     const isActive = chip.category === selectedCategory
     ctx.fillStyle = isActive ? ACCENT_COLOR : CARD_BG
     fillRoundRect(ctx, chip.x, chip.y, chip.width, chip.height, chip.height / 2)
-    ctx.fillStyle = isActive ? '#ffffff' : TITLE_COLOR
+    ctx.fillStyle = isActive ? '#0d0d12' : TITLE_COLOR
     ctx.fillText(chip.label, chip.x + chip.width / 2, chip.y + chip.height / 2 + 1)
   }
   ctx.strokeStyle = BORDER_COLOR

@@ -4,12 +4,12 @@
 /**
  * 3D translation of the 2D loading screen (`src/styles/loading.css`).
  *
- * Faithful to the 2D visual language: small dark-blue sphere with a
- * subtle pulse, two concentric rings spinning at different speeds and
- * directions, AYNI title + subtitle, thin progress bar,
- * status text. Replaces the 2D HTML loading screen with a spatial
- * version while the WebXR session is starting up and the dataset
- * texture is decoding.
+ * Faithful to the 2D visual language: the AYNI XR mark beating like a
+ * heart over a soft green glow (AYNI icon package, 2026-09-29 — it
+ * replaced a pulsing blue sphere and two spinning rings), the "AYNI XR"
+ * wordmark + subtitle, thin progress bar, status text. Replaces the 2D
+ * HTML loading screen with a spatial version while the WebXR session is
+ * starting up and the dataset texture is decoding.
  *
  * Visible from the moment `vrSession.enterVr()` builds the scene
  * until the dataset texture has a decoded frame. Then fades out via
@@ -27,24 +27,42 @@ const LOADING_POSITION = { x: 0, y: 1.3, z: -1.5 }
 
 // --- Geometry sizes (metres). Sized to feel "small but inviting" — not
 //     dominating the user's view. Roughly matches the 2D version's
-//     compact 88px loading globe.
-const SPHERE_RADIUS = 0.06
-const OUTER_RING_RADIUS = 0.075
-const OUTER_RING_TUBE = 0.0015
-const INNER_RING_RADIUS = 0.065
-const INNER_RING_TUBE = 0.0012
-
-// --- Animation rates (matching 2D loading.css keyframes).
-const OUTER_RING_PERIOD_S = 1.6
-const INNER_RING_PERIOD_S = 2.4 // reverse direction
-const SPHERE_PULSE_PERIOD_S = 2.4
+//     88 px mark.
+const MARK_SIZE = 0.12
+const GLOW_SIZE = 0.22
+const MARK_CANVAS_SIZE = 512
+const MARK_URL = '/ayni-xr-mark.svg'
 
 // --- Colours pulled from src/styles/tokens.css.
-const ACCENT_COLOR = 0x4da6ff // --color-accent
-const SPHERE_COLOR_DEEP = 0x08111f // 2D radial gradient inner
-const SPHERE_COLOR_RIM = 0x1e3a6e // 2D radial gradient outer
+const ACCENT_COLOR = 0x22c55e // --color-accent
+const BRAND_START = '#22c55e' // --color-brand-start
+const BRAND_END = '#facc15' // --color-brand-end
 const TEXT_COLOR = '#e8eaf0' // --color-text
 const TEXT_MUTED = '#999' // --color-text-muted
+
+/** One heartbeat, in seconds — the same as `ayni-heartbeat` in loading.css. */
+export const HEARTBEAT_PERIOD_S = 1.4
+
+/**
+ * The mark's scale through a heartbeat: two quick beats, then a rest.
+ * Mirrors the `ayni-heartbeat` keyframes (1 → 1.12 → 1 → 1.07 → 1 by
+ * 60 %, still until the next beat); eased between the keyframes so the
+ * canvas and the CSS read as one motion.
+ */
+export function heartbeatScale(tSeconds: number): number {
+  const p = ((tSeconds % HEARTBEAT_PERIOD_S) + HEARTBEAT_PERIOD_S) % HEARTBEAT_PERIOD_S / HEARTBEAT_PERIOD_S
+  const keys: ReadonlyArray<readonly [number, number]> = [[0, 1], [0.14, 1.12], [0.28, 1], [0.42, 1.07], [0.6, 1], [1, 1]]
+  for (let i = 1; i < keys.length; i++) {
+    const [p1, s1] = keys[i]!
+    if (p <= p1) {
+      const [p0, s0] = keys[i - 1]!
+      const f = (p - p0) / (p1 - p0)
+      const eased = f * f * (3 - 2 * f) // smoothstep, like ease-in-out
+      return s0 + (s1 - s0) * eased
+    }
+  }
+  return 1
+}
 
 // --- Title / subtitle / progress / status panel sizes.
 const TITLE_PANEL_WIDTH = 0.18 // 18 cm
@@ -88,8 +106,8 @@ export interface VrLoadingHandle {
 }
 
 /**
- * Draw the title canvas. AYNI title + Pachamama Studios subtitle
- * in accent, mirroring the 2D headings.
+ * Draw the title canvas. The "AYNI XR" wordmark + Pachamama Studios
+ * subtitle in accent, mirroring the 2D headings.
  */
 function drawTitle(ctx: CanvasRenderingContext2D): void {
   ctx.clearRect(0, 0, TITLE_CANVAS_WIDTH, TITLE_CANVAS_HEIGHT)
@@ -102,12 +120,27 @@ function drawTitle(ctx: CanvasRenderingContext2D): void {
   const titleText = 'AYNI'
   const letterSpacingPx = 12
   const letterWidth = ctx.measureText('M').width // approx em width
-  const totalWidth = titleText.length * (letterWidth * 0.55 + letterSpacingPx)
-  let x = TITLE_CANVAS_WIDTH / 2 - totalWidth / 2
+  const ayniWidth = titleText.length * (letterWidth * 0.55 + letterSpacingPx)
+  // "XR" as in the wordmark: heavier, 1.33x, in the brand gradient.
+  const xrFont = '800 104px system-ui, -apple-system, sans-serif'
+  ctx.font = xrFont
+  const xrWidth = ctx.measureText('XR').width
+  const gap = 20
+  let x = TITLE_CANVAS_WIDTH / 2 - (ayniWidth + gap + xrWidth) / 2
+  ctx.font = '300 88px system-ui, -apple-system, sans-serif'
   for (const ch of titleText) {
     ctx.fillText(ch, x + (letterWidth * 0.55) / 2, TITLE_CANVAS_HEIGHT / 2 - 8)
     x += letterWidth * 0.55 + letterSpacingPx
   }
+  x += gap
+  ctx.font = xrFont
+  ctx.textAlign = 'left'
+  const gradient = ctx.createLinearGradient(x, 0, x + xrWidth, 0)
+  gradient.addColorStop(0, BRAND_START)
+  gradient.addColorStop(1, BRAND_END)
+  ctx.fillStyle = gradient
+  ctx.fillText('XR', x, TITLE_CANVAS_HEIGHT / 2 - 10)
+  ctx.textAlign = 'center'
 
   // Subtitle in accent. The 2D version applies `text-transform:
   // uppercase` to the same `loading.subtitle` key; canvas can't
@@ -117,7 +150,7 @@ function drawTitle(ctx: CanvasRenderingContext2D): void {
   // gets the Turkish dotted/dotless-I case right when the user has
   // picked a locale that differs from the browser default. Scripts
   // without case (Arabic, CJK, etc.) pass through unchanged.
-  ctx.fillStyle = '#4da6ff'
+  ctx.fillStyle = '#22c55e'
   ctx.font = '500 32px system-ui, -apple-system, sans-serif'
   ctx.fillText(
     t('loading.subtitle').toLocaleUpperCase(getLocale()),
@@ -143,53 +176,65 @@ export function createVrLoading(THREE_: typeof THREE): VrLoadingHandle {
   // Track materials we need to fade out — collected as we build them.
   const fadeMaterials: THREE.Material[] = []
 
-  // --- Sphere ---
-  const sphereGeometry = new THREE_.SphereGeometry(SPHERE_RADIUS, 48, 48)
-  const sphereMaterial = new THREE_.MeshStandardMaterial({
-    color: SPHERE_COLOR_RIM,
-    emissive: SPHERE_COLOR_DEEP,
-    emissiveIntensity: 0.6,
-    roughness: 0.7,
-    metalness: 0.1,
+  // --- Glow behind the mark: a soft green disc that swells with each beat ---
+  const glowCanvas = document.createElement('canvas')
+  glowCanvas.width = glowCanvas.height = 256
+  const glowCtx = glowCanvas.getContext('2d')
+  if (!glowCtx) throw new Error('[VR loading] 2D canvas context unavailable')
+  const glowGradient = glowCtx.createRadialGradient(128, 128, 0, 128, 128, 128)
+  glowGradient.addColorStop(0, 'rgba(34, 197, 94, 0.55)')
+  glowGradient.addColorStop(0.45, 'rgba(34, 197, 94, 0.18)')
+  glowGradient.addColorStop(1, 'rgba(34, 197, 94, 0)')
+  glowCtx.fillStyle = glowGradient
+  glowCtx.fillRect(0, 0, 256, 256)
+  const glowTexture = new THREE_.CanvasTexture(glowCanvas)
+  glowTexture.colorSpace = THREE_.SRGBColorSpace
+  const glowMaterial = new THREE_.MeshBasicMaterial({
+    map: glowTexture,
     transparent: true,
+    opacity: 0.5,
+    depthWrite: false,
   })
-  const sphere = new THREE_.Mesh(sphereGeometry, sphereMaterial)
-  group.add(sphere)
-  fadeMaterials.push(sphereMaterial)
+  const glowGeometry = new THREE_.PlaneGeometry(GLOW_SIZE, GLOW_SIZE)
+  const glow = new THREE_.Mesh(glowGeometry, glowMaterial)
+  glow.position.z = -0.002
+  group.add(glow)
+  fadeMaterials.push(glowMaterial)
 
-  // Soft point light at the sphere centre so it self-illuminates a bit
-  // even in dim AR passthrough scenes (Phase 2.1) where the only
-  // ambient comes from the room.
-  const sphereLight = new THREE_.PointLight(0x6088ff, 0.5, 0.5)
-  sphere.add(sphereLight)
-
-  // --- Outer ring (forward spin) ---
-  const outerRingGeometry = new THREE_.TorusGeometry(OUTER_RING_RADIUS, OUTER_RING_TUBE, 8, 64)
-  const outerRingMaterial = new THREE_.MeshBasicMaterial({
-    color: ACCENT_COLOR,
+  // --- The AYNI XR mark ---
+  // Drawn into a canvas once the SVG decodes (a few ms, from the same
+  // origin); until then the plane is clear rather than a placeholder.
+  const markCanvas = document.createElement('canvas')
+  markCanvas.width = markCanvas.height = MARK_CANVAS_SIZE
+  const markCtx = markCanvas.getContext('2d')
+  if (!markCtx) throw new Error('[VR loading] 2D canvas context unavailable')
+  const markTexture = new THREE_.CanvasTexture(markCanvas)
+  markTexture.colorSpace = THREE_.SRGBColorSpace
+  markTexture.minFilter = THREE_.LinearFilter
+  markTexture.magFilter = THREE_.LinearFilter
+  const markImage = new Image()
+  markImage.decoding = 'async'
+  markImage.onload = () => {
+    markCtx.clearRect(0, 0, MARK_CANVAS_SIZE, MARK_CANVAS_SIZE)
+    markCtx.drawImage(markImage, 0, 0, MARK_CANVAS_SIZE, MARK_CANVAS_SIZE)
+    markTexture.needsUpdate = true
+  }
+  markImage.src = MARK_URL
+  const markMaterial = new THREE_.MeshBasicMaterial({
+    map: markTexture,
     transparent: true,
-    opacity: 0.85,
+    depthWrite: false,
   })
-  const outerRing = new THREE_.Mesh(outerRingGeometry, outerRingMaterial)
-  // TorusGeometry default plane is XY; rotate so it faces the user
-  // (axis along +Z, viewer looks along -Z).
-  outerRing.rotation.x = 0 // already in XY plane
-  group.add(outerRing)
-  fadeMaterials.push(outerRingMaterial)
+  const markGeometry = new THREE_.PlaneGeometry(MARK_SIZE, MARK_SIZE)
+  const mark = new THREE_.Mesh(markGeometry, markMaterial)
+  mark.renderOrder = 4
+  group.add(mark)
+  fadeMaterials.push(markMaterial)
 
-  // --- Inner ring (reverse spin, perpendicular axis) ---
-  const innerRingGeometry = new THREE_.TorusGeometry(INNER_RING_RADIUS, INNER_RING_TUBE, 8, 64)
-  const innerRingMaterial = new THREE_.MeshBasicMaterial({
-    color: ACCENT_COLOR,
-    transparent: true,
-    opacity: 0.55,
-  })
-  const innerRing = new THREE_.Mesh(innerRingGeometry, innerRingMaterial)
-  // Rotate 90° around Y so it sits on a perpendicular plane to the
-  // outer ring — gives the spatial-ness the 2D design implies.
-  innerRing.rotation.y = Math.PI / 2
-  group.add(innerRing)
-  fadeMaterials.push(innerRingMaterial)
+  // A visitor who asked for less motion gets a still mark.
+  const reduceMotion = typeof window !== 'undefined' &&
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia('(prefers-reduced-motion: reduce)').matches
 
   // --- Title + subtitle panel ---
   const titleCanvas = document.createElement('canvas')
@@ -308,15 +353,13 @@ export function createVrLoading(THREE_: typeof THREE): VrLoadingHandle {
     update(deltaSeconds) {
       elapsedSeconds += deltaSeconds
 
-      // Outer ring spin (forward).
-      outerRing.rotation.z = (elapsedSeconds / OUTER_RING_PERIOD_S) * Math.PI * 2
-      // Inner ring spin (reverse, around its own local axis = world Y after the X-axis tilt).
-      innerRing.rotation.x = -(elapsedSeconds / INNER_RING_PERIOD_S) * Math.PI * 2
-
-      // Sphere pulse — emissive intensity oscillates between 0.4 and 1.0.
-      const phase = (elapsedSeconds / SPHERE_PULSE_PERIOD_S) * Math.PI * 2
-      const pulse = (Math.sin(phase) + 1) / 2 // 0..1
-      sphereMaterial.emissiveIntensity = 0.4 + 0.6 * pulse
+      // The mark's heartbeat, and the glow swelling with it.
+      if (!reduceMotion) {
+        const beat = heartbeatScale(elapsedSeconds)
+        mark.scale.setScalar(beat)
+        glow.scale.setScalar(0.9 + (beat - 1) * 3)
+        if (fadeStart === null) glowMaterial.opacity = 0.35 + (beat - 1) * 3
+      }
 
       // Smoothly ease displayed progress toward target.
       // Frame-rate independent lerp via 1 - exp(-rate * dt).
@@ -369,12 +412,13 @@ export function createVrLoading(THREE_: typeof THREE): VrLoadingHandle {
     },
 
     dispose() {
-      sphereGeometry.dispose()
-      sphereMaterial.dispose()
-      outerRingGeometry.dispose()
-      outerRingMaterial.dispose()
-      innerRingGeometry.dispose()
-      innerRingMaterial.dispose()
+      markImage.onload = null
+      markGeometry.dispose()
+      markMaterial.dispose()
+      markTexture.dispose()
+      glowGeometry.dispose()
+      glowMaterial.dispose()
+      glowTexture.dispose()
       titleTexture.dispose()
       titleMaterial.dispose()
       ;(titlePlane.geometry as THREE.BufferGeometry).dispose()

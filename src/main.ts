@@ -2629,14 +2629,14 @@ class InteractiveSphere {
             Your browser's GPU acceleration appears to be disabled.
           </p>
           <details style="text-align:start;font-size:0.75rem;color:#999;line-height:1.6;">
-            <summary style="cursor:pointer;color:#4da6ff;margin-bottom:0.5rem;">How to fix this</summary>
+            <summary style="cursor:pointer;color:#22c55e;margin-bottom:0.5rem;">How to fix this</summary>
             <ol style="padding-inline-start:1.25rem;margin:0;">
               <li>Open <strong style="color:#fff;">chrome://flags</strong> in your address bar</li>
               <li>Search for <strong style="color:#fff;">Override software rendering list</strong></li>
               <li>Set it to <strong style="color:#fff;">Enabled</strong> and relaunch Chrome</li>
             </ol>
             <p style="margin:0.75rem 0 0.25rem;color:#888;">Alternatively, launch Chrome from the terminal with:</p>
-            <code style="display:block;background:#1a1a2e;padding:0.5rem 0.75rem;border-radius:4px;color:#4da6ff;font-size:0.7rem;overflow-x:auto;">
+            <code style="display:block;background:#1a1a2e;padding:0.5rem 0.75rem;border-radius:4px;color:#22c55e;font-size:0.7rem;overflow-x:auto;">
               google-chrome --enable-webgl --ignore-gpu-blocklist
             </code>
             <p style="margin:0.75rem 0 0;color:#888;">
@@ -4420,8 +4420,8 @@ class InteractiveSphere {
         video.muted = !video.muted
         muteBtn.textContent = video.muted ? '\u{1F507}\uFE0E' : '\u{1F50A}\uFE0E'
         muteBtn.setAttribute('aria-label', video.muted ? 'Unmute audio' : 'Mute audio')
-        muteBtn.style.color = video.muted ? '#aaa' : '#4da6ff'
-        muteBtn.style.borderColor = video.muted ? '#555' : '#4da6ff'
+        muteBtn.style.color = video.muted ? '#aaa' : 'var(--color-accent)'
+        muteBtn.style.borderColor = video.muted ? '#555' : 'var(--color-accent)'
       })
     }
 

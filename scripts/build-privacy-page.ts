@@ -48,9 +48,9 @@ const OUTPUT = resolve(REPO_ROOT, 'public/privacy.html')
  * coupling to the rest of the app). */
 const TEMPLATE_CSS = `
 :root {
-  --color-accent: #4da6ff;
-  --color-accent-hover: #6ab8ff;
-  --color-accent-dark: #0066cc;
+  --color-accent: #22c55e;
+  --color-accent-hover: #4ade80;
+  --color-accent-dark: #15803d;
   --color-bg: #0d0d12;
   --color-surface: rgba(255, 255, 255, 0.04);
   --color-surface-border: rgba(255, 255, 255, 0.1);

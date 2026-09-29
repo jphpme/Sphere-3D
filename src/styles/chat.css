@@ -329,7 +329,7 @@
     background: var(--white-o08);
 }
 .chat-feedback-btn.chat-feedback-rated {
-    color: rgba(77, 166, 255, 0.9);
+    color: rgba(34, 197, 94, 0.9);
     background: var(--accent-o12);
     animation: feedback-pop 0.3s ease-out;
 }
@@ -379,7 +379,7 @@
     line-height: 1.3;
 }
 .chat-feedback-tag:hover {
-    background: rgba(77, 166, 255, 0.1);
+    background: rgba(34, 197, 94, 0.1);
     border-color: var(--accent-o25);
     color: var(--color-accent-hover);
 }
@@ -561,7 +561,7 @@
 .chat-voice-btn[aria-pressed="true"] {
     color: var(--color-accent);
     border-color: var(--accent-o50) !important;
-    background: rgba(77, 166, 255, 0.1) !important;
+    background: rgba(34, 197, 94, 0.1) !important;
 }
 .chat-vision-btn svg { pointer-events: none; }
 /* Voice (STT) mic button — mirrors the vision toggle; see ORBIT_VOICE_PLAN. */
@@ -587,12 +587,12 @@
 .chat-mic-btn.listening {
     color: var(--color-accent);
     border-color: var(--accent-o50) !important;
-    background: rgba(77, 166, 255, 0.1) !important;
+    background: rgba(34, 197, 94, 0.1) !important;
     animation: chat-mic-pulse 1.4s ease-in-out infinite;
 }
 @keyframes chat-mic-pulse {
     0%, 100% { box-shadow: 0 0 0 0 var(--accent-o50); }
-    50% { box-shadow: 0 0 0 calc(4px * var(--ui-scale)) rgba(77, 166, 255, 0); }
+    50% { box-shadow: 0 0 0 calc(4px * var(--ui-scale)) rgba(34, 197, 94, 0); }
 }
 @media (prefers-reduced-motion: reduce) {
     .chat-mic-btn.listening { animation: none; }
@@ -606,7 +606,7 @@
     width: calc(32px * var(--ui-scale));
     height: calc(32px * var(--ui-scale));
     padding: 0 !important;
-    background: rgba(77, 166, 255, 0.1) !important;
+    background: rgba(34, 197, 94, 0.1) !important;
     border: 1px solid var(--accent-o50) !important;
     border-radius: calc(6px * var(--ui-scale));
     color: var(--color-accent);
@@ -658,7 +658,7 @@
     transition: background 0.15s;
 }
 .chat-suggestion:hover {
-    background: rgba(77, 166, 255, 0.22) !important;
+    background: rgba(34, 197, 94, 0.22) !important;
     color: var(--color-text) !important;
 }
 .chat-welcome-hint {

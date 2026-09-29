@@ -33,7 +33,7 @@
 .account-button[aria-expanded="true"] {
     color: var(--color-text);
     background: rgba(30, 30, 40, 0.95);
-    border-color: rgba(77, 166, 255, 0.45);
+    border-color: rgba(34, 197, 94, 0.45);
 }
 
 .account-avatar {

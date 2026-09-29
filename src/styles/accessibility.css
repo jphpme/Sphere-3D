@@ -51,7 +51,7 @@
 }
 
 .browse-card:focus-visible {
-    border-color: rgba(77, 166, 255, 0.6);
+    border-color: rgba(34, 197, 94, 0.6);
     box-shadow: 0 0 12px var(--accent-o40);
     outline: none;
 }

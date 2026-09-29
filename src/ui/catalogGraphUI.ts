@@ -136,7 +136,7 @@ function resolveTokens(): ResolvedTokens {
     bg: cssVar('--color-bg', '#0d0d12'),
     text: cssVar('--color-text', '#e8eaf0'),
     textSecondary: cssVar('--color-text-secondary', '#bbb'),
-    accent: cssVar('--color-accent', '#4da6ff'),
+    accent: cssVar('--color-accent', '#22c55e'),
     borderSoft: cssVar('--white-o20', 'rgba(255, 255, 255, 0.2)'),
     edgeMembership: cssVar('--white-o10', 'rgba(255, 255, 255, 0.1)'),
   }

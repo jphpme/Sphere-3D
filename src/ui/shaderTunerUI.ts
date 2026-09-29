@@ -144,7 +144,7 @@ function buildPanelHtml(): string {
         <label for="shader-tuner-${row.shortKey}" style="color:#bbb;">${escape(row.label)}</label>
         <input type="range" id="shader-tuner-${row.shortKey}" data-key="${row.key}"
           min="${band.min}" max="${band.max}" step="${band.step}" value="${v}"
-          style="accent-color:#4da6ff;"/>
+          style="accent-color:var(--color-accent);"/>
         <span class="shader-tuner-value" data-key="${row.key}" style="color:#fff;text-align:right;font-variant-numeric:tabular-nums;">${v.toFixed(2)}</span>
       </div>
     `
@@ -160,7 +160,7 @@ function buildPanelHtml(): string {
       <button type="button" id="shader-tuner-reset"
         style="flex:1;padding:0.35rem 0.4rem;font:inherit;font-size:0.7rem;color:#ccc;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.10);border-radius:4px;cursor:pointer;">Reset to shipped</button>
       <button type="button" id="shader-tuner-copy"
-        style="flex:1;padding:0.35rem 0.4rem;font:inherit;font-size:0.7rem;color:#4da6ff;background:rgba(77,166,255,0.08);border:1px solid rgba(77,166,255,0.35);border-radius:4px;cursor:pointer;">Copy as defaults</button>
+        style="flex:1;padding:0.35rem 0.4rem;font:inherit;font-size:0.7rem;color:var(--color-accent);background:rgba(34,197,94,0.08);border:1px solid rgba(34,197,94,0.35);border-radius:4px;cursor:pointer;">Copy as defaults</button>
     </div>
     <p style="margin:0.5rem 0 0;font-size:0.65rem;color:#888;line-height:1.3;">Dev-only. Drag sliders to tune; paste the &quot;Copy&quot; output into SHADER_DEFAULTS.</p>
   `

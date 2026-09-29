@@ -287,8 +287,8 @@ export function toggleCaptions(state: PlaybackState): void {
   const turning = state.captionTrack.mode !== 'showing'
   state.captionTrack.mode = turning ? 'showing' : 'hidden'
   if (ccBtn) {
-    ccBtn.style.color = turning ? '#4da6ff' : ''
-    ccBtn.style.borderColor = turning ? '#4da6ff' : ''
+    ccBtn.style.color = turning ? 'var(--color-accent)' : ''
+    ccBtn.style.borderColor = turning ? 'var(--color-accent)' : ''
   }
   if (!turning && overlay) {
     overlay.textContent = ''

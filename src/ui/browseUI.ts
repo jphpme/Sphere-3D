@@ -2107,7 +2107,7 @@ export function showBrowseUI(
       const scrubberHtml = renderFrameScrubber(d)
       if (scrubberHtml) metaHtml += scrubberHtml
       if (dateAdded) metaHtml += `<div class="browse-card-meta"><strong>${escapeHtml(t('browse.card.meta.added'))}</strong> ${escapeHtml(dateAdded)}</div>`
-      if (catalogUrl) metaHtml += `<div class="browse-card-meta"><a href="${escapeAttr(catalogUrl)}" target="_blank" rel="noopener" style="color: #4da6ff; text-decoration: none; font-size: 0.65rem;">${escapeHtml(t('browse.card.catalogLink'))}</a></div>`
+      if (catalogUrl) metaHtml += `<div class="browse-card-meta"><a href="${escapeAttr(catalogUrl)}" target="_blank" rel="noopener" style="color: var(--color-accent); text-decoration: none; font-size: 0.65rem;">${escapeHtml(t('browse.card.catalogLink'))}</a></div>`
 
       const keywordsHtml = keywords.length
         ? `<div class="browse-card-keywords">${keywords.slice(0, MAX_CARD_KEYWORDS).map(k => `<span class="browse-card-keyword" data-keyword="${escapeAttr(k)}" role="button" tabindex="0" aria-label="${escapeAttr(t('browse.card.keyword.aria', { keyword: k }))}">${escapeHtml(k)}</span>`).join('')}</div>`

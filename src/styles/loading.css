@@ -2,7 +2,10 @@
 /* Copyright 2026 The Zyra Project */
 
 /**
- * Loading screen — splash, progress bar, globe animation.
+ * Loading screen — splash, progress bar, and the AYNI XR mark beating
+ * like a heart (AYNI icon package, 2026-09-29; it replaced a pulsing
+ * globe with two spinning rings). vrLoading.ts draws the same splash in
+ * the headset with the same heartbeat.
  * Extracted from index.html (Step 3 of CSS_ARCHITECTURE_PLAN.md).
  */
 
@@ -28,58 +31,56 @@
     pointer-events: none;
 }
 
-.loading-globe {
+.loading-mark {
     position: relative;
     width: calc(88px * var(--ui-scale));
     height: calc(88px * var(--ui-scale));
     margin-bottom: calc(2rem * var(--ui-scale));
 }
 
-.loading-globe-inner {
-    width: calc(64px * var(--ui-scale));
-    height: calc(64px * var(--ui-scale));
-    border-radius: 50%;
-    background: radial-gradient(circle at 35% 35%, #1e3a6e, #08111f);
-    box-shadow: 0 0 40px rgba(30, 80, 200, 0.35), inset 0 0 24px rgba(0, 10, 40, 0.9);
+/* A soft green glow behind the mark, swelling on each beat. Opacity and
+   transform only, so a phone composites it without repainting. */
+.loading-mark::before {
+    content: '';
     position: absolute;
-    top: calc(12px * var(--ui-scale));
-    inset-inline-start: calc(12px * var(--ui-scale));
-    animation: globe-pulse 2.4s ease-in-out infinite;
-}
-
-.loading-ring {
-    position: absolute;
-    top: 0;
-    inset-inline-start: 0;
-    width: calc(88px * var(--ui-scale));
-    height: calc(88px * var(--ui-scale));
+    inset: -45%;
     border-radius: 50%;
-    border: 1.5px solid transparent;
-    border-top-color: var(--color-accent);
-    border-inline-end-color: var(--accent-o25);
-    animation: ring-spin 1.6s linear infinite;
+    background: radial-gradient(circle, rgba(34, 197, 94, 0.4) 0%, rgba(34, 197, 94, 0.12) 40%, rgba(34, 197, 94, 0) 70%);
+    opacity: 0.55;
+    animation: ayni-heartbeat-glow 1.4s ease-in-out infinite;
 }
 
-.loading-ring-2 {
-    position: absolute;
-    top: calc(8px * var(--ui-scale));
-    inset-inline-start: calc(8px * var(--ui-scale));
-    width: calc(72px * var(--ui-scale));
-    height: calc(72px * var(--ui-scale));
-    border-radius: 50%;
-    border: 1px solid transparent;
-    border-bottom-color: var(--accent-o40);
-    border-inline-start-color: var(--accent-o15);
-    animation: ring-spin 2.4s linear infinite reverse;
+.loading-mark img {
+    position: relative;
+    display: block;
+    width: 100%;
+    height: 100%;
+    animation: ayni-heartbeat 1.4s ease-in-out infinite;
 }
 
-@keyframes ring-spin {
-    to { transform: rotate(360deg); }
+/* Two quick beats, then a rest — vrLoading.ts heartbeatScale() follows
+   the same keyframes in the headset. */
+@keyframes ayni-heartbeat {
+    0% { transform: scale(1); }
+    14% { transform: scale(1.12); }
+    28% { transform: scale(1); }
+    42% { transform: scale(1.07); }
+    60%, 100% { transform: scale(1); }
 }
 
-@keyframes globe-pulse {
-    0%, 100% { box-shadow: 0 0 40px rgba(30, 80, 200, 0.35), inset 0 0 24px rgba(0, 10, 40, 0.9); }
-    50% { box-shadow: 0 0 64px rgba(30, 80, 200, 0.6), inset 0 0 24px rgba(0, 10, 40, 0.9); }
+@keyframes ayni-heartbeat-glow {
+    0% { opacity: 0.45; transform: scale(0.92); }
+    14% { opacity: 0.9; transform: scale(1.08); }
+    28% { opacity: 0.5; transform: scale(0.96); }
+    42% { opacity: 0.8; transform: scale(1.04); }
+    60%, 100% { opacity: 0.45; transform: scale(0.92); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .loading-mark::before,
+    .loading-mark img {
+        animation: none;
+    }
 }
 
 .loading-title {
@@ -89,6 +90,17 @@
     color: var(--color-text);
     margin-bottom: calc(0.4rem * var(--ui-scale));
     text-transform: uppercase;
+}
+
+/* "XR" as in the AYNI XR wordmark: heavier, 1.33x, in the brand gradient. */
+.loading-title-product {
+    font-size: 1.33em;
+    font-weight: 800;
+    letter-spacing: 0.05em;
+    background: linear-gradient(90deg, var(--color-brand-start), var(--color-brand-end));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
 }
 
 .loading-subtitle {
@@ -112,10 +124,10 @@
 .loading-progress-fill {
     height: 100%;
     width: 0%;
-    background: linear-gradient(90deg, #1a4a99, var(--color-accent));
+    background: linear-gradient(90deg, var(--color-brand-start), var(--color-brand-end));
     border-radius: 1px;
     transition: width 0.6s ease;
-    box-shadow: 0 0 8px rgba(77, 166, 255, 0.6);
+    box-shadow: 0 0 8px rgba(34, 197, 94, 0.6);
 }
 
 #loading-status {

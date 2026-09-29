@@ -192,8 +192,8 @@
 /* Phase 3pt-review/G — preview button in the dock header.
    Blue chip to distinguish from the green Publish button. */
 .tour-authoring-dock-preview {
-    background: rgba(77, 166, 255, 0.18);
-    border: 1px solid rgba(77, 166, 255, 0.4);
+    background: var(--accent-o18);
+    border: 1px solid var(--accent-o40);
     color: #d6eaff;
     border-radius: calc(0.35rem * var(--ui-scale));
     padding: calc(0.18rem * var(--ui-scale)) calc(0.55rem * var(--ui-scale));
@@ -204,7 +204,7 @@
 
 .tour-authoring-dock-preview:hover,
 .tour-authoring-dock-preview:focus-visible {
-    background: rgba(77, 166, 255, 0.32);
+    background: rgba(34, 197, 94, 0.32);
 }
 
 .tour-authoring-dock-preview:disabled {
@@ -260,9 +260,9 @@
 }
 
 .tour-authoring-action {
-    background: rgba(77, 166, 255, 0.18);
+    background: var(--accent-o18);
     color: #e8eef6;
-    border: 1px solid rgba(77, 166, 255, 0.35);
+    border: 1px solid var(--accent-o35);
     border-radius: calc(0.35rem * var(--ui-scale));
     padding: calc(0.4rem * var(--ui-scale)) calc(0.6rem * var(--ui-scale));
     text-align: start;
@@ -272,7 +272,7 @@
 
 .tour-authoring-action:hover,
 .tour-authoring-action:focus-visible {
-    background: rgba(77, 166, 255, 0.32);
+    background: rgba(34, 197, 94, 0.32);
 }
 
 .tour-authoring-task-list {
@@ -360,7 +360,7 @@
 }
 
 .tour-authoring-task-editing {
-    background: rgba(77, 166, 255, 0.06);
+    background: rgba(34, 197, 94, 0.06);
     border-radius: calc(0.3rem * var(--ui-scale));
     padding-block: calc(0.25rem * var(--ui-scale));
 }
@@ -387,7 +387,7 @@
 }
 
 .tour-authoring-task-editor-input:focus-visible {
-    outline: 1px solid rgba(77, 166, 255, 0.6);
+    outline: 1px solid rgba(34, 197, 94, 0.6);
     outline-offset: 0;
 }
 
@@ -461,8 +461,8 @@
 
 .tour-authoring-chip:hover,
 .tour-authoring-chip:focus-visible {
-    background: rgba(77, 166, 255, 0.22);
-    border-color: rgba(77, 166, 255, 0.38);
+    background: rgba(34, 197, 94, 0.22);
+    border-color: rgba(34, 197, 94, 0.38);
 }
 
 .tour-authoring-dock-inputrow {
@@ -483,6 +483,6 @@
 }
 
 .tour-authoring-input:focus-visible {
-    outline: 1px solid rgba(77, 166, 255, 0.6);
+    outline: 1px solid rgba(34, 197, 94, 0.6);
     outline-offset: 0;
 }

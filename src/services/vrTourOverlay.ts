@@ -653,6 +653,20 @@ function fillRoundRect(
   }
 }
 
+/** Outline counterpart of {@link fillRoundRect}, with the same fallback. */
+function strokeRoundRect(
+  ctx: CanvasRenderingContext2D,
+  x: number, y: number, w: number, h: number, r: number,
+): void {
+  if (typeof ctx.roundRect === 'function') {
+    ctx.beginPath()
+    ctx.roundRect(x, y, w, h, r)
+    ctx.stroke()
+  } else {
+    ctx.strokeRect(x, y, w, h)
+  }
+}
+
 /**
  * Sanitize a caller-supplied color to something safe to feed into
  * `fillStyle`. Accepts hex, named colors, rgb/rgba/hsl/hsla. Returns
@@ -1090,14 +1104,17 @@ function drawQuestionPanel(
       const px = answerButtonRectPx(i, n)
 
       // Phase-aware coloring:
-      //   idle                      → neutral accent fill
+      //   idle                      → brand tile, accent outline (a green
+      //                               fill would read as "correct")
       //   selected + chosen wrong   → red
       //   selected + chosen correct → green
       //   selected + was-correct    → green (highlight even if not chosen)
       //   selected + not chosen     → neutral
-      let fillColor = 'rgba(77, 166, 255, 0.85)' // accent
+      let fillColor = 'rgba(17, 26, 46, 0.92)' // --color-brand-tile
+      let strokeColor: string | null = 'rgba(34, 197, 94, 0.9)' // --color-accent
       let textColor = '#ffffff'
       if (state.phase === 'selected') {
+        strokeColor = null
         const isChosen = i === state.chosenIdx
         const isCorrect = i === state.params.correctAnswerIndex
         if (isChosen && isCorrect) {
@@ -1114,6 +1131,11 @@ function drawQuestionPanel(
 
       ctx.fillStyle = fillColor
       fillRoundRect(ctx, px.x, px.y, px.w, px.h, QUESTION_BUTTON_RADIUS)
+      if (strokeColor) {
+        ctx.strokeStyle = strokeColor
+        ctx.lineWidth = 4
+        strokeRoundRect(ctx, px.x + 2, px.y + 2, px.w - 4, px.h - 4, QUESTION_BUTTON_RADIUS)
+      }
       ctx.fillStyle = textColor
       ctx.fillText(String(i + 1), px.x + px.w / 2, px.y + px.h / 2 + 3)
 
@@ -1127,7 +1149,7 @@ function drawQuestionPanel(
   // showing-answer phase: Continue button instead of answer row.
   if (state.phase === 'showing-answer') {
     const px = continueButtonRectPx()
-    ctx.fillStyle = 'rgba(77, 166, 255, 0.95)'
+    ctx.fillStyle = 'rgba(21, 128, 61, 0.95)' // --color-accent-dark: white text on it
     fillRoundRect(ctx, px.x, px.y, px.w, px.h, QUESTION_BUTTON_RADIUS)
     ctx.fillStyle = '#ffffff'
     ctx.font = '600 32px system-ui, -apple-system, sans-serif'

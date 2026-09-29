@@ -1,24 +1,39 @@
 {
   "color": {
     "accent": {
-      "$value": "#4da6ff",
+      "$value": "#22c55e",
       "$type": "color",
-      "$description": "Primary accent — links, active states, focus rings"
+      "$description": "Primary accent — links, active states, focus rings. AYNI XR green, the start of the brand gradient (AYNI icon package, 2026-09-29)."
     },
     "accent-hover": {
-      "$value": "#6ab8ff",
+      "$value": "#4ade80",
       "$type": "color",
       "$description": "Accent hover state"
     },
     "accent-dark": {
-      "$value": "#0066cc",
+      "$value": "#15803d",
       "$type": "color",
-      "$description": "Primary action buttons"
+      "$description": "Primary action buttons (white text: 5.0:1)"
     },
     "accent-darker": {
-      "$value": "#0052a3",
+      "$value": "#166534",
       "$type": "color",
       "$description": "Primary button hover"
+    },
+    "brand-start": {
+      "$value": "#22c55e",
+      "$type": "color",
+      "$description": "AYNI XR brand gradient, start (green). Use as linear-gradient(135deg, var(--color-brand-start), var(--color-brand-end))."
+    },
+    "brand-end": {
+      "$value": "#facc15",
+      "$type": "color",
+      "$description": "AYNI XR brand gradient, end (yellow). Also the highlight colour for markers on the globe, where green would sink into vegetation."
+    },
+    "brand-tile": {
+      "$value": "#111a2e",
+      "$type": "color",
+      "$description": "The AYNI app-icon tile — a dark brand surface."
     },
     "bg": {
       "$value": "#0d0d12",
@@ -110,7 +125,7 @@
     "category-content": {
       "$value": "#5cc8c8",
       "$type": "color",
-      "$description": "Facet group hue — Category & content (tags, keywords). Used by chips, Graph view nodes, and (later) federated peer facets. Teal — distinct from the accent blue."
+      "$description": "Facet group hue — Category & content (tags, keywords). Used by chips, Graph view nodes, and (later) federated peer facets. Teal — distinct from the accent green."
     },
     "format-medium": {
       "$value": "#c486f7",
@@ -123,9 +138,9 @@
       "$description": "Facet group hue — Time (date-added, data-coverage). Amber. No Graph node mapping today (range facets aren't nodes); reserved for chip + Timeline view continuity."
     },
     "quality-availability": {
-      "$value": "#6dc96d",
+      "$value": "#4da6ff",
       "$type": "color",
-      "$description": "Facet group hue — Quality & availability (captions, tour, includeSos). Green. No Graph node mapping today (boolean facets aren't nodes); reserved for chip + later view continuity."
+      "$description": "Facet group hue — Quality & availability (captions, tour, includeSos). Sky blue (the accent before 2026-09-29): green would read as the accent. No Graph node mapping today (boolean facets aren't nodes); reserved for chip + later view continuity."
     }
   },
   "glass": {
@@ -193,18 +208,18 @@
     }
   },
   "accent-opacity": {
-    "o05": { "$value": "rgba(77, 166, 255, 0.05)", "$type": "color" },
-    "o08": { "$value": "rgba(77, 166, 255, 0.08)", "$type": "color" },
-    "o12": { "$value": "rgba(77, 166, 255, 0.12)", "$type": "color" },
-    "o15": { "$value": "rgba(77, 166, 255, 0.15)", "$type": "color" },
-    "o18": { "$value": "rgba(77, 166, 255, 0.18)", "$type": "color" },
-    "o20": { "$value": "rgba(77, 166, 255, 0.2)", "$type": "color" },
-    "o25": { "$value": "rgba(77, 166, 255, 0.25)", "$type": "color" },
-    "o30": { "$value": "rgba(77, 166, 255, 0.3)", "$type": "color" },
-    "o35": { "$value": "rgba(77, 166, 255, 0.35)", "$type": "color" },
-    "o40": { "$value": "rgba(77, 166, 255, 0.4)", "$type": "color" },
-    "o50": { "$value": "rgba(77, 166, 255, 0.5)", "$type": "color" },
-    "o70": { "$value": "rgba(77, 166, 255, 0.7)", "$type": "color" }
+    "o05": { "$value": "rgba(34, 197, 94, 0.05)", "$type": "color" },
+    "o08": { "$value": "rgba(34, 197, 94, 0.08)", "$type": "color" },
+    "o12": { "$value": "rgba(34, 197, 94, 0.12)", "$type": "color" },
+    "o15": { "$value": "rgba(34, 197, 94, 0.15)", "$type": "color" },
+    "o18": { "$value": "rgba(34, 197, 94, 0.18)", "$type": "color" },
+    "o20": { "$value": "rgba(34, 197, 94, 0.2)", "$type": "color" },
+    "o25": { "$value": "rgba(34, 197, 94, 0.25)", "$type": "color" },
+    "o30": { "$value": "rgba(34, 197, 94, 0.3)", "$type": "color" },
+    "o35": { "$value": "rgba(34, 197, 94, 0.35)", "$type": "color" },
+    "o40": { "$value": "rgba(34, 197, 94, 0.4)", "$type": "color" },
+    "o50": { "$value": "rgba(34, 197, 94, 0.5)", "$type": "color" },
+    "o70": { "$value": "rgba(34, 197, 94, 0.7)", "$type": "color" }
   },
   "white-opacity": {
     "o05": { "$value": "rgba(255, 255, 255, 0.05)", "$type": "color" },

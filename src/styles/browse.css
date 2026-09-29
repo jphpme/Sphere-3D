@@ -1580,14 +1580,14 @@ body.browse-view-map .browse-title {
 }
 
 .browse-card-scrubber-dot {
-    fill: #4da6ff;
+    fill: var(--color-accent);
 }
 
 /* When the "now" position is clamped (before or after the series),
  * fade the dot so the user sees the marker is not within the
  * meaningful timeline. */
 .browse-card-scrubber-dot-outside {
-    fill: rgba(77, 166, 255, 0.45);
+    fill: rgba(34, 197, 94, 0.45);
 }
 
 .browse-card-scrubber-ends {
@@ -1995,7 +1995,7 @@ body.catalog-empty #map-controls {
     justify-content: center;
     border-radius: calc(8px * var(--ui-scale));
     background: var(--color-accent);
-    color: #fff;
+    color: var(--color-bg); /* dark on the bright accent: white on #22c55e is 2.3:1 */
     font-size: calc(0.65rem * var(--ui-scale));
     font-weight: 700;
     line-height: 1;

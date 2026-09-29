@@ -219,7 +219,7 @@ function drawCanvas(
   const ppCenterY = h / 2
 
   if (state.hasVideo) {
-    ctx.fillStyle = 'rgba(77, 166, 255, 0.9)' // --color-accent
+    ctx.fillStyle = 'rgba(34, 197, 94, 0.9)' // --color-accent
     if (state.isPlaying) {
       // Pause icon — two vertical bars
       const barW = 16
@@ -244,7 +244,7 @@ function drawCanvas(
     const muCenterY = h / 2
     ctx.fillStyle = state.isMuted
       ? 'rgba(232, 234, 240, 0.5)' // dimmed when muted
-      : 'rgba(77, 166, 255, 0.9)' // accent when sound is on
+      : 'rgba(34, 197, 94, 0.9)' // accent when sound is on
     // Speaker body: rectangular base + triangular cone
     const bodyW = 16
     const bodyH = 32
@@ -272,7 +272,7 @@ function drawCanvas(
       ctx.stroke()
     } else {
       // Two short arc "sound waves" emanating to the right.
-      ctx.strokeStyle = 'rgba(77, 166, 255, 0.9)'
+      ctx.strokeStyle = 'rgba(34, 197, 94, 0.9)'
       ctx.lineWidth = 5
       ctx.lineCap = 'round'
       for (const r of [18, 32]) {
@@ -324,7 +324,7 @@ function drawCanvas(
   const readout = state.probeReadout
   ctx.fillText(title, titleCenterX, readout ? h / 2 - 26 : h / 2)
   if (readout) {
-    ctx.fillStyle = '#4da6ff' // --color-accent
+    ctx.fillStyle = '#22c55e' // --color-accent
     ctx.font = '500 40px ui-monospace, SFMono-Regular, Menlo, monospace'
     let value = readout
     while (ctx.measureText(value).width > titleMaxWidth && value.length > 4) {
@@ -345,7 +345,7 @@ function drawCanvas(
   const brCenterX = (brMinX + brMaxX) / 2
   const brCenterY = h / 2
   ctx.fillStyle = state.browseOpen
-    ? 'rgba(77, 166, 255, 0.95)' // --color-accent
+    ? 'rgba(34, 197, 94, 0.95)' // --color-accent
     : 'rgba(232, 234, 240, 0.85)'
   const barW = 64
   const barH = 8
@@ -389,7 +389,7 @@ function drawCanvas(
       ctx.beginPath()
       ctx.arc(cx, y, dotRadius, 0, Math.PI * 2)
       ctx.fillStyle = i === state.primaryIndex
-        ? 'rgba(77, 166, 255, 0.95)'
+        ? 'rgba(34, 197, 94, 0.95)'
         : 'rgba(232, 234, 240, 0.35)'
       ctx.fill()
     }
@@ -405,14 +405,14 @@ function drawVoiceButton(ctx: CanvasRenderingContext2D, phase: VrVoicePhase, h: 
   const cx = ((BUTTON_LAYOUT.voice.uMin + BUTTON_LAYOUT.voice.uMax) / 2) * CANVAS_WIDTH
   const cy = h / 2
   if (phase === 'speaking') {
-    ctx.fillStyle = 'rgba(77, 166, 255, 0.95)' // --color-accent
+    ctx.fillStyle = 'rgba(34, 197, 94, 0.95)' // --color-accent
     ctx.fillRect(cx - 26, cy - 26, 52, 52)
     return
   }
   const colour = phase === 'listening'
     ? '#ff6b6b'
     : phase === 'thinking'
-      ? 'rgba(77, 166, 255, 0.55)'
+      ? 'rgba(34, 197, 94, 0.55)'
       : 'rgba(232, 234, 240, 0.85)' // --color-text, as browse and exit
   if (phase === 'listening') {
     // A ring behind the mic: "on air", visible at a glance in the headset.
@@ -490,7 +490,7 @@ function drawCaption(ctx: CanvasRenderingContext2D, caption: { label: string; te
   const padX = 28
   ctx.textAlign = 'left'
   ctx.textBaseline = 'middle'
-  ctx.fillStyle = '#4da6ff' // --color-accent
+  ctx.fillStyle = '#22c55e' // --color-accent
   ctx.font = '600 30px system-ui, -apple-system, sans-serif'
   ctx.fillText(caption.label, padX, 34)
   ctx.fillStyle = '#e8eaf0' // --color-text

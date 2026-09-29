@@ -448,7 +448,7 @@ function buildControllerTooltip(THREE_: typeof THREE): THREE.Sprite {
   }
 
   // Thin accent border
-  ctx.strokeStyle = 'rgba(77, 166, 255, 0.45)' // --color-accent
+  ctx.strokeStyle = 'rgba(34, 197, 94, 0.45)' // --color-accent
   ctx.lineWidth = 2
   if (typeof ctx.roundRect === 'function') {
     ctx.beginPath()

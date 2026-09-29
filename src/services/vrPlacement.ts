@@ -192,13 +192,13 @@ function drawPlaceButton(ctx: CanvasRenderingContext2D, active: boolean): void {
   ctx.clearRect(0, 0, w, h)
 
   // Background disc
-  ctx.fillStyle = active ? 'rgba(77, 166, 255, 0.85)' : 'rgba(13, 13, 18, 0.75)'
+  ctx.fillStyle = active ? 'rgba(21, 128, 61, 0.9)' : 'rgba(13, 13, 18, 0.75)'
   ctx.beginPath()
   ctx.arc(w / 2, h / 2, w / 2 - 8, 0, Math.PI * 2)
   ctx.fill()
 
   // Accent ring border
-  ctx.strokeStyle = active ? '#fff' : `rgba(77, 166, 255, 0.85)`
+  ctx.strokeStyle = active ? '#fff' : `rgba(34, 197, 94, 0.85)`
   ctx.lineWidth = 6
   ctx.beginPath()
   ctx.arc(w / 2, h / 2, w / 2 - 8, 0, Math.PI * 2)
