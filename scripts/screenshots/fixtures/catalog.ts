@@ -125,6 +125,36 @@ const DATASETS: WireDatasetFixture[] = [
   },
 ]
 
+/** 48 distinct Category tags — enough that the browse tag cloud wraps
+ *  past its 2-row preview in the 1440px catalog layout, the way the
+ *  production catalog's ~57 do. */
+const TAG_CLOUD_TAGS = [
+  'Atmosphere', 'Ocean', 'Land', 'Water', 'Air', 'Snow and Ice',
+  'Weather', 'Climate', 'Hurricanes', 'Sea Surface Temperature', 'Carbon Cycle', 'Biosphere',
+  'Earthquakes', 'Volcanoes', 'Fires', 'Aerosols', 'Precipitation', 'Wind',
+  'Clouds', 'Space', 'Moon', 'Mars', 'Human Impact', 'Population',
+  'Agriculture', 'Drought', 'Floods', 'Glaciers', 'Sea Level', 'Ocean Currents',
+  'Coral Reefs', 'Fisheries', 'Air Quality', 'Ozone', 'Greenhouse Gases', 'Solar System',
+  'Sun', 'Plate Tectonics', 'Tsunamis', 'El Niño', 'Monsoons', 'Tornadoes',
+  'Lightning', 'Night Lights', 'Urbanization', 'Deforestation', 'Wildlife Migration', 'Permafrost',
+]
+
+/** Twelve rows carrying four tags each, so every tag in
+ *  {@link TAG_CLOUD_TAGS} shows up as a chip. */
+const TAG_CLOUD_DATASETS: WireDatasetFixture[] = Array.from({ length: 12 }, (_, i) => {
+  const tags = TAG_CLOUD_TAGS.slice(i * 4, i * 4 + 4)
+  return {
+    id: `INTERNAL_TAG_CLOUD_${String(i + 1).padStart(2, '0')}`,
+    title: `${tags[0]} Overview`,
+    format: 'image/png',
+    dataLink: '/assets/equirect-sample.png',
+    organization: 'NOAA',
+    abstractTxt: `A sample row tagged ${tags.join(', ')}.`,
+    tags,
+    boundingBox: WORLDWIDE,
+  }
+})
+
 /** Route-stub rules for the catalog + tours endpoints. */
 export function catalogFixtures(): FixtureRule[] {
   return [
@@ -177,5 +207,21 @@ export function catalogReportFixtures(): FixtureRule[] {
     // exactly as it does against a backend without embeddings.
     { url: '/related', json: { datasets: [], degraded: true } },
     { url: '/api/', passthrough: true },
+  ]
+}
+
+/**
+ * {@link catalogReportFixtures} with a 48-tag catalog, for the one
+ * visual-report scene that captures the browse tag cloud's clamp.
+ *
+ * The shared fixture's handful of tags never wraps past two rows, so
+ * no other scene renders the clamp. Serving the long catalog only
+ * here leaves every existing scene's baseline alone. Rules match in
+ * order, so this catalog rule shadows the shared one.
+ */
+export function catalogTagCloudReportFixtures(): FixtureRule[] {
+  return [
+    { url: '/api/v1/catalog', json: { datasets: TAG_CLOUD_DATASETS } },
+    ...catalogReportFixtures(),
   ]
 }
