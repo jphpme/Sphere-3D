@@ -26,7 +26,7 @@ describe('sync-penpot-global', () => {
   it('preserves the W3C $type and $value verbatim', () => {
     expect(byName.get('color.accent')).toMatchObject({
       type: 'color',
-      value: '#4da6ff',
+      value: '#22c55e',
     })
     expect(byName.get('radius.md')).toMatchObject({
       type: 'dimension',
@@ -34,7 +34,7 @@ describe('sync-penpot-global', () => {
     })
     expect(byName.get('accent-opacity.o05')).toMatchObject({
       type: 'color',
-      value: 'rgba(77, 166, 255, 0.05)',
+      value: 'rgba(34, 197, 94, 0.05)',
     })
     expect(byName.get('glass.blur')).toMatchObject({
       type: 'dimension',

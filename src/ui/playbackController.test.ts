@@ -406,7 +406,7 @@ describe('toggleCaptions', () => {
     toggleCaptions(state)
 
     expect(state.captionTrack.mode).toBe('showing')
-    expect(document.getElementById('cc-btn')!.style.color).toBe('#4da6ff')
+    expect(document.getElementById('cc-btn')!.style.color).toBe('var(--color-accent)')
   })
 
   it('disables captions when currently showing', () => {
@@ -427,7 +427,7 @@ describe('toggleCaptions', () => {
 describe('resetPlaybackState', () => {
   beforeEach(() => {
     document.body.innerHTML = `
-      <button id="cc-btn" style="color: #4da6ff; border-color: #4da6ff;"></button>
+      <button id="cc-btn" style="color: var(--color-accent); border-color: var(--color-accent);"></button>
       <div id="caption-overlay" style="display: block;">Some caption</div>
     `
   })
