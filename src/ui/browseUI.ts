@@ -319,19 +319,18 @@ interface ChipOption {
  * facet's `multi-select` predicate. Clicks call back into
  * {@link onToggle} with the value; the caller decides how to mutate
  * filter state and re-render.
+ *
+ * `tagCloud` is set for the Category & content group only: its row
+ * can collapse to a 2-row preview with a "Show more / Show fewer"
+ * toggle (see {@link TagCloudRender}).
  */
-/** Above this many chips a group collapses to a 2-row preview with a
- *  "Show more" toggle, so a long tag cloud can't push the dataset
- *  list off the browse panel on first load. */
-const CHIP_CLAMP_THRESHOLD = 12
-
 function renderChipGroup(
   facet: string,
   groupLabel: string,
   options: readonly ChipOption[],
   active: ReadonlySet<string>,
   ariaLabel: string,
-  clamp?: { clamped: boolean; moreLabel: string; lessLabel: string },
+  tagCloud?: TagCloudRender,
 ): string {
   if (options.length === 0) return ''
   const chips = options
@@ -340,17 +339,40 @@ function renderChipGroup(
       return `<button type="button" class="browse-chip${isActive ? ' active' : ''}" data-facet="${escapeAttr(facet)}" data-value="${escapeAttr(o.value)}" aria-pressed="${isActive}">${escapeHtml(o.label)}</button>`
     })
     .join('')
-  const canClamp = !!clamp && options.length > CHIP_CLAMP_THRESHOLD
-  const rowClampClass = canClamp && clamp!.clamped ? ' is-clamped' : ''
-  const toggle = canClamp
-    ? `<button type="button" class="browse-chip-rail-toggle" data-chip-toggle="${escapeAttr(facet)}" aria-expanded="${!clamp!.clamped}">${escapeHtml(clamp!.clamped ? clamp!.moreLabel : clamp!.lessLabel)}</button>`
+  const clamped = !!tagCloud && tagCloud.overflows && !tagCloud.expanded
+  const rowAttrs = tagCloud ? ' data-tag-cloud' : ''
+  const toggle = tagCloud
+    ? `<button type="button" class="browse-chip-rail-toggle${tagCloud.overflows ? '' : ' hidden'}" data-tag-cloud-toggle aria-expanded="${tagCloud.expanded}">${escapeHtml(tagCloudToggleLabel(tagCloud.expanded))}</button>`
     : ''
   return `
     <div class="browse-filter-group">
       <div class="browse-filter-label">${escapeHtml(groupLabel)}</div>
-      <div class="browse-chip-row${rowClampClass}" role="group" aria-label="${escapeAttr(ariaLabel)}">${chips}</div>
+      <div class="browse-chip-row${clamped ? ' is-clamped' : ''}"${rowAttrs} role="group" aria-label="${escapeAttr(ariaLabel)}">${chips}</div>
       ${toggle}
     </div>`
+}
+
+/**
+ * Render-time state of the Category & content tag cloud.
+ *
+ * Whether the cloud needs clamping depends on layout (how many rows
+ * the chips wrap to at the panel's current width), not on the chip
+ * count, so `showBrowseUI` measures the rendered row after every
+ * render and on resize and patches the clamp class and toggle in
+ * place. `overflows` is the last measured answer, used so a re-render
+ * paints the right state before it can be measured again.
+ */
+interface TagCloudRender {
+  /** Expanded past the 2-row preview (by the user, or at boot for
+   *  an active category). */
+  expanded: boolean
+  /** The chips need more than the 2-row preview. */
+  overflows: boolean
+}
+
+/** Label for the tag cloud's toggle in the given state. */
+function tagCloudToggleLabel(expanded: boolean): string {
+  return expanded ? t('browse.filter.tags.less') : t('browse.filter.tags.more')
 }
 
 /**
@@ -921,10 +943,20 @@ export function showBrowseUI(
     loadSectionOpenState(),
     bootEffectiveState,
   )
-  // Whether the Category & content chip cloud is expanded past its
-  // 2-row preview. Persists across re-renders within a panel session
-  // (defaults to clamped each time the panel opens).
-  let chipRailExpanded = false
+  // Whether the Category & content tag cloud is expanded past its
+  // 2-row preview. Survives re-renders and lasts for the page:
+  // reopening the panel returns early above (`browseInitialized`),
+  // so a cloud the user expanded is still expanded when they come
+  // back. Starts expanded when a category is active at boot, by the
+  // same rule that auto-opens the section, so a shared `?cat=` link
+  // never leaves its selected chip in the clipped rows. The user's
+  // own toggles win after that.
+  let chipRailExpanded = countSectionActive('category', bootEffectiveState) > 0
+  // Last measured "the chips need more than 2 rows". Assumed true
+  // until the row is first laid out (a long cloud is the case the
+  // clamp exists for), then kept from the latest measurement so a
+  // re-render while the panel is hidden paints the last known state.
+  let tagCloudOverflows = true
 
   // ----- Filter rail render -----
 
@@ -988,7 +1020,7 @@ export function showBrowseUI(
         tagOptions,
         categoryActive,
         t('browse.filter.tags.aria'),
-        { clamped: !chipRailExpanded, moreLabel: t('browse.filter.tags.more'), lessLabel: t('browse.filter.tags.less') },
+        { expanded: chipRailExpanded, overflows: tagCloudOverflows },
       ),
     ))
 
@@ -1060,6 +1092,46 @@ export function showBrowseUI(
     }
 
     rail.innerHTML = sections.join('')
+    syncTagCloud()
+  }
+
+  /**
+   * Measure the Category tag cloud and patch its clamp in place.
+   *
+   * The clamp is decided from the rendered row, not the chip count:
+   * with `is-clamped` applied, `scrollHeight` is the chips' full
+   * height and `clientHeight` is capped at the 2-row preview, so the
+   * cloud overflows exactly when the first exceeds the second. A wide
+   * panel that fits every chip in 2 rows gets no toggle and no fade;
+   * a narrow one with a dozen long tags does. At phone widths the
+   * clamp rule doesn't apply (accessibility.css keeps the row one
+   * sideways-scrolling line), so the heights match and the phone row
+   * is left alone.
+   *
+   * Skips the measurement while the row isn't laid out (panel
+   * hidden, Category section collapsed); the rail's ResizeObserver
+   * calls back in once it is.
+   */
+  function syncTagCloud(): void {
+    const row = rail?.querySelector<HTMLElement>('[data-tag-cloud]')
+    const toggle = rail?.querySelector<HTMLElement>('[data-tag-cloud-toggle]')
+    if (!row || !toggle) return
+    if (row.clientWidth > 0) {
+      row.classList.add('is-clamped')
+      tagCloudOverflows = row.scrollHeight > row.clientHeight + 1
+    }
+    row.classList.toggle('is-clamped', tagCloudOverflows && !chipRailExpanded)
+    toggle.classList.toggle('hidden', !tagCloudOverflows)
+    toggle.setAttribute('aria-expanded', String(chipRailExpanded))
+    toggle.textContent = tagCloudToggleLabel(chipRailExpanded)
+  }
+
+  /** Expand or collapse the tag cloud in place — shared by the
+   *  toggle button and the keyboard focus path, and applied without
+   *  re-rendering the rail (same reason as the section headers). */
+  function setTagCloudExpanded(expanded: boolean): void {
+    chipRailExpanded = expanded
+    syncTagCloud()
   }
 
   // Wire chip / toggle / range / clear listeners on the rail once.
@@ -1097,20 +1169,17 @@ export function showBrowseUI(
         sectionHeader.setAttribute('aria-expanded', String(nextOpen))
         const indicator = sectionHeader.querySelector('.browse-filter-section-indicator')
         if (indicator) indicator.textContent = nextOpen ? '▾' : '▸'
+        // The tag cloud can't be measured while its section is
+        // collapsed; measure now so it opens in the right state.
+        if (key === 'category' && nextOpen) syncTagCloud()
         return
       }
-      // Chip-rail "Show more / Show fewer" toggle ? flips the 2-row
+      // Tag cloud "Show more / Show fewer" toggle — flips the 2-row
       // clamp in place (same pattern as the section header so the
       // rail isn't re-rendered/thrashed on toggle).
-      const railToggle = target.closest('[data-chip-toggle]') as HTMLElement | null
-      if (railToggle) {
+      if (target.closest('[data-tag-cloud-toggle]')) {
         e.preventDefault()
-        const nextExpanded = !chipRailExpanded
-        chipRailExpanded = nextExpanded
-        const group = railToggle.closest('.browse-filter-group')
-        group?.querySelector('.browse-chip-row')?.classList.toggle('is-clamped', !nextExpanded)
-        railToggle.setAttribute('aria-expanded', String(nextExpanded))
-        railToggle.textContent = nextExpanded ? t('browse.filter.tags.less') : t('browse.filter.tags.more')
+        setTagCloudExpanded(!chipRailExpanded)
         return
       }
       const chip = target.closest('[data-facet]') as HTMLElement | null
@@ -1147,6 +1216,45 @@ export function showBrowseUI(
       const cleaned = next.min == null && next.max == null ? undefined : next
       applyState(setFacet(filterState, facet, cleaned), searchQuery)
     })
+    // Keyboard focus entering the clamped tag cloud expands it.
+    // The clipped chips stay in the tab order, so without this Tab
+    // walks through every chip the preview doesn't show before it
+    // reaches "Show more", and the browser scrolls the clipped row
+    // to follow focus. Expanding on the first chip means keyboard
+    // users never land on a hidden chip. Keyboard only
+    // (`:focus-visible`): a mouse click that focuses a visible chip
+    // shouldn't also unfold the whole cloud.
+    rail.addEventListener('focusin', (e) => {
+      const target = e.target as HTMLElement
+      if (!target.matches('.browse-chip') || !target.closest('.browse-chip-row.is-clamped')) return
+      let keyboardFocus = true
+      try {
+        keyboardFocus = target.matches(':focus-visible')
+      } catch {
+        // Engine without :focus-visible — treat every focus as keyboard.
+      }
+      if (keyboardFocus) setTagCloudExpanded(true)
+    })
+    // Re-measure the tag cloud whenever the rail's size changes: the
+    // panel opening (display: none → laid out), a section opening, a
+    // window resize, or a switch between the side panel and the full-
+    // width catalog layout. Deferred a frame because the measurement
+    // can change the rail's own height, which would re-trigger the
+    // observer inside its own callback (the browser reports that as a
+    // "ResizeObserver loop" error). Environments without
+    // ResizeObserver (older webviews, some test harnesses) keep the
+    // measurement taken at each render.
+    if (typeof ResizeObserver !== 'undefined') {
+      let measurePending = false
+      new ResizeObserver(() => {
+        if (measurePending) return
+        measurePending = true
+        requestAnimationFrame(() => {
+          measurePending = false
+          syncTagCloud()
+        })
+      }).observe(rail)
+    }
     rail.dataset.wired = 'true'
   }
 
