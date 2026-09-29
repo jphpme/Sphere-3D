@@ -464,6 +464,28 @@ describe('DataService — node-mode', () => {
       })
     })
 
+    it('lists a projection as a projection, not as real time', async () => {
+      // The CMIP6 scenarios: annual, 1950–2100, under global/projection/.
+      stubFetch(() => new Response(JSON.stringify({
+        datasets: [
+          { id: 'ssp245', display_name: 'Projected Surface Temperature Change (CMIP6): SSP2-4.5',
+            dataProductType: 'other', coverage: 'global', valueEncoded: true,
+            releaseDescriptorUrl: 'global/projection/ipcc-ar6-atlas/cmip6_tas_anomaly_ssp245/latest.json' },
+          { id: 'declared', display_name: 'Declared', dataProductType: 'projection', valueEncoded: true,
+            releaseDescriptorUrl: 'global/other/x/declared/latest.json' },
+        ],
+      }), { status: 200 }))
+      const svc = new DataService()
+      await svc.fetchDatasets()
+      expect(svc.getDatasetById('R2_DASH_ssp245')).toMatchObject({
+        title: 'Projected Surface Temperature Change (CMIP6): SSP2-4.5',
+        realtimeKind: 'projection',
+      })
+      expect(svc.getDatasetById('R2_DASH_ssp245')!.tags).toContain('Projection')
+      expect(svc.getDatasetById('R2_DASH_ssp245')!.tags).not.toContain('Real Time')
+      expect(svc.getDatasetById('R2_DASH_declared')).toMatchObject({ title: 'Declared', realtimeKind: 'projection' })
+    })
+
     it('offers global transparent streams, direct or value-encoded, as real-time overlays', async () => {
       stubFetch(() => new Response(JSON.stringify({
         datasets: [

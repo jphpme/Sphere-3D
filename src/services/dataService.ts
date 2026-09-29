@@ -554,10 +554,33 @@ function resolveRealtimeDashAsset(pathOrUrl: string | undefined, baseUrl: string
   return new URL(clean, baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`).toString()
 }
 
-function prefixedRealtimeDashTitle(rawTitle: string, isForecast: boolean): string {
+/**
+ * What an index row is, for its title prefix and tags. A projection
+ * (AYNI: the CMIP6 scenarios, one frame a year to 2100) is neither live
+ * nor a forecast; calling it "Real Time" would misstate it.
+ */
+type RealtimeDashKind = 'real-time' | 'forecast' | 'projection'
+
+function realtimeDashKind(entry: RealtimeDashEntry): RealtimeDashKind {
+  const path = entry.mpd ?? entry.releaseDescriptorUrl ?? ''
+  if (entry.dataProductType === 'projection' || /\/projection\//.test(path)) return 'projection'
+  if (entry.dataProductType === 'forecast' || entry.type === 'forecast' || /\/forecast\//.test(path)) return 'forecast'
+  return 'real-time'
+}
+
+const REALTIME_DASH_KIND_LABEL: Record<RealtimeDashKind, string> = {
+  'real-time': 'Real Time',
+  forecast: 'Forecast',
+  projection: 'Projection',
+}
+
+function prefixedRealtimeDashTitle(rawTitle: string, kind: RealtimeDashKind): string {
   const cleanTitle = rawTitle.trim() || 'Untitled dataset'
-  const titleWithoutKind = cleanTitle.replace(/^(?:Real Time|Forecast):\s*/i, '')
-  return `${isForecast ? 'Forecast' : 'Real Time'}: ${titleWithoutKind}`
+  const titleWithoutKind = cleanTitle.replace(/^(?:Real Time|Forecast|Projection):\s*/i, '')
+  // A projection's own name already says what it is ("Projected Surface
+  // Temperature Change (CMIP6): SSP2-4.5"); a prefix would repeat it.
+  if (kind === 'projection') return titleWithoutKind
+  return `${REALTIME_DASH_KIND_LABEL[kind]}: ${titleWithoutKind}`
 }
 
 /**
@@ -618,14 +641,12 @@ function realtimeDashDataset(
   generatedAt: string | undefined,
   dataLink: string,
 ): Dataset {
-  const isForecast =
-    entry.dataProductType === 'forecast' ||
-    entry.type === 'forecast' ||
-    /\/forecast\//.test(entry.mpd ?? entry.releaseDescriptorUrl ?? '')
-  const title = prefixedRealtimeDashTitle(entry.display_name ?? entry.name ?? entry.id, isForecast)
+  const kind = realtimeDashKind(entry)
+  const kindLabel = REALTIME_DASH_KIND_LABEL[kind]
+  const title = prefixedRealtimeDashTitle(entry.display_name ?? entry.name ?? entry.id, kind)
   const categories = entry.categories ?? []
   const tags = Array.from(new Set([
-    isForecast ? 'Forecast' : 'Real Time',
+    kindLabel,
     'DASH',
     ...categories,
     ...(entry.units ? [entry.units] : []),
@@ -645,7 +666,7 @@ function realtimeDashDataset(
     // row gets its .dsa when the release is resolved at load.
     timelineLink: resolveRealtimeDashAsset(entry.dsa, baseUrl),
     tags,
-    realtimeKind: isForecast ? 'forecast' : 'real-time',
+    realtimeKind: kind,
     defaultBordersVisible: true,
     // AYNI: a global stream with transparency can be layered over
     // another dataset as its real-time overlay (main.ts): an alpha MPD,
@@ -656,7 +677,7 @@ function realtimeDashDataset(
     weight: 10_000 - i,
     enriched: {
       description: entry.description,
-      categories: { Source: [isForecast ? 'Forecast' : 'Real Time'], Topic: categories },
+      categories: { Source: [kindLabel], Topic: categories },
       keywords: tags,
       dateAdded: generatedAt,
     },

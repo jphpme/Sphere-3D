@@ -134,8 +134,10 @@ export interface Dataset {
   radiusMi?: number
 
   /** Realtime/forecast DASH streams from the Cloudflare R2 catalog;
-   * set by `fetchRealtimeDashDatasets` so the UI can tag/prefix them. */
-  realtimeKind?: 'real-time' | 'forecast'
+   * set by `fetchRealtimeDashDatasets` so the UI can tag/prefix them.
+   * AYNI: `projection` is a scenario run to a future date (the CMIP6
+   * temperature projections, 1950–2100) — neither live nor a forecast. */
+  realtimeKind?: 'real-time' | 'forecast' | 'projection'
 
   /**
    * Resolved URL of the stream's `.dsa` annotation — the file beside the
