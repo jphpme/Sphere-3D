@@ -100,6 +100,10 @@ describe('describeCadence', () => {
     expect(describeCadence(86_400_000)).toBe('1 day')
     expect(describeCadence(10_800_000)).toBe('3 hours')
   })
+
+  it('names a mean Gregorian year as a year, not 31556952 seconds', () => {
+    expect(describeCadence(31_556_952_000)).toBe('1 year')
+  })
 })
 
 describe('describeStreamForDocent', () => {
@@ -154,5 +158,29 @@ describe('describeStreamForDocent', () => {
 
   it('says nothing when there is nothing to say', () => {
     expect(describeStreamForDocent(null, null)).toBe('')
+  })
+})
+
+describe('describeStreamForDocent — an annual projection', () => {
+  // The CMIP6 descriptors: a year per frame from an origin moved inside
+  // its year, so the day and time of a frame are not data.
+  const CMIP6 = {
+    schemaVersion: '1.7',
+    id: 'cmip6-ssp245',
+    title: { en: 'Near-surface temperature change (SSP2-4.5)' },
+    type: 'stream',
+    timeEnabled: true,
+    timeRange: { start: '1950-01-02T10:00:00Z', end: '2101-01-02T00:49:12Z' },
+    timeRangeEndMode: 'exclusive',
+    timeTotalFrames: 151,
+    timeCadenceSeconds: 31_556_952,
+    videoFrameRate: 12,
+  }
+
+  it('gives the coverage and the frame on screen as years', () => {
+    const text = describeStreamForDocent(parseDsaMetadata(CMIP6), timeline(CMIP6), 125)
+    expect(text).toContain('Time coverage: 1950 to 2100 — one frame every 1 year, 151 frames')
+    expect(text).toContain('Frame on screen: 2075')
+    expect(text).not.toMatch(/Frame on screen: 2075-/)
   })
 })

@@ -8,8 +8,12 @@ import {
   chooseTickIntervalMs,
   distributeLabels,
   drawTimelineTrack,
+  formatAxisEndLabel,
+  formatAxisLabel,
   formatCadenceShort,
   formatPlayheadLabel,
+  isAnnualCadence,
+  tickTimesFor,
   formatTickDate,
   progressAtCanvasX,
   progressToCanvasX,
@@ -406,5 +410,64 @@ describe('formatCadenceShort, sub-minute', () => {
     expect(formatCadenceShort(1000)).toBe('1s')
     expect(formatCadenceShort(45_000)).toBe('45s')
     expect(formatCadenceShort(500)).toBe('1s')
+  })
+})
+
+// The CMIP6 projections: one frame per year, 1950–2100, stepped by the mean
+// Gregorian year from an origin moved so every frame starts and centres
+// inside its own year.
+describe('annual axis (CMIP6 projections)', () => {
+  const YEAR_S = 31_556_952
+  const cadenceMs = YEAR_S * 1000
+  const startMs = Date.parse('1950-01-02T10:00:00Z')
+  const frames = 151
+  const endMs = startMs + frames * cadenceMs
+  const frameMs = (i: number) => startMs + i * cadenceMs
+
+  it('reads a year cadence as annual, and nothing shorter', () => {
+    expect(isAnnualCadence(cadenceMs)).toBe(true)
+    expect(isAnnualCadence(90 * DAY)).toBe(false)
+    expect(isAnnualCadence(DAY)).toBe(false)
+  })
+
+  it('labels the playhead by year, not by a day the origin happens to fall on', () => {
+    expect(formatPlayheadLabel(frameMs(0), cadenceMs)).toBe('1950')
+    expect(formatPlayheadLabel(frameMs(125), cadenceMs)).toBe('2075')
+    expect(formatPlayheadLabel(frameMs(150), cadenceMs)).toBe('2100')
+    // Mid-frame too: the playhead can sit anywhere inside the year.
+    expect(formatPlayheadLabel(frameMs(125) + cadenceMs / 2, cadenceMs)).toBe('2075')
+  })
+
+  it('names the step in years', () => {
+    expect(formatCadenceShort(cadenceMs)).toBe('1y')
+  })
+
+  it('thins a century and a half to a few ticks, on calendar years', () => {
+    const interval = chooseTickIntervalMs(endMs - startMs, 7)
+    expect(interval).toBeLessThanOrEqual(25 * 365.2425 * DAY + 1)
+    const ticks = tickTimesFor(startMs, endMs, interval)
+    expect(ticks.length).toBeGreaterThan(0)
+    expect(ticks.length).toBeLessThanOrEqual(7)
+    for (const ms of ticks) {
+      const d = new Date(ms)
+      expect(d.getUTCMonth()).toBe(0)
+      expect(d.getUTCDate()).toBe(1)
+      expect(d.getUTCHours()).toBe(0)
+    }
+    expect(ticks.map(ms => formatAxisLabel(ms, interval, endMs - startMs))).toEqual(
+      ticks.map(ms => String(new Date(ms).getUTCFullYear())),
+    )
+  })
+
+  it('labels the axis ends as years', () => {
+    expect(formatAxisEndLabel(startMs, endMs - startMs, cadenceMs)).toBe('1950')
+    // The drawer names the last frame (2100), not the exclusive end.
+    expect(formatAxisEndLabel(frameMs(150), endMs - startMs, cadenceMs)).toBe('2100')
+  })
+
+  it('leaves sub-year ticks where they were', () => {
+    const start = Date.parse('2026-08-18T00:00:00Z')
+    const ticks = tickTimesFor(start, start + 30 * DAY, 7 * DAY)
+    for (const ms of ticks) expect(ms % (7 * DAY)).toBe(0)
   })
 })

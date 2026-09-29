@@ -141,8 +141,24 @@ function utc(isoOrMs: string | number): string {
   return `${d.toISOString().slice(0, 16).replace('T', ' ')} UTC`
 }
 
-/** 900 000 ms → "15 minutes"; 86 400 000 → "1 day". */
+/**
+ * A frame's instant as the docent should say it. An annual stream's
+ * frames stand for years: the day and time of each are where the
+ * publisher put the origin, not data (see
+ * timelineTrackCanvas.isAnnualCadence), so they are given as years.
+ */
+function frameStamp(timeline: DsaTimeline, ms: number): string {
+  return timeline.cadenceMs >= 365 * 86_400_000 ? String(new Date(ms).getUTCFullYear()) : utc(ms)
+}
+
+/** 900 000 ms → "15 minutes"; 86 400 000 → "1 day"; a mean Gregorian year → "1 year". */
 export function describeCadence(ms: number): string {
+  // Annual streams step by the mean Gregorian year (31 556 952 s), which
+  // is no whole number of days: it would otherwise read "31556952 seconds".
+  if (ms >= 365 * 86_400_000) {
+    const years = Math.round((ms / (365.2425 * 86_400_000)) * 10) / 10
+    return `${years} year${years === 1 ? '' : 's'}`
+  }
   const units: Array<[number, string]> = [
     [86_400_000, 'day'],
     [3_600_000, 'hour'],
@@ -191,7 +207,7 @@ export function describeStreamForDocent(
 
   if (timeline) {
     lines.push(
-      `Time coverage: ${utc(firstFrameDateMs(timeline))} to ${utc(lastFrameDateMs(timeline))} — ` +
+      `Time coverage: ${frameStamp(timeline, firstFrameDateMs(timeline))} to ${frameStamp(timeline, lastFrameDateMs(timeline))} — ` +
       `one frame every ${describeCadence(timeline.cadenceMs)}, ${timeline.frameCount} frames`,
     )
   }
@@ -225,7 +241,7 @@ export function describeStreamForDocent(
     if (kind === 'filled') {
       const span = timeline.availability.spans.find(s => frame >= s.startFrame && frame < s.startFrame + s.frameCount)
       what = span?.sourceFrame !== null && span?.sourceFrame !== undefined
-        ? `a filled gap — no data arrived for this time, so it repeats the frame from ${utc(dateAtFrameMs(timeline, span.sourceFrame))}`
+        ? `a filled gap — no data arrived for this time, so it repeats the frame from ${frameStamp(timeline, dateAtFrameMs(timeline, span.sourceFrame))}`
         : 'a filled gap — no data arrived for this time'
     } else if (kind === 'real') {
       what = 'real data'
@@ -235,7 +251,7 @@ export function describeStreamForDocent(
       // `unknown`: the descriptor makes no claim either way.
       what = null
     }
-    lines.push(`Frame on screen: ${utc(shownMs)}${what ? ` — ${what}` : ''}`)
+    lines.push(`Frame on screen: ${frameStamp(timeline, shownMs)}${what ? ` — ${what}` : ''}`)
   }
 
   if (lines.length === 0) return ''
