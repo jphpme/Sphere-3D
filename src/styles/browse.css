@@ -103,6 +103,18 @@
     letter-spacing: 0.15em;
     text-transform: uppercase;
     color: var(--color-text);
+    /* AYNI: the XR mark before the name (AYNI icon package, 2026-09-29). */
+    display: flex;
+    align-items: center;
+    gap: 0.45em;
+}
+
+/* The chakana mark at the title's cap height; the small variant, since it
+   renders under 32 px (see the icon package README). */
+.browse-title .brand-mark {
+    width: 1.05em;
+    height: 1.05em;
+    flex: none;
 }
 
 .browse-subtitle {
