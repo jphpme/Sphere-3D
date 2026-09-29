@@ -136,7 +136,7 @@ describe('valueAtCode', () => {
 
 describe('buildReleaseLut', () => {
   it('makes no data transparent, so the Earth shows through', () => {
-    const lut = buildReleaseLut(encoding({ presentation: { alphaMode: 'opaque' } }))
+    const lut = buildReleaseLut(encoding({ presentation: { alphaMode: 'opaque', transparentBelowValue: undefined } }))
     for (let code = 0; code < 20; code++) expect(alphaAt(lut, code)).toBe(0)
     expect(alphaAt(lut, 32)).toBe(255)
   })
@@ -153,7 +153,7 @@ describe('buildReleaseLut', () => {
   })
 
   it('puts the palette\'s ends on the data codes, not on 0 and 255', () => {
-    const lut = buildReleaseLut(encoding({ presentation: { alphaMode: 'opaque' } }))
+    const lut = buildReleaseLut(encoding({ presentation: { alphaMode: 'opaque', transparentBelowValue: undefined } }))
     expect(rgbaAt(lut, 32)).toEqual([0, 0, 4, 255])
     expect(rgbaAt(lut, 235)).toEqual([252, 253, 191, 255])
     expect(rgbaAt(lut, 255)).toEqual([252, 253, 191, 255])
@@ -167,6 +167,34 @@ describe('buildReleaseLut', () => {
     }))
     expect(alphaAt(lut, 33)).toBe(0)
     expect(rgbaAt(lut, 234)).toEqual([140, 0, 0, 230])
+  })
+
+  it('clears values below the floor in binary mode too (sea ice: open ocean under 15 %)', () => {
+    // CMIP6 sea ice concentration: 0–100 %, binary alpha, transparentBelowValue 15.
+    const lut = buildReleaseLut(encoding({
+      encoding: { units: '%', vmin: 0, vmax: 100 },
+      presentation: { alphaMode: 'binary', transparentBelowValue: 15, alphaGradient: undefined },
+    }))
+    // value = (code - 32) / 203 * 100: 15 % sits at code 62.45.
+    expect(alphaAt(lut, 40)).toBe(0)
+    expect(alphaAt(lut, 62)).toBe(0)
+    expect(alphaAt(lut, 63)).toBe(255)
+    expect(alphaAt(lut, 235)).toBe(255)
+  })
+
+  it('clears values below the floor in opaque mode, as the desktop players do', () => {
+    const lut = buildReleaseLut(encoding({ presentation: { alphaMode: 'opaque', transparentBelowValue: 1 } }))
+    // AOD 0–5: 1 sits at code 72.6.
+    expect(alphaAt(lut, 72)).toBe(0)
+    expect(alphaAt(lut, 73)).toBe(255)
+  })
+
+  it('leaves a classified stream to its palette, whatever the floor says', () => {
+    const lut = buildReleaseLut(encoding({
+      encoding: { kind: 'luma8-classified', classes: [{ code: 32, value: 0, label: 'None' }, { code: 235, value: 4, label: 'Extreme' }] },
+      presentation: { alphaMode: 'binary', transparentBelowValue: 3 },
+    }))
+    expect(alphaAt(lut, 32)).toBe(255)
   })
 })
 

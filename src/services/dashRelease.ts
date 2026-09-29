@@ -213,8 +213,17 @@ function paletteAt(stops: readonly ColorScaleStop[], t: number): [number, number
 
 /** Opacity (0..1) the presentation gives a value, before the palette's own alpha. */
 function presentationAlpha(enc: ReleaseEncoding, value: number): number {
+  // "Values below this render fully transparent", in every alpha mode, as
+  // the desktop players apply it: sea ice concentration is `binary` with
+  // a 15 % floor, and without the cut open ocean painted as dark-blue ice.
+  // Not for a classified stream, whose values are class indices rather
+  // than the physical units the floor is stated in.
+  if (
+    enc.kind !== 'luma8-classified' &&
+    enc.transparentBelowValue !== null &&
+    value < enc.transparentBelowValue
+  ) return 0
   if (enc.alphaMode !== 'gradient') return 1
-  if (enc.transparentBelowValue !== null && value < enc.transparentBelowValue) return 0
   const g = enc.alphaGradient
   if (!g) return 1
   const f = Math.min(1, Math.max(0, (value - g.rampStartValue) / (g.rampEndValue - g.rampStartValue)))
