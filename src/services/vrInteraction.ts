@@ -310,7 +310,20 @@ export interface VrInteractionContext {
    * `analytics/camera.ts` rate-limits the emit across 2D + VR.
    */
   onCameraSettled?: () => void
+  /**
+   * AYNI: fired when a trigger press (or a phone's tap) on a globe is
+   * released within half a second without turning it — a tap on the
+   * place under the ray, with the mesh-local UV THREE reports for it
+   * (`sphereUvToLatLon` turns it into a place). A grab that rotated the
+   * globe never fires it.
+   */
+  onGlobeTap?: (uv: THREE.Vector2, mesh: THREE.Mesh) => void
 }
+
+/** A press on the globe held longer than this is a grab, not a tap. */
+const GLOBE_TAP_MAX_MS = 500
+/** A press that turned the globe more than this (about 1°) is a rotation, not a tap. */
+const GLOBE_TAP_MAX_TURN_RAD = 0.02
 
 export interface VrInteractionHandle {
   /** Drive per-frame polling (thumbstick zoom, drag tracking). */
@@ -640,6 +653,8 @@ export function createVrInteraction(
    * user grabs a secondary globe at a different arc position.
    */
   const lastGrabbedGlobe: (THREE.Mesh | null)[] = [null, null]
+  /** AYNI: a press on a globe not yet released, with what a tap needs to be told from a grab. */
+  const globeTap: Array<{ uv: THREE.Vector2; mesh: THREE.Mesh; quaternion: THREE.Quaternion; at: number } | null> = [null, null]
   /** Current rotation mode — recomputed on every trigger state change. */
   let rotationMode: RotationMode = { kind: 'idle' }
 
@@ -1251,6 +1266,14 @@ export function createVrInteraction(
     // drag would turn the globe twice. Every branch above still runs,
     // so HUD / browse / tour / Place-button taps keep working exactly as
     // they did; only the globe grab is declined on this device.
+    // AYNI: a press on the globe may be a tap on a place (a radio
+    // station, a cam): remembered here, decided on release, on every
+    // device — a phone's tap arrives through this same path before its
+    // rotate layer declines the grab below.
+    globeTap[index] = hit.uv
+      ? { uv: hit.uv.clone(), mesh: hit.mesh, quaternion: ctx.globe.quaternion.clone(), at: performance.now() }
+      : null
+
     if (ctx.domTouchActive?.()) return
 
     // Any globe hit (primary or secondary) — flip this trigger's
@@ -1265,6 +1288,17 @@ export function createVrInteraction(
   }
 
   function onSelectEnd(index: 0 | 1): void {
+    // A press on the globe released soon, without turning it, is a tap
+    // on the place under it. A grab that rotated is not.
+    const tap = globeTap[index]
+    if (tap) {
+      globeTap[index] = null
+      const held = performance.now() - tap.at
+      const turned = ctx.globe.quaternion.angleTo(tap.quaternion)
+      if (held <= GLOBE_TAP_MAX_MS && turned <= GLOBE_TAP_MAX_TURN_RAD) {
+        ctx.onGlobeTap?.(tap.uv, tap.mesh)
+      }
+    }
     // HUD actions fire on release (mirrors DOM click semantics).
     if (hudArmed[index]) {
       const controller = controllers[index]

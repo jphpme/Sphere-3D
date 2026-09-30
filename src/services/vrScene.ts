@@ -81,7 +81,7 @@ const GLOBE_POSITION = { x: 0, y: 1.3, z: -1.5 }
 const GLOBE_POSITION_Y_LOCAL = 0
 
 /** Globe radius in metres. Pinch-zoom scales the mesh, this stays fixed. */
-const GLOBE_RADIUS = 0.5
+export const GLOBE_RADIUS = 0.5
 
 /** Clamps on zoom so the globe never vanishes into the user's head or flies off. */
 export const MIN_GLOBE_SCALE = 0.3

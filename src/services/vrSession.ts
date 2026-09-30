@@ -25,6 +25,7 @@ import type { MapLayerImages } from './earthTileLayer'
 import { createVrBrowse, type VrBrowseHandle } from './vrBrowse'
 import { createVrTourControls, type VrTourControlsHandle } from './vrTourControls'
 import { createVrTourOverlay, type VrTourOverlayHandle } from './vrTourOverlay'
+import { createVrGeoMedia, type VrGeoMediaHandle, type VrGeoMediaState } from './vrGeoMedia'
 import { createVrTimeLabel, type VrTimeLabelHandle } from './vrTimeLabel'
 import { createVrTimelineTrack, type VrTimelineTrackHandle } from './vrTimelineTrack'
 import type { TimelineAvailabilitySpan } from './timelineTrackCanvas'
@@ -43,7 +44,7 @@ import { createVrPlacementTouch, type VrPlacementTouchHandle } from '../ui/vrPla
 import { createVrRotateTouch, type VrRotateTouchHandle } from '../ui/vrRotateTouch'
 import { tiltGlobe } from './vrGlobeTilt'
 import { createVrDebugPanel, type VrDebugPanelHandle } from './vrDebugPanel'
-import { MAX_GLOBE_SCALE, MIN_GLOBE_SCALE } from './vrScene'
+import { GLOBE_RADIUS, MAX_GLOBE_SCALE, MIN_GLOBE_SCALE } from './vrScene'
 import { createVrPlacement, type VrPlacementHandle } from './vrPlacement'
 import { computeGazeSpawnPosition } from './vrSpawn'
 import {
@@ -302,6 +303,16 @@ export interface VrSessionContext {
    */
   getMapLayerImages?(): MapLayerImages | null
 
+  // --- AYNI: geo-media (radio stations, wildlife cams) ---
+  /**
+   * The loaded geo-media dataset — its markers and what its player
+   * shows — or null. Polled per XR frame and applied on change, so the
+   * host hands back the same object until something changed.
+   */
+  getGeoMedia?(): VrGeoMediaState | null
+  /** A tap on a globe at this place: a trigger or a phone's tap released without turning it. */
+  onGlobeTap?(lat: number, lon: number): void
+
   /** Optional — fired after the session ends + resources are torn down. */
   onSessionEnd?: () => void
 }
@@ -373,6 +384,8 @@ interface ActiveSession {
   tourControls: VrTourControlsHandle
   /** In-VR tour overlay manager (text / popup / ... panels). Always present; hosts per-tour overlays. */
   tourOverlay: VrTourOverlayHandle
+  /** AYNI: a geo-media dataset's dots and panel. */
+  geoMedia: VrGeoMediaHandle
   /** Floating date readout above the globe for datasets with time metadata. */
   timeLabel: VrTimeLabelHandle
   /**
@@ -905,6 +918,9 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
   // op from `tourUI` into this manager.
   const tourOverlay = createVrTourOverlay(THREE_)
   scene.scene.add(tourOverlay.group)
+  // AYNI: a geo-media dataset's dots on the globe and its panel beside it.
+  const geoMedia = createVrGeoMedia(THREE_, scene.globe, GLOBE_RADIUS, tourOverlay)
+  let appliedGeoMedia: VrGeoMediaState | null = null
 
   // Floating date readout above the globe. Hidden by default;
   // per-frame setText(ctx.getDatasetTimeLabel()) flips it on when
@@ -1444,6 +1460,10 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     },
     onPlaceButton,
     onPlaceConfirm,
+    onGlobeTap: (uv) => {
+      const { lat, lon } = sphereUvToLatLon(uv)
+      ctx.onGlobeTap?.(lat, lon)
+    },
     onTimelineSeek: (progress, phase) => {
       const snapshot = ctx.getDatasetTimeline()
       if (!snapshot) return
@@ -1556,6 +1576,7 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     browse,
     tourControls,
     tourOverlay,
+    geoMedia,
     timeline,
     timeLabel,
     interaction,
@@ -1763,6 +1784,12 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     if (mapLayers !== appliedMapLayers) {
       appliedMapLayers = mapLayers
       active.scene.setMapLayers(mapLayers)
+    }
+    // AYNI: the geo-media dots and panel follow the host's state the same way.
+    const geoState = ctx.getGeoMedia?.() ?? null
+    if (geoState !== appliedGeoMedia) {
+      appliedGeoMedia = geoState
+      active.geoMedia.set(geoState)
     }
 
     // Poll the 2D catalog only while the browse panel is open, and
@@ -2085,6 +2112,7 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     // from the tour engine (e.g. tour cleanup fired by stopTour()
     // during exit) don't land on the about-to-be-disposed manager.
     setVrTourOverlaySink(null)
+    a.geoMedia.dispose()
     a.scene.scene.remove(a.tourOverlay.group)
     a.tourOverlay.dispose()
     // Loading scene may still be present if the user exited before

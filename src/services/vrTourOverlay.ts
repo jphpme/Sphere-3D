@@ -186,6 +186,13 @@ export interface VrTourImageParams
   anchor?: VrTourAnchor
   /** World-space size of the panel. Defaults to the popup size (0.8 × 0.5 m). */
   size?: { width: number; height: number }
+  /**
+   * AYNI: an already-decoded picture to paint at once instead of
+   * fetching `filename` — a snapshot cam's `<img>`, whose blob address
+   * changes with every new picture and must not flash the placeholder
+   * each time.
+   */
+  image?: HTMLImageElement
 }
 
 /**
@@ -1522,6 +1529,20 @@ export function createVrTourOverlay(THREE_: typeof THREE): VrTourOverlayHandle {
       const size = params.size ?? { width: IMAGE_PANEL_WIDTH, height: IMAGE_PANEL_HEIGHT }
       const anchor = resolveAnchor(params.anchor)
       const managed = buildMeshForOverlay(params.imageID, 'image', size, anchor)
+
+      if (params.image?.complete && params.image.naturalWidth > 0) {
+        const closeUv = drawImagePanel(managed.ctx2d!, params.image, {
+          caption: params.caption,
+          fontSize: params.fontSize,
+          fontColor: params.fontColor,
+          isClosable: params.isClosable,
+        })
+        managed.texture.needsUpdate = true
+        ;(managed.mesh.userData as OverlayUserData).closeUv = closeUv
+        group.add(managed.mesh)
+        overlays.set(params.imageID, managed)
+        return
+      }
 
       // Paint a placeholder immediately so the panel is visible
       // while the PNG/JPG decode is in flight — otherwise the user

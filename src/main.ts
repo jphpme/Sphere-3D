@@ -129,11 +129,12 @@ import { initVrButton } from './ui/vrButton'
 import { flyToOnGlobe, isVrActive } from './services/vrSession'
 import type { VrDatasetTexture } from './services/vrScene'
 import { buildReleaseLut, releaseCropRect, resolveDashRelease } from './services/dashRelease'
-import { fetchGeoMediaMarkers, type GeoMediaMarker } from './services/geoMedia'
+import { fetchGeoMediaMarkers, pickGeoMediaMarker, type GeoMediaMarker } from './services/geoMedia'
 import { isGeoMediaDataset } from './services/geoMediaSwitch'
 import { GeoMediaPlayer } from './services/geoMediaPlayer'
 import { addGeoMediaLayer, type GeoMediaLayerHandle } from './services/geoMediaLayer'
 import { createGeoMediaPanel, type GeoMediaPanelHandle } from './ui/geoMediaPanel'
+import type { VrGeoMediaState } from './services/vrGeoMedia'
 import { vrOverlayOptionsFor } from './services/vrOverlayOptions'
 import { publishGlobeState } from './services/multiOutput/globeStateEvents'
 import {
@@ -477,6 +478,9 @@ class InteractiveSphere {
     player: GeoMediaPlayer
     layer: GeoMediaLayerHandle | null
     panel: GeoMediaPanelHandle
+    /** What the immersive globe draws (vrGeoMedia), rebuilt on every change so the session sees it. */
+    vrState: VrGeoMediaState
+    pictureVersion: number
   } | null = null
   /**
    * The overlay follows the base's date (rtOverlaySync), checked on a
@@ -1474,7 +1478,7 @@ class InteractiveSphere {
 
     const player = new GeoMediaPlayer({ onChange: () => this.refreshGeoMedia() })
     const map = renderer.getMap()
-    const layer = map ? addGeoMediaLayer(map, markers, marker => player.play(marker)) : null
+    const layer = map ? addGeoMediaLayer(map, markers, marker => this.pickGeoMedia(marker)) : null
     const panel = createGeoMediaPanel({
       markers,
       video: player.video,
@@ -1492,8 +1496,55 @@ class InteractiveSphere {
       },
       onStop: () => player.stop(),
     })
-    this.geoMedia = { markers, player, layer, panel }
+    // Each new still reaches the headset's panel through a version bump.
+    player.image.addEventListener('load', () => {
+      const geo = this.geoMedia
+      if (geo?.player === player) {
+        geo.pictureVersion += 1
+        this.refreshGeoMedia()
+      }
+    })
+    this.geoMedia = { markers, player, layer, panel, vrState: this.geoMediaVrState(markers, player, 0), pictureVersion: 0 }
     this.refreshGeoMedia()
+  }
+
+  /**
+   * How close a tap on the immersive globe must land to a marker, in
+   * degrees of arc: about 3.5 cm on the half-metre globe, a finger's width.
+   */
+  private static readonly VR_PICK_REACH_DEG = 4
+
+  private geoMediaVrState(markers: readonly GeoMediaMarker[], player: GeoMediaPlayer, pictureVersion: number): VrGeoMediaState {
+    return {
+      markers,
+      playback: player.playback,
+      isUnavailable: marker => !marker.online || player.isUnavailable(marker.id),
+      video: player.video,
+      image: player.image,
+      pictureVersion,
+    }
+  }
+
+  /**
+   * A pick of a place on either globe: the marker there plays, the one
+   * already playing stops when it is picked again, and markers that
+   * share a place are taken in turn.
+   */
+  private pickGeoMedia(marker: GeoMediaMarker): void {
+    const geo = this.geoMedia
+    if (!geo) return
+    const { marker: active, phase } = geo.player.playback
+    if (active?.id === marker.id && phase !== 'unavailable') geo.player.stop()
+    else geo.player.play(marker)
+  }
+
+  /** A tap on the immersive globe: the nearest marker within reach, if any. */
+  private onVrGlobeTap(lat: number, lon: number): void {
+    const geo = this.geoMedia
+    if (!geo) return
+    const active = geo.player.playback.marker?.id ?? null
+    const marker = pickGeoMediaMarker(geo.markers, lat, lon, InteractiveSphere.VR_PICK_REACH_DEG, active)
+    if (marker) this.pickGeoMedia(marker)
   }
 
   /** Bring the dots and the panel in line with what the geo-media player is doing. */
@@ -1504,6 +1555,7 @@ class InteractiveSphere {
     const on = playback.marker && playback.phase !== 'unavailable' ? playback.marker.id : null
     geo.layer?.setStatus(on, marker => !marker.online || geo.player.isUnavailable(marker.id))
     geo.panel.update(playback, geo.player.muted)
+    geo.vrState = this.geoMediaVrState(geo.markers, geo.player, geo.pictureVersion)
     updateMapControlsPosition()
   }
 
@@ -3204,6 +3256,9 @@ class InteractiveSphere {
       toggleVoice: () => toggleImmersiveVoice(),
       // AYNI: the same layer stack on the VR globe (polled per frame).
       getMapLayerImages: () => this.mapLayerImages,
+      // AYNI: the geo-media dataset's dots and panel, and taps on its globe.
+      getGeoMedia: () => this.geoMedia?.vrState ?? null,
+      onGlobeTap: (lat, lon) => this.onVrGlobeTap(lat, lon),
 
       onSessionEnd: () => {
         endImmersiveVoice()
