@@ -126,6 +126,11 @@ import { initVrButton } from './ui/vrButton'
 import { flyToOnGlobe, isVrActive } from './services/vrSession'
 import type { VrDatasetTexture } from './services/vrScene'
 import { buildReleaseLut, releaseCropRect, resolveDashRelease } from './services/dashRelease'
+import { fetchGeoMediaMarkers, type GeoMediaMarker } from './services/geoMedia'
+import { isGeoMediaDataset } from './services/geoMediaSwitch'
+import { GeoMediaPlayer } from './services/geoMediaPlayer'
+import { addGeoMediaLayer, type GeoMediaLayerHandle } from './services/geoMediaLayer'
+import { createGeoMediaPanel, type GeoMediaPanelHandle } from './ui/geoMediaPanel'
 import { vrOverlayOptionsFor } from './services/vrOverlayOptions'
 import { publishGlobeState } from './services/multiOutput/globeStateEvents'
 import {
@@ -454,6 +459,17 @@ class InteractiveSphere {
     visible: boolean
   } | null = null
   private rtOverlayGen = 0
+  /**
+   * AYNI: the geo-media dataset on the globe (radio stations, wildlife
+   * cams): its markers, the player of the one picked, the dots on the
+   * browser globe and the panel. Null for every other dataset.
+   */
+  private geoMedia: {
+    markers: readonly GeoMediaMarker[]
+    player: GeoMediaPlayer
+    layer: GeoMediaLayerHandle | null
+    panel: GeoMediaPanelHandle
+  } | null = null
   /**
    * The overlay follows the base's date (rtOverlaySync), checked on a
    * timer rather than the playback rAF loop, which WebXR stops while an
@@ -1170,6 +1186,7 @@ class InteractiveSphere {
     // concurrent HLS.js instances fight over bandwidth and can exhaust the
     // browser's MediaSource / SourceBuffer limits, stalling the new load.
     this.cleanupPanelVideo()
+    this.stopGeoMedia()
 
     this.renderer?.removeCloudOverlay()
     this.renderer?.removeNightLights()
@@ -1419,6 +1436,72 @@ class InteractiveSphere {
   }
 
   /**
+   * AYNI: put a geo-media dataset on the globe: the Earth as it is lit
+   * right now, a dot per station or cam, and the panel that plays the
+   * one picked. Nothing plays until the visitor picks a dot.
+   */
+  private async startGeoMedia(
+    dataset: Dataset,
+    renderer: MapRenderer,
+    gen: number,
+  ): Promise<void> {
+    const markers = await fetchGeoMediaMarkers(dataset.dataLink)
+    if (gen !== this.loadGeneration) return
+    if (!markers.length) throw new Error(`${dataset.title} has nothing to play right now`)
+    this.showPlaybackControls(false)
+    this.showTimeLabel(false)
+    await renderer.loadDefaultEarthMaterials()
+    if (gen !== this.loadGeneration) return
+    // Day and night as they are now: a cam on the dark side shows the dark.
+    const sun = getSunPosition(new Date())
+    renderer.enableSunLighting(sun.lat, sun.lng)
+
+    const player = new GeoMediaPlayer({ onChange: () => this.refreshGeoMedia() })
+    const map = renderer.getMap()
+    const layer = map ? addGeoMediaLayer(map, markers, marker => player.play(marker)) : null
+    const panel = createGeoMediaPanel({
+      markers,
+      video: player.video,
+      image: player.image,
+      onPauseResume: () => {
+        const { marker, phase } = player.playback
+        if (!marker) return
+        if (phase === 'unavailable') player.play(marker)
+        else if (phase === 'paused') player.resume()
+        else player.pause()
+      },
+      onToggleMute: () => {
+        player.setMuted(!player.muted)
+        this.refreshGeoMedia()
+      },
+      onStop: () => player.stop(),
+    })
+    this.geoMedia = { markers, player, layer, panel }
+    this.refreshGeoMedia()
+  }
+
+  /** Bring the dots and the panel in line with what the geo-media player is doing. */
+  private refreshGeoMedia(): void {
+    const geo = this.geoMedia
+    if (!geo) return
+    const playback = geo.player.playback
+    const on = playback.marker && playback.phase !== 'unavailable' ? playback.marker.id : null
+    geo.layer?.setStatus(on, marker => !marker.online || geo.player.isUnavailable(marker.id))
+    geo.panel.update(playback, geo.player.muted)
+    updateMapControlsPosition()
+  }
+
+  private stopGeoMedia(): void {
+    const geo = this.geoMedia
+    if (!geo) return
+    this.geoMedia = null
+    geo.player.dispose()
+    geo.layer?.dispose()
+    geo.panel.dispose()
+    updateMapControlsPosition()
+  }
+
+  /**
    * AYNI — follow a release row's `latest.json` to the release current
    * right now, and point the row at its MPD, its `.dsa` (date track and
    * the docent) and its value encoding (palette, crop and decoding, on
@@ -1523,6 +1606,10 @@ class InteractiveSphere {
           source: triggerToTourSource(trigger),
         })
         return
+      } else if (isGeoMediaDataset(dataset)) {
+        if (this.panelStates[targetSlot]) this.panelStates[targetSlot].image = null
+        await this.startGeoMedia(dataset, targetRenderer, gen)
+        if (gen !== this.loadGeneration) return
       } else if (dataService.isImageDataset(dataset)) {
         const img = await loadImageDataset(dataset, targetRenderer, this.appState, this.isMobile, loaderCallbacks)
         if (gen !== this.loadGeneration) return
@@ -1705,6 +1792,7 @@ class InteractiveSphere {
 
     // Tear down the previous video/HLS on THIS slot
     this.cleanupPanelVideo(targetSlot)
+    this.stopGeoMedia()
 
     targetRenderer.removeCloudOverlay?.()
     targetRenderer.removeNightLights?.()
@@ -4301,6 +4389,7 @@ class InteractiveSphere {
    * Earth materials) behavior.
    */
   private async unloadAllPanels(): Promise<void> {
+    this.stopGeoMedia()
     this.detachPrimaryVideoSync()
     stopPlaybackLoop(this.playback)
     this.appState.isPlaying = false
@@ -4631,6 +4720,7 @@ class InteractiveSphere {
    * safe.
    */
   private teardownAllPanelResources(): void {
+    this.stopGeoMedia()
     this.detachPrimaryVideoSync()
     stopPlaybackLoop(this.playback)
     this.appState.isPlaying = false

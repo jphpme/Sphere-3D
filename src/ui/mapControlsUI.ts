@@ -20,10 +20,15 @@ export function updateMapControlsPosition(): void {
   const mapControls = document.getElementById('map-controls')
   if (!mapControls || mapControls.classList.contains('hidden')) return
 
-  const playback = document.getElementById('playback-controls')
+  // AYNI: a geo-media dataset's panel takes the playback bar's corner.
+  const playback = document.getElementById('geo-media-panel') ?? document.getElementById('playback-controls')
   if (playback && !playback.classList.contains('hidden')) {
-    const height = playback.offsetHeight
-    mapControls.style.bottom = `${height + 16}px`
+    // Measured from the panel's top edge, not its height: at phone
+    // width the geo-media panel sits up above the info panel's header.
+    const parent = mapControls.offsetParent?.getBoundingClientRect()
+    const top = playback.getBoundingClientRect().top
+    const above = parent ? parent.bottom - top : playback.offsetHeight + 12
+    mapControls.style.bottom = `${Math.round(above + 4)}px`
   } else {
     mapControls.style.bottom = '0.75rem'
   }

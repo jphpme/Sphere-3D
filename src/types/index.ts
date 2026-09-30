@@ -41,6 +41,8 @@ export type DatasetFormat =
   | 'image/jpg'
   | 'images/jpg'
   | 'tour/json'
+  // AYNI: places on the globe that each play something live (services/geoMedia.ts).
+  | 'geo-media/json'
 
 /**
  * Core dataset metadata from SOS API

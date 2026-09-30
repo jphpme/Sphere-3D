@@ -25,6 +25,7 @@ import { toDisplayUnits } from '../types/unit-scale'
 import { isLiveCadence, parseISO8601Duration, safePeriodMs } from '../utils/time'
 import { resolveDatasetRef } from '../utils/datasetUrl'
 import { logger } from '../utils/logger'
+import { geoMediaDatasets, isGeoMediaDataset, resolveGeoMediaCatalogOrigin, stripGeoMediaParam } from './geoMediaSwitch'
 import { reportError } from '../analytics'
 import { apiFetch, getCatalogSource, sampleToursEnabled } from './catalogSource'
 
@@ -644,6 +645,18 @@ async function fetchRealtimeDashIndex(): Promise<RealtimeDashIndex | null> {
   return null
 }
 
+/** The geo-media rows for this browser: none unless it holds the private switch. */
+async function fetchGeoMediaDatasets(): Promise<Dataset[]> {
+  try {
+    const origin = await resolveGeoMediaCatalogOrigin()
+    stripGeoMediaParam()
+    return origin ? geoMediaDatasets(origin) : []
+  } catch (error) {
+    logger.warn('[DataService] geo-media switch could not be read', error)
+    return []
+  }
+}
+
 /** One index row as a `Dataset`, given the URL the loader starts from. */
 function realtimeDashDataset(
   entry: RealtimeDashEntry,
@@ -882,9 +895,12 @@ export class DataService {
       // asset served alongside the SPA — so it is fetched once here and
       // merged into whichever catalog path runs below.
       const realtimeDashDatasets = await fetchRealtimeDashDatasets()
+      // AYNI: the geo-media datasets, only on a browser that was given
+      // their catalog (geoMediaSwitch).
+      const geoMedia = await fetchGeoMediaDatasets()
       if (source === 'node') {
         const datasets = await this.fetchDatasetsFromNode()
-        const allDatasets = [...realtimeDashDatasets, ...datasets]
+        const allDatasets = [...realtimeDashDatasets, ...geoMedia, ...datasets]
         this.cache = { datasets: allDatasets }
         this.cacheTime = now
         logger.info(`[DataService] Loaded ${allDatasets.length} datasets from node catalog + real-time DASH index`)
@@ -909,7 +925,7 @@ export class DataService {
       // Build enriched lookup map by normalized title
       this.enrichedMap = this.buildEnrichedMap(enrichedData)
 
-      const rawDatasets = [...realtimeDashDatasets, ...s3Response.data.datasets, ...sampleTourBuiltins()].map(
+      const rawDatasets = [...realtimeDashDatasets, ...geoMedia, ...s3Response.data.datasets, ...sampleTourBuiltins()].map(
         normaliseSourceFormat,
       )
 
@@ -1250,7 +1266,7 @@ export class DataService {
 
   /** Check whether a dataset's format is one we can render (video, image, or tour). */
   isSupportedDataset(dataset: Dataset): boolean {
-    return this.isVideoDataset(dataset) || this.isImageDataset(dataset) || this.isTourDataset(dataset)
+    return this.isVideoDataset(dataset) || this.isImageDataset(dataset) || this.isTourDataset(dataset) || isGeoMediaDataset(dataset)
   }
 
   /** True if the dataset format is a playable video or adaptive stream. */
