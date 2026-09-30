@@ -1638,6 +1638,48 @@ describe('immersive voice (VR/AR HUD)', () => {
     await vi.waitFor(() => expect(getImmersiveVoiceState()?.phase).toBe('idle'))
   })
 
+  it('goes back to thinking when speech is stopped while the reply is still streaming', async () => {
+    // Sentences are spoken as they arrive, so the stop tap can land
+    // before the model has finished — here the stream stays open after
+    // two sentences.
+    const { processMessage } = await import('../services/docentService')
+    let release: () => void = () => {}
+    vi.mocked(processMessage).mockImplementation(async function* () {
+      yield { type: 'delta' as const, text: 'El Niño warms the Pacific. It shifts rainfall worldwide.' }
+      await new Promise<void>((r) => { release = r })
+      yield { type: 'delta' as const, text: ' It also weakens the trade winds.' }
+      yield { type: 'done' as const, fallback: false }
+    })
+    let finish: () => void = () => {}
+    const spoken: string[] = []
+    const tts = fakeTts(spoken)
+    tts.speak = (text: string) => {
+      spoken.push(text)
+      return new Promise<void>((resolve) => { finish = resolve })
+    }
+    tts.cancel.mockImplementation(() => finish())
+    const stt = createFakeSttEngine({ provider: 'local', transcript: 'tell me about El Niño' })
+    const start = vi.spyOn(stt, 'start')
+    registerSttEngine(stt)
+    registerTtsEngine(tts)
+    initChatUI(makeCallbacks())
+
+    toggleImmersiveVoice()
+    await until(() => getImmersiveVoiceState()?.phase === 'speaking', 'Orbit speaking the first sentence')
+    toggleImmersiveVoice()
+    expect(tts.cancel).toHaveBeenCalled()
+    // Silenced, but the reply is still on its way: there is nothing
+    // left to stop, and a new question can't start yet either.
+    expect(getImmersiveVoiceState()?.phase).toBe('thinking')
+    toggleImmersiveVoice()
+    expect(getImmersiveVoiceState()?.phase).toBe('thinking')
+    expect(start).toHaveBeenCalledTimes(1)
+
+    release()
+    await until(() => getImmersiveVoiceState()?.phase === 'idle', 'the turn ended with the stream')
+    expect(spoken).toEqual(['El Niño warms the Pacific.'])
+  })
+
   it('keeps a HUD turn alive when the reply it interrupted finishes draining', async () => {
     // A panel reply is still being read aloud when the HUD mic is
     // tapped — asked in 2D, then entered VR while Orbit was talking.

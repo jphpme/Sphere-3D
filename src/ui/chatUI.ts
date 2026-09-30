@@ -133,7 +133,10 @@ let immersiveTurn = false
  */
 let immersiveTurnId = 0
 let immersivePhase: 'listening' | 'thinking' | 'speaking' = 'listening'
-/** Transcript while listening, the question while thinking, the sentence being spoken after. */
+/**
+ * Transcript while listening, the question while thinking, the sentence
+ * being spoken after — which stays up once the user stops the speech.
+ */
 let immersiveCaption = ''
 /** When the last immersive turn ended — its caption lingers briefly after. */
 let immersiveEndedAt = 0
@@ -998,8 +1001,14 @@ export function toggleImmersiveVoice(): void {
     return
   }
   if (immersiveTurn && immersivePhase === 'speaking') {
-    // The turn ends when the cancelled speech drains (handleSend's ttsChain.finally).
     stopSpeaking()
+    // Sentences are spoken as they stream in, so the stop can land
+    // before the reply has finished. Nothing more of it will be spoken,
+    // but it can't be recalled either: the HUD is back to thinking until
+    // the stream closes and handleSend ends the turn. Once it has
+    // closed, the stop is the end of the turn.
+    if (isStreaming) immersivePhase = 'thinking'
+    else finishImmersiveTurn(immersiveTurnId)
     return
   }
   if (isStreaming) return
