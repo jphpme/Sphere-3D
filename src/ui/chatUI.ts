@@ -975,8 +975,9 @@ function pumpSpeech(fullText: string, final: boolean): void {
     ttsChain = ttsChain.then(() => {
       if (!(speakingActive && session === ttsSessionId)) return undefined
       speechAhead.shift()
+      const speaking = engine.speak(sentence, opts)
       prefetchSpeech(engine, opts)
-      return engine.speak(sentence, opts)
+      return speaking
     })
   }
   spokenChunkCount = Math.max(spokenChunkCount, upto)
@@ -998,6 +999,12 @@ function pumpSpeech(fullText: string, final: boolean): void {
 let speechAhead: string[] = []
 const SPEECH_LOOKAHEAD = 2
 
+/**
+ * Hand the lookahead to the engine. When a sentence starts, call this
+ * after `engine.speak()`: `speak()` takes that sentence out of the
+ * engine's prepared set, so the lookahead never needs room for it on
+ * top of its own {@link SPEECH_LOOKAHEAD}.
+ */
 function prefetchSpeech(engine: TtsEngine, opts: TtsSpeakOptions): void {
   if (!engine.prefetch) return
   for (const sentence of speechAhead.slice(0, SPEECH_LOOKAHEAD)) engine.prefetch(sentence, opts)
@@ -1058,8 +1065,9 @@ function speakMessage(text: string): void {
     chain = chain.then(() => {
       if (!(speakingActive && session === ttsSessionId)) return undefined
       speechAhead.shift()
+      const speaking = engine.speak(sentence, opts)
       prefetchSpeech(engine, opts)
-      return engine.speak(sentence, opts)
+      return speaking
     })
   }
   ttsChain = chain.then(() => { if (speakingActive && session === ttsSessionId) setStopSpeakingVisible(false) })
