@@ -478,9 +478,9 @@ describe('annual axis (CMIP6 projections)', () => {
 // whole hours so every frame starts inside its own month.
 describe('monthly axis', () => {
   const cadenceMs = 2_629_746 * 1000
-  // MODIS burned area, Jan 2001 – Feb 2024: 18 h is the smallest whole-hour
-  // shift that keeps all 278 frames inside their months.
-  const startMs = Date.parse('2001-01-01T18:00:00Z')
+  // MODIS burned area, Jan 2001 – Feb 2024, as its built .dsa declares it: the
+  // builder rounds the largest lag up to whole hours and adds one (19 h).
+  const startMs = Date.parse('2001-01-01T19:00:00Z')
   const frames = 278
   const endMs = startMs + frames * cadenceMs
   const frameMs = (i: number) => startMs + i * cadenceMs

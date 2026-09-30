@@ -201,7 +201,7 @@ describe('describeStreamForDocent — a monthly record', () => {
     title: { en: 'Burned Area (MODIS), monthly' },
     type: 'stream',
     timeEnabled: true,
-    timeRange: { start: '2001-01-01T18:00:00Z', end: '2024-03-03T04:49:48Z' },
+    timeRange: { start: '2001-01-01T19:00:00Z', end: '2024-03-03T05:49:48Z' },
     timeRangeEndMode: 'exclusive',
     timeTotalFrames: 278,
     timeCadenceSeconds: 2_629_746,
