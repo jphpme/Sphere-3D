@@ -75,12 +75,21 @@ const BUTTON_LAYOUT = {
 /**
  * The caption strip under the HUD that carries Orbit's side of a voice
  * turn. A child of the HUD mesh, so it follows the HUD through
- * placement and hides with it during the loading scene; `hitTest`
- * raycasts the HUD non-recursively, so it never intercepts a tap.
+ * placement and hides with it during the loading scene. It has no
+ * buttons: `vrInteraction` raycasts it on its own (the HUD raycast is
+ * non-recursive, and `hitTest` only knows the bar's UVs) and lets a
+ * tap on a visible caption stop there.
  */
 const CAPTION_HEIGHT = 0.1125
 const CAPTION_GAP = 0.01
 const CAPTION_CANVAS_HEIGHT = 192
+
+/**
+ * How far the caption strip reaches below the bar's bottom edge.
+ * `vrSession` hangs the tour-control strip this much further down the
+ * HUD's plane so the two never share the space under the bar.
+ */
+export const HUD_CAPTION_DROP = CAPTION_GAP + CAPTION_HEIGHT
 
 export type VrHudAction = 'play-pause' | 'mute' | 'voice' | 'browse' | 'exit-vr'
 
@@ -184,6 +193,13 @@ export function voiceCaption(voice: VrVoiceState | null | undefined): { label: s
 export interface VrHudHandle {
   /** The Three.js mesh — add to the scene, no further handling needed. */
   readonly mesh: THREE.Mesh
+  /**
+   * The caption strip — a child of {@link mesh}, visible only while a
+   * voice turn has something to say. Exposed so `vrInteraction` can
+   * stop a ray on it: it is drawn over whatever is behind it, and a
+   * tap there must not press something the user can't see.
+   */
+  readonly captionMesh: THREE.Mesh
   /** Update visible state. Triggers a canvas redraw. */
   setState(state: VrHudState): void
   /**
@@ -606,6 +622,7 @@ export function createVrHud(THREE_: typeof THREE): VrHudHandle {
 
   return {
     mesh,
+    captionMesh,
 
     setState(state) {
       const changed =
