@@ -143,21 +143,34 @@ function utc(isoOrMs: string | number): string {
 
 /**
  * A frame's instant as the docent should say it. An annual stream's
- * frames stand for years: the day and time of each are where the
- * publisher put the origin, not data (see
- * timelineTrackCanvas.isAnnualCadence), so they are given as years.
+ * frames stand for years, and a monthly stream's for months: the day
+ * and time of each are where the publisher put the origin, not data
+ * (see timelineTrackCanvas.isAnnualCadence and isMonthlyCadence, whose
+ * bounds these are), so they are given as "2075" and "Feb 2024".
  */
 function frameStamp(timeline: DsaTimeline, ms: number): string {
-  return timeline.cadenceMs >= 365 * 86_400_000 ? String(new Date(ms).getUTCFullYear()) : utc(ms)
+  if (timeline.cadenceMs >= 365 * 86_400_000) return String(new Date(ms).getUTCFullYear())
+  if (timeline.cadenceMs >= 28 * 86_400_000) {
+    return new Date(ms).toLocaleDateString('en-US', { month: 'short', year: 'numeric', timeZone: 'UTC' })
+  }
+  return utc(ms)
 }
 
-/** 900 000 ms → "15 minutes"; 86 400 000 → "1 day"; a mean Gregorian year → "1 year". */
+/** 900 000 ms → "15 minutes"; 86 400 000 → "1 day"; a mean Gregorian month → "1 month", year → "1 year". */
 export function describeCadence(ms: number): string {
   // Annual streams step by the mean Gregorian year (31 556 952 s), which
   // is no whole number of days: it would otherwise read "31556952 seconds".
   if (ms >= 365 * 86_400_000) {
     const years = Math.round((ms / (365.2425 * 86_400_000)) * 10) / 10
     return `${years} year${years === 1 ? '' : 's'}`
+  }
+  // Monthly streams step by the mean Gregorian month (2 629 746 s), for
+  // the same reason; a calendar month of 28 to 31 days is one month too.
+  if (ms >= 28 * 86_400_000) {
+    const exact = ms / ((365.2425 * 86_400_000) / 12)
+    const whole = Math.round(exact)
+    const months = Math.abs(exact - whole) < 0.1 ? whole : Math.round(exact * 10) / 10
+    return `${months} month${months === 1 ? '' : 's'}`
   }
   const units: Array<[number, string]> = [
     [86_400_000, 'day'],

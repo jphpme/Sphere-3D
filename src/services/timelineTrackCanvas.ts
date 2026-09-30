@@ -117,6 +117,26 @@ export function formatYear(ms: number): string {
   return String(new Date(ms).getUTCFullYear())
 }
 
+/** The mean Gregorian month (2 629 746 s) — the cadence monthly streams declare. */
+const MONTH = YEAR / 12
+
+/**
+ * An axis whose frames are a month to under a year apart is read by
+ * month, for the same reason an annual one is read by year: its origin
+ * is moved so each frame starts inside its own month (monthly ERA5,
+ * CAMS, burned area and sea level step by the mean month), so the day
+ * and time of a frame are that offset, not data. The bounds are the
+ * desktop apps' (`labelFormatForCadence`): 28 days to under 365.
+ */
+export function isMonthlyCadence(cadenceMs: number): boolean {
+  return cadenceMs >= 28 * DAY && cadenceMs < 365 * DAY
+}
+
+/** `Feb 2024`: the UTC month of an instant, as the desktop apps write it. */
+export function formatMonth(ms: number): string {
+  return new Date(ms).toLocaleDateString('en-US', { month: 'short', year: 'numeric', timeZone: 'UTC' })
+}
+
 /**
  * The VR strip's original pixel geometry, kept as the numerator of every
  * fraction below. Writing 118/220 rather than 0.536 is deliberate: a
@@ -241,8 +261,12 @@ export const TICK_INTERVALS_MS: readonly number[] = [
  * counting years in milliseconds from 1970 drifts about a quarter of a
  * day a year off the calendar, and a year-only label must name the year
  * its tick is actually in.
+ *
+ * On a monthly axis (pass its cadence), steps under a year land on the
+ * 1st of every Nth month for the same reason: a multiple of 30 days
+ * from the epoch names some months twice and skips others.
  */
-export function tickTimesFor(startMs: number, endMs: number, intervalMs: number): number[] {
+export function tickTimesFor(startMs: number, endMs: number, intervalMs: number, cadenceMs = 0): number[] {
   const spanMs = endMs - startMs
   const times: number[] = []
   const push = (ms: number) => {
@@ -254,6 +278,17 @@ export function tickTimesFor(startMs: number, endMs: number, intervalMs: number)
     const firstYear = Math.ceil(new Date(startMs).getUTCFullYear() / everyYears) * everyYears
     for (let year = firstYear; ; year += everyYears) {
       const ms = Date.UTC(year, 0, 1)
+      if (ms >= endMs) break
+      push(ms)
+    }
+    return times
+  }
+  if (isMonthlyCadence(cadenceMs)) {
+    const everyMonths = Math.max(1, Math.round(intervalMs / MONTH))
+    const start = new Date(startMs)
+    const startIndex = start.getUTCFullYear() * 12 + start.getUTCMonth()
+    for (let index = Math.ceil(startIndex / everyMonths) * everyMonths; ; index += everyMonths) {
+      const ms = Date.UTC(Math.floor(index / 12), index % 12, 1)
       if (ms >= endMs) break
       push(ms)
     }
@@ -366,6 +401,13 @@ export function formatCadenceShort(cadenceMs: number): string {
     const years = Math.round((cadenceMs / YEAR) * 10) / 10
     return String(years) + 'y'
   }
+  if (isMonthlyCadence(cadenceMs)) {
+    // "1mo", not "30.4d", for the same reason. A calendar month (28–31
+    // days) is one month too.
+    const months = cadenceMs / MONTH
+    const whole = Math.round(months)
+    return String(Math.abs(months - whole) < 0.1 ? whole : Math.round(months * 10) / 10) + 'mo'
+  }
   const days = cadenceMs / DAY
   return String(Number.isInteger(days) ? days : days.toFixed(1)) + 'd'
 }
@@ -396,10 +438,13 @@ export function formatTickDate(ms: number, spanMs: number): string {
  * The ends are their own case: their step is the whole span, so a six-hour
  * axis labels its ends with times for the same reason.
  */
-export function formatAxisLabel(ms: number, stepMs: number, spanMs: number): string {
+export function formatAxisLabel(ms: number, stepMs: number, spanMs: number, cadenceMs = 0): string {
   // A tick every year or more sits on January 1 (`tickTimesFor`): the
   // year is the whole of what it says.
   if (stepMs >= 365 * DAY && stepMs < spanMs) return formatYear(ms)
+  // On a monthly axis a shorter step sits on the 1st of a month, and the
+  // month is what it says, however short the axis.
+  if (isMonthlyCadence(cadenceMs)) return formatMonth(ms)
   if (stepMs < DAY) {
     return new Date(ms).toLocaleString('en-US', {
       month: 'short',
@@ -415,10 +460,12 @@ export function formatAxisLabel(ms: number, stepMs: number, spanMs: number): str
 
 /**
  * An end of the axis: the span is the step. See {@link formatAxisLabel}.
- * An annual axis is labelled by year; pass its cadence.
+ * An annual axis is labelled by year and a monthly one by month; pass
+ * its cadence.
  */
 export function formatAxisEndLabel(ms: number, spanMs: number, cadenceMs = 0): string {
   if (isAnnualCadence(cadenceMs)) return formatYear(ms)
+  if (isMonthlyCadence(cadenceMs)) return formatMonth(ms)
   return formatAxisLabel(ms, spanMs, spanMs)
 }
 
@@ -426,18 +473,23 @@ export function formatAxisEndLabel(ms: number, spanMs: number, cadenceMs = 0): s
  * The instant the axis's right-hand label names. The axis ends where its
  * last frame's cell does; on an annual axis that is early in the year
  * *after* the last frame (1950–2100 ends at 2101-01-02), so it names the
- * last frame instead — "2100", the year the data runs to.
+ * last frame instead — "2100", the year the data runs to. A monthly
+ * axis does the same: it ends early in the month after its last frame.
  */
 function axisEndLabelMs(state: TimelineTrackState): number {
-  return isAnnualCadence(state.cadenceMs) ? state.endMs - state.cadenceMs : state.endMs
+  return isAnnualCadence(state.cadenceMs) || isMonthlyCadence(state.cadenceMs)
+    ? state.endMs - state.cadenceMs
+    : state.endMs
 }
 
 /** The instant a playhead label shows: the date alone on a daily axis,
  *  date and time when the cadence is sub-daily (a bare date at 15-minute
  *  steps is useless). */
 export function formatPlayheadLabel(ms: number, cadenceMs: number): string {
-  // A frame of an annual stream stands for its year. See isAnnualCadence.
+  // A frame of an annual stream stands for its year, and one of a
+  // monthly stream for its month. See isAnnualCadence, isMonthlyCadence.
   if (isAnnualCadence(cadenceMs)) return formatYear(ms)
+  if (isMonthlyCadence(cadenceMs)) return formatMonth(ms)
   const date = new Date(ms)
   return cadenceMs < DAY
     ? date.toLocaleString('en-US', {
@@ -516,7 +568,8 @@ export function drawTimelineTrack(
     // range, so the form degrades before anything is dropped.
     let startW = ctx.measureText(startLabel).width
     let endW = ctx.measureText(endLabel).width
-    if (!isAnnualCadence(state.cadenceMs) && 0.03 * w + startW + labelGapPx(w) > 0.97 * w - endW) {
+    const byPeriod = isAnnualCadence(state.cadenceMs) || isMonthlyCadence(state.cadenceMs)
+    if (!byPeriod && 0.03 * w + startW + labelGapPx(w) > 0.97 * w - endW) {
       startLabel = formatTickDate(state.startMs, spanMs)
       endLabel = formatTickDate(state.endMs, spanMs)
       startW = ctx.measureText(startLabel).width
@@ -574,7 +627,7 @@ export function drawTimelineTrack(
   // drops its tick line: the marks carry the rhythm, the text carries the
   // reading, and only the second one may go.
   const interval = chooseTickIntervalMs(spanMs, tickBudgetForWidth(w))
-  const tickTimes = tickTimesFor(state.startMs, state.endMs, interval)
+  const tickTimes = tickTimesFor(state.startMs, state.endMs, interval, state.cadenceMs)
 
   /** Sentinels for the two end labels, which are not ticks. */
   const END_START = -1
@@ -585,7 +638,7 @@ export function drawTimelineTrack(
 
   ctx.font = String(geometry.tickFontPx) + 'px ' + MONO
   const tickX = (ms: number): number => bar.x + ((ms - state.startMs) / spanMs) * bar.w
-  const tickLabel = (ms: number): string => formatAxisLabel(ms, interval, spanMs)
+  const tickLabel = (ms: number): string => formatAxisLabel(ms, interval, spanMs, state.cadenceMs)
   const boxes: TimelineLabelBox[] = tickTimes.map((ms, index) => {
     const half = ctx.measureText(tickLabel(ms)).width / 2
     const x = tickX(ms)

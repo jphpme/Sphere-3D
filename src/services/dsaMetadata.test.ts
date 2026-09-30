@@ -104,6 +104,13 @@ describe('describeCadence', () => {
   it('names a mean Gregorian year as a year, not 31556952 seconds', () => {
     expect(describeCadence(31_556_952_000)).toBe('1 year')
   })
+
+  it('names a mean Gregorian month as a month, not 2629746 seconds', () => {
+    expect(describeCadence(2_629_746_000)).toBe('1 month')
+    expect(describeCadence(3 * 2_629_746_000)).toBe('3 months')
+    // A week is still days.
+    expect(describeCadence(7 * 86_400_000)).toBe('7 days')
+  })
 })
 
 describe('describeStreamForDocent', () => {
@@ -182,5 +189,29 @@ describe('describeStreamForDocent — an annual projection', () => {
     expect(text).toContain('Time coverage: 1950 to 2100 — one frame every 1 year, 151 frames')
     expect(text).toContain('Frame on screen: 2075')
     expect(text).not.toMatch(/Frame on screen: 2075-/)
+  })
+})
+
+describe('describeStreamForDocent — a monthly record', () => {
+  // A month per frame from an origin moved inside its month, so the day
+  // and time of a frame are not data.
+  const BURNED_AREA = {
+    schemaVersion: '1.7',
+    id: 'modis-burned-area-monthly',
+    title: { en: 'Burned Area (MODIS), monthly' },
+    type: 'stream',
+    timeEnabled: true,
+    timeRange: { start: '2001-01-01T18:00:00Z', end: '2024-03-03T04:49:48Z' },
+    timeRangeEndMode: 'exclusive',
+    timeTotalFrames: 278,
+    timeCadenceSeconds: 2_629_746,
+    videoFrameRate: 12,
+  }
+
+  it('gives the coverage and the frame on screen as months', () => {
+    const text = describeStreamForDocent(parseDsaMetadata(BURNED_AREA), timeline(BURNED_AREA), 277)
+    expect(text).toContain('Time coverage: Jan 2001 to Feb 2024 — one frame every 1 month, 278 frames')
+    expect(text).toContain('Frame on screen: Feb 2024')
+    expect(text).not.toMatch(/Frame on screen: 2024-/)
   })
 })

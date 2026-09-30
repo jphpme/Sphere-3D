@@ -13,6 +13,7 @@ import {
   formatCadenceShort,
   formatPlayheadLabel,
   isAnnualCadence,
+  isMonthlyCadence,
   tickTimesFor,
   formatTickDate,
   progressAtCanvasX,
@@ -469,5 +470,86 @@ describe('annual axis (CMIP6 projections)', () => {
     const start = Date.parse('2026-08-18T00:00:00Z')
     const ticks = tickTimesFor(start, start + 30 * DAY, 7 * DAY)
     for (const ms of ticks) expect(ms % (7 * DAY)).toBe(0)
+  })
+})
+
+// Monthly releases (ERA5, CAMS, MODIS burned area, sea level): one frame per
+// month, stepped by the mean Gregorian month from an origin moved forward
+// whole hours so every frame starts inside its own month.
+describe('monthly axis', () => {
+  const cadenceMs = 2_629_746 * 1000
+  // MODIS burned area, Jan 2001 – Feb 2024: 18 h is the smallest whole-hour
+  // shift that keeps all 278 frames inside their months.
+  const startMs = Date.parse('2001-01-01T18:00:00Z')
+  const frames = 278
+  const endMs = startMs + frames * cadenceMs
+  const frameMs = (i: number) => startMs + i * cadenceMs
+  const monthName = (i: number) =>
+    new Date(Date.UTC(2001, i, 1)).toLocaleDateString('en-US', { month: 'short', year: 'numeric', timeZone: 'UTC' })
+
+  it('reads a month-to-under-a-year cadence as monthly', () => {
+    expect(isMonthlyCadence(cadenceMs)).toBe(true)
+    expect(isMonthlyCadence(28 * DAY)).toBe(true)
+    expect(isMonthlyCadence(3 * cadenceMs)).toBe(true)
+    expect(isMonthlyCadence(27 * DAY)).toBe(false)
+    expect(isMonthlyCadence(7 * DAY)).toBe(false)
+    expect(isMonthlyCadence(365 * DAY)).toBe(false)
+  })
+
+  it('labels every frame by its own month, not by a day the origin falls on', () => {
+    expect(formatPlayheadLabel(frameMs(0), cadenceMs)).toBe('Jan 2001')
+    expect(formatPlayheadLabel(frameMs(277), cadenceMs)).toBe('Feb 2024')
+    for (let i = 0; i < frames; i++) expect(formatPlayheadLabel(frameMs(i), cadenceMs)).toBe(monthName(i))
+  })
+
+  it('names the step in months', () => {
+    expect(formatCadenceShort(cadenceMs)).toBe('1mo')
+    expect(formatCadenceShort(3 * cadenceMs)).toBe('3mo')
+    expect(formatCadenceShort(30 * DAY)).toBe('1mo')
+    // Weekly and daily steps are still days.
+    expect(formatCadenceShort(7 * DAY)).toBe('7d')
+  })
+
+  it('labels the axis ends as months, the right one by the last frame', () => {
+    expect(formatAxisEndLabel(startMs, endMs - startMs, cadenceMs)).toBe('Jan 2001')
+    // The axis ends early in March 2024; the data runs to February.
+    expect(formatAxisEndLabel(endMs - cadenceMs, endMs - startMs, cadenceMs)).toBe('Feb 2024')
+  })
+
+  it('ticks a long monthly axis by calendar year', () => {
+    const interval = chooseTickIntervalMs(endMs - startMs, 7)
+    const ticks = tickTimesFor(startMs, endMs, interval, cadenceMs)
+    expect(ticks.length).toBeGreaterThan(0)
+    expect(ticks.length).toBeLessThanOrEqual(7)
+    for (const ms of ticks) {
+      expect(new Date(ms).toISOString().slice(4)).toBe('-01-01T00:00:00.000Z')
+      expect(formatAxisLabel(ms, interval, endMs - startMs, cadenceMs)).toBe(String(new Date(ms).getUTCFullYear()))
+    }
+  })
+
+  it('ticks a short monthly axis on the 1st of a month, each named once', () => {
+    // 18 months from Jan 2024.
+    const start = Date.parse('2024-01-02T08:00:00Z')
+    const end = start + 18 * cadenceMs
+    const interval = chooseTickIntervalMs(end - start, 7)
+    expect(interval).toBeLessThan(365 * DAY)
+    const ticks = tickTimesFor(start, end, interval, cadenceMs)
+    expect(ticks.length).toBeGreaterThan(1)
+    for (const ms of ticks) {
+      const d = new Date(ms)
+      expect(d.getUTCDate()).toBe(1)
+      expect(d.getUTCHours()).toBe(0)
+    }
+    const labels = ticks.map(ms => formatAxisLabel(ms, interval, end - start, cadenceMs))
+    expect(new Set(labels).size).toBe(labels.length)
+    for (const label of labels) expect(label).toMatch(/^[A-Z][a-z]{2} 20\d\d$/)
+  })
+
+  it('leaves a daily axis of the same length on its old ticks', () => {
+    const start = Date.parse('2026-04-10T00:00:00Z')
+    const end = start + 170 * DAY
+    const interval = chooseTickIntervalMs(end - start, 7)
+    expect(tickTimesFor(start, end, interval, DAY)).toEqual(tickTimesFor(start, end, interval))
+    expect(formatPlayheadLabel(start, DAY)).toBe('Apr 10, 2026')
   })
 })
