@@ -23,6 +23,7 @@ export function updateMapControlsPosition(): void {
   // AYNI: a geo-media dataset's panel takes the playback bar's corner.
   const playback = document.getElementById('geo-media-panel') ?? document.getElementById('playback-controls')
   if (playback && !playback.classList.contains('hidden')) {
+    watchSize(playback)
     // Measured from the panel's top edge, not its height: at phone
     // width the geo-media panel sits up above the info panel's header.
     const parent = mapControls.offsetParent?.getBoundingClientRect()
@@ -32,4 +33,17 @@ export function updateMapControlsPosition(): void {
   } else {
     mapControls.style.bottom = '0.75rem'
   }
+}
+
+const watched = new WeakSet<Element>()
+
+/**
+ * The bar grows after it is shown — the date track arrives once the
+ * stream's `.dsa` has loaded, a cam's picture opens the geo-media panel —
+ * so the offset follows its size, not only the calls that show it.
+ */
+function watchSize(panel: Element): void {
+  if (watched.has(panel) || typeof ResizeObserver === 'undefined') return
+  watched.add(panel)
+  new ResizeObserver(() => updateMapControlsPosition()).observe(panel)
 }

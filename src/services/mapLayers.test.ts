@@ -9,6 +9,7 @@ import {
   withBordersChoice,
   fetchLayerCatalog,
   resetLayerCatalog,
+  streamHostLayers,
   type CatalogLayer,
 } from './mapLayers'
 
@@ -52,14 +53,14 @@ describe('defaultLayers', () => {
     })
   })
 
-  it('prefers published white country borders once the catalog has them, as published', () => {
+  it('prefers "Country Borders (black)", the one the rule names, drawn as published', () => {
     const withBorders = [
       ...LIVE,
-      { id: 'builtin-noaa-country-borders-black', title: 'Country Borders (black)', kind: 'overlay' as const, url: '/x' },
       { id: 'builtin-noaa-country-borders-white', title: 'Country Borders (white)', kind: 'overlay' as const, url: '/y' },
+      ...streamHostLayers('https://streams.example/'),
     ]
     expect(defaultLayers(withBorders, { streamed: true, transparent: false, coverage: null }).overlays)
-      .toEqual([{ id: 'builtin-noaa-country-borders-white', tint: 'source' }])
+      .toEqual([{ id: 'stream-country-borders-black', tint: 'source' }])
   })
 
   it('never adds borders to a catalog picture or a plain video, opaque or not', () => {
@@ -134,5 +135,30 @@ describe('fetchLayerCatalog', () => {
   it('is empty, not an error, when the endpoint is missing', async () => {
     const fetchImpl = vi.fn(async () => new Response('', { status: 503 }))
     expect(await fetchLayerCatalog(fetchImpl as unknown as typeof fetch)).toEqual([])
+  })
+
+  it('lists the stream host\'s borders after the catalog, and alone when the catalog is down', async () => {
+    vi.stubEnv('VITE_REALTIME_DASH_BASE_URL', 'https://streams.example')
+    try {
+      const ok = vi.fn(async () => new Response(JSON.stringify({ layers: [LIVE[0]] }), { status: 200 }))
+      expect(await fetchLayerCatalog(ok as unknown as typeof fetch)).toEqual([LIVE[0], {
+        id: 'stream-country-borders-black',
+        title: 'Country Borders (black)',
+        kind: 'overlay',
+        url: 'https://streams.example/global/projection/shared/country_borders_black_v1.png',
+      }])
+      resetLayerCatalog()
+      const down = vi.fn(async () => { throw new TypeError('offline') })
+      expect((await fetchLayerCatalog(down as unknown as typeof fetch)).map(l => l.id)).toEqual(['stream-country-borders-black'])
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  })
+})
+
+describe('streamHostLayers', () => {
+  it('names nothing without a stream host', () => {
+    expect(streamHostLayers(undefined)).toEqual([])
+    expect(streamHostLayers('  ')).toEqual([])
   })
 })

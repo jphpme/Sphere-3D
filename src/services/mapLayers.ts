@@ -66,14 +66,15 @@ export const FULL_COVER = 0.999
 const PREFERRED_BASEMAP = 'builtin-nasa-relief-bathymetry'
 
 /**
- * The borders overlay to use, best first: a layer published as white
- * country borders, then any country borders, then the NASA reference
- * features (borders among them), then coastlines.
+ * The borders overlay to use, best first: "Country Borders (black)", the
+ * one the owner's rule names and the desktop apps tick, then any other
+ * country borders, then the NASA reference features (borders among
+ * them), then coastlines.
  */
 function pickBorders(layers: readonly CatalogLayer[]): CatalogLayer | null {
   const overlays = layers.filter(l => l.kind === 'overlay')
   const text = (l: CatalogLayer) => `${l.id} ${l.title}`.toLowerCase()
-  return overlays.find(l => /country[\s_-]*borders?/.test(text(l)) && /white/.test(text(l)))
+  return overlays.find(l => /country[\s_-]*borders?/.test(text(l)) && /black/.test(text(l)))
     ?? overlays.find(l => /country[\s_-]*borders?/.test(text(l)))
     ?? overlays.find(l => l.id === 'builtin-nasa-reference-features')
     ?? overlays.find(l => /coastline/.test(text(l)))
@@ -196,19 +197,43 @@ export function coverageOfPixels(rgba: Uint8ClampedArray | Uint8Array, lut: Uint
 
 let catalogPromise: Promise<CatalogLayer[]> | null = null
 
-/** The catalog's layers, fetched once per session; empty when unavailable. */
+/** The id of the borders overlay the stream host shares (`streamHostLayers`). */
+export const STREAM_BORDERS_ID = 'stream-country-borders-black'
+
+/**
+ * The overlays the stream host publishes beside its streams, for every
+ * install that has the host configured: the "Country Borders (black)"
+ * the owner's rule names, the same 4096×2048 picture the desktop apps
+ * draw, served immutable and CORS-open at
+ * `global/projection/shared/country_borders_black_v1.png`. Listed
+ * whether or not the layer catalog answers, so a stream with no
+ * transparency gets its borders even where `/api/layers` is down.
+ */
+export function streamHostLayers(base: string | undefined = import.meta.env.VITE_REALTIME_DASH_BASE_URL as string | undefined): CatalogLayer[] {
+  const root = base?.trim()
+  if (!root) return []
+  return [{
+    id: STREAM_BORDERS_ID,
+    title: 'Country Borders (black)',
+    kind: 'overlay',
+    url: new URL('global/projection/shared/country_borders_black_v1.png', root.endsWith('/') ? root : `${root}/`).toString(),
+  }]
+}
+
+/** The catalog's layers plus the stream host's, fetched once per session; only the latter when the catalog is unavailable. */
 export function fetchLayerCatalog(fetchImpl: typeof fetch = fetch): Promise<CatalogLayer[]> {
   catalogPromise ??= (async () => {
+    let fromCatalog: CatalogLayer[] = []
     try {
       const res = await fetchImpl('/api/layers', { headers: { Accept: 'application/json' } })
-      if (!res.ok) return []
-      const body = await res.json() as { layers?: CatalogLayer[] }
-      return Array.isArray(body.layers)
-        ? body.layers.filter(l => l && typeof l.id === 'string' && typeof l.url === 'string' && (l.kind === 'basemap' || l.kind === 'overlay'))
-        : []
-    } catch {
-      return []
-    }
+      if (res.ok) {
+        const body = await res.json() as { layers?: CatalogLayer[] }
+        if (Array.isArray(body.layers)) {
+          fromCatalog = body.layers.filter(l => l && typeof l.id === 'string' && typeof l.url === 'string' && (l.kind === 'basemap' || l.kind === 'overlay'))
+        }
+      }
+    } catch { /* the stream host's layers still stand */ }
+    return [...fromCatalog, ...streamHostLayers()]
   })()
   return catalogPromise
 }
