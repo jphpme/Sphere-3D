@@ -17,6 +17,7 @@ import {
   type VoiceCapabilities,
 } from './voiceService'
 import { createWsStreamingSttEngine, __resetWsStreamingDisabled, type WsLike } from './voiceWsStreaming'
+import { logger } from '../utils/logger'
 import { until } from '../test-utils'
 
 const ALL_CAPS: VoiceCapabilities = {
@@ -301,6 +302,30 @@ describe('cloud TTS', () => {
       await speaking
 
       expect(fetchMock).toHaveBeenCalledTimes(1)
+    })
+
+    it('does not report a Stop during the body download as a parse failure', async () => {
+      const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {})
+      // The headers have arrived; the body fails the way a real one does
+      // when its request is aborted mid-download.
+      let body: Promise<unknown> | null = null
+      const fetchMock = vi.fn(async (_url: string, init: RequestInit) => ({
+        ok: true,
+        status: 200,
+        json: () => (body = new Promise((_resolve, reject) => {
+          init.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))
+        })),
+      }) as unknown as Response)
+      vi.stubGlobal('fetch', fetchMock)
+
+      cloudTtsEngine.prefetch!('Later.', { lang: 'en' })
+      await until(() => body !== null, 'the body download')
+      cloudTtsEngine.cancel()
+      // The engine was waiting on `body` first, so its handler has run
+      // by the time this one has.
+      await body!.catch(() => {})
+
+      expect(warn).not.toHaveBeenCalled()
     })
   })
 })

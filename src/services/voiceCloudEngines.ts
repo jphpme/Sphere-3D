@@ -135,6 +135,8 @@ async function synthesize(text: string, lang: string, signal: AbortSignal): Prom
       const data = await res.json() as { audio?: string; format?: string }
       return data.audio ?? null
     } catch (err) {
+      // Stopped while the body was still downloading: not a bad response.
+      if (signal.aborted) return null
       logger.warn('[voice] cloud TTS response parse failed', err)
       return null
     }
