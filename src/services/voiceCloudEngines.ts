@@ -65,6 +65,12 @@ function noteKill(res: Response, code: string | undefined): void {
 // ---------------------------------------------------------------------------
 
 let currentAudio: HTMLAudioElement | null = null
+/**
+ * The request for the sentence `speak()` is waiting on. A prefetched
+ * sentence leaves the map below when its turn comes, so this is how
+ * `cancel()` still reaches its request.
+ */
+let currentRequest: AbortController | null = null
 
 /**
  * Bumped by `cancel()`. A `speak()` whose synthesis was in flight when
@@ -82,7 +88,10 @@ let ttsGeneration = 0
  * it, the next sentence synthesizes while the current one plays.
  */
 const prefetched = new Map<string, { audio: Promise<string | null>; abort: AbortController }>()
-/** Upper bound on requests started ahead — a cancelled reply wastes at most this many. */
+/**
+ * Upper bound on requests started ahead — a cancelled reply abandons at
+ * most this many, plus the one for the sentence `speak()` is waiting on.
+ */
 const MAX_PREFETCHED = 3
 /** Retry a transient upstream failure once; only a gateway-class status is worth it. */
 const RETRYABLE_STATUS = new Set([500, 502, 504])
@@ -96,12 +105,14 @@ const prefetchKey = (text: string, lang: string): string => `${lang}\u0000${text
  * reject the chain and wedge the Stop-speaking UI). One retry on a
  * gateway error or a dropped connection: the endpoint answers 502 on a
  * transient Workers AI failure, and without the retry that sentence is
- * silently skipped mid-reply.
+ * silently skipped mid-reply. Not once `signal` is aborted, though: a
+ * retry after Stop would be a second billed synthesis for audio nobody
+ * will hear.
  */
-async function synthesize(text: string, lang: string, signal?: AbortSignal): Promise<string | null> {
+async function synthesize(text: string, lang: string, signal: AbortSignal): Promise<string | null> {
   for (let attempt = 0; attempt < 2; attempt++) {
-    if (attempt > 0) await new Promise((r) => setTimeout(r, RETRY_DELAY_MS))
-    if (signal?.aborted) return null
+    if (attempt > 0) await retryPause(signal)
+    if (signal.aborted) return null
     let res: Response
     try {
       res = await fetch(SYNTHESIZE_URL, {
@@ -111,7 +122,7 @@ async function synthesize(text: string, lang: string, signal?: AbortSignal): Pro
         signal,
       })
     } catch (err) {
-      if (signal?.aborted) return null
+      if (signal.aborted) return null
       logger.warn('[voice] cloud TTS request failed', err)
       continue
     }
@@ -129,6 +140,20 @@ async function synthesize(text: string, lang: string, signal?: AbortSignal): Pro
     }
   }
   return null
+}
+
+/**
+ * The pause before the retry. It ends early when the request is aborted,
+ * so a stopped `speak()` settles at once instead of sitting out the
+ * delay — the chat's TTS chain, and the dataset audio it keeps ducked,
+ * wait on it.
+ */
+function retryPause(signal: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve) => {
+    if (signal.aborted) { resolve(); return }
+    const timer = setTimeout(resolve, RETRY_DELAY_MS)
+    signal.addEventListener('abort', () => { clearTimeout(timer); resolve() }, { once: true })
+  })
 }
 
 function playDataUrl(url: string): Promise<void> {
@@ -162,7 +187,10 @@ export const cloudTtsEngine: TtsEngine = {
     const key = prefetchKey(text, opts.lang)
     const ahead = prefetched.get(key)
     prefetched.delete(key)
-    const audio = await (ahead?.audio ?? synthesize(text, opts.lang))
+    const abort = ahead?.abort ?? new AbortController()
+    currentRequest = abort
+    const audio = await (ahead?.audio ?? synthesize(text, opts.lang, abort.signal))
+    if (currentRequest === abort) currentRequest = null
     // Stopped while this sentence was being synthesized: stay silent.
     if (!audio || generation !== ttsGeneration) return
     await playDataUrl(`data:audio/mpeg;base64,${audio}`)
@@ -178,6 +206,8 @@ export const cloudTtsEngine: TtsEngine = {
     ttsGeneration++
     currentAudio?.pause()
     currentAudio = null
+    currentRequest?.abort()
+    currentRequest = null
     for (const { abort } of prefetched.values()) abort.abort()
     prefetched.clear()
   },
