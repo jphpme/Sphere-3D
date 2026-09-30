@@ -191,7 +191,14 @@ export const cloudTtsEngine: TtsEngine = {
     prefetched.delete(key)
     const abort = ahead?.abort ?? new AbortController()
     currentRequest = abort
-    const audio = await (ahead?.audio ?? synthesize(text, opts.lang, abort.signal))
+    let audio = await (ahead?.audio ?? synthesize(text, opts.lang, abort.signal))
+    // A prefetch makes both of its attempts early, while the previous
+    // sentence plays. If both failed, ask again now that it is this
+    // sentence's turn rather than leave a gap in the reply — unless Stop
+    // was pressed or the server turned voice off in the meantime.
+    if (!audio && ahead && generation === ttsGeneration && !cloudVoiceDisabled) {
+      audio = await synthesize(text, opts.lang, abort.signal)
+    }
     if (currentRequest === abort) currentRequest = null
     // Stopped while this sentence was being synthesized: stay silent.
     if (!audio || generation !== ttsGeneration) return

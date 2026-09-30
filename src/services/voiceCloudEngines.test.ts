@@ -246,6 +246,34 @@ describe('cloud TTS', () => {
       expect(fetchMock).toHaveBeenCalledTimes(3)
     })
 
+    it('asks again at the sentence\'s turn when both prefetch attempts failed', async () => {
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(gatewayError())
+        .mockResolvedValueOnce(gatewayError())
+        .mockResolvedValueOnce(new Response(JSON.stringify({ audio: 'QUJD' }), { status: 200 }))
+      vi.stubGlobal('fetch', fetchMock)
+
+      // The prefetch uses up both failures before the sentence's turn...
+      cloudTtsEngine.prefetch!('Second.', { lang: 'en' })
+      await until(() => fetchMock.mock.calls.length === 2, 'the prefetch retry')
+      // ...and the service has recovered by the time it comes.
+      await cloudTtsEngine.speak('Second.', { lang: 'en' })
+
+      expect(fetchMock).toHaveBeenCalledTimes(3)
+      expect(played).toHaveLength(1)
+    })
+
+    it('does not ask again when the prefetch hit the kill switch', async () => {
+      const fetchMock = vi.fn(async () => new Response(JSON.stringify({ code: 'voice_disabled' }), { status: 503 }))
+      vi.stubGlobal('fetch', fetchMock)
+
+      cloudTtsEngine.prefetch!('Second.', { lang: 'en' })
+      await cloudTtsEngine.speak('Second.', { lang: 'en' })
+
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      expect(played).toEqual([])
+    })
+
     // Stop has to reach the sentence `speak()` is waiting on whether its
     // request was started ahead of time or by `speak()` itself.
     describe.each([
