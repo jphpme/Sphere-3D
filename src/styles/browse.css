@@ -384,8 +384,8 @@ body.browse-view-map .browse-title {
 /* Tag cloud clamp — the Category & content tag cloud collapses to a
    ~2-row preview so it can't push the dataset list off the panel.
    browseUI.ts measures the rendered row and applies `is-clamped`
-   (and shows the "Show more / Show fewer" toggle) only when the
-   chips really need more than 2 rows at the current width.
+   (and shows the "Show more / Show fewer" toggle) only when that
+   saves more room than the toggle takes at the current width.
    Desktop widths only: at ≤768px accessibility.css makes the row a
    single sideways-scrolling line with an edge fade, which is
    already compact and must not be overridden (this selector is more

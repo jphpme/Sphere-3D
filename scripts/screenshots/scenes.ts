@@ -295,7 +295,7 @@ export const scenes: Scene[] = [
   {
     name: 'browse-tag-cloud',
     description:
-      'Browse overlay with a long (48-tag) Category cloud — clamped to a 2-row preview with "Show more" on desktop, one sideways-scrolling row on phones',
+      'Browse overlay with a long (96-tag) Category cloud — clamped to a 2-row preview with "Show more" on desktop, one sideways-scrolling row on phones',
     // Same re-rolling hero as catalog-landing.
     masks: ['#hero-panel'],
     // Its own long catalog, so the other catalog scenes keep their

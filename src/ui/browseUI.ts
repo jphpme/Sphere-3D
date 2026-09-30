@@ -339,10 +339,10 @@ function renderChipGroup(
       return `<button type="button" class="browse-chip${isActive ? ' active' : ''}" data-facet="${escapeAttr(facet)}" data-value="${escapeAttr(o.value)}" aria-pressed="${isActive}">${escapeHtml(o.label)}</button>`
     })
     .join('')
-  const clamped = !!tagCloud && tagCloud.overflows && !tagCloud.expanded
+  const clamped = !!tagCloud && tagCloud.worthClamping && !tagCloud.expanded
   const rowAttrs = tagCloud ? ' data-tag-cloud' : ''
   const toggle = tagCloud
-    ? `<button type="button" class="browse-chip-rail-toggle${tagCloud.overflows ? '' : ' hidden'}" data-tag-cloud-toggle aria-expanded="${tagCloud.expanded}">${escapeHtml(tagCloudToggleLabel(tagCloud.expanded))}</button>`
+    ? `<button type="button" class="browse-chip-rail-toggle${tagCloud.worthClamping ? '' : ' hidden'}" data-tag-cloud-toggle aria-expanded="${tagCloud.expanded}">${escapeHtml(tagCloudToggleLabel(tagCloud.expanded))}</button>`
     : ''
   return `
     <div class="browse-filter-group">
@@ -359,15 +359,16 @@ function renderChipGroup(
  * the chips wrap to at the panel's current width), not on the chip
  * count, so `showBrowseUI` measures the rendered row after every
  * render and on resize and patches the clamp class and toggle in
- * place. `overflows` is the last measured answer, used so a re-render
- * paints the right state before it can be measured again.
+ * place. `worthClamping` is the last measured answer, used so a
+ * re-render paints the right state before it can be measured again.
  */
 interface TagCloudRender {
   /** Expanded past the 2-row preview (by the user, or at boot for
    *  an active category). */
   expanded: boolean
-  /** The chips need more than the 2-row preview. */
-  overflows: boolean
+  /** The 2-row preview hides enough of the chips to save more room
+   *  than its toggle takes up. */
+  worthClamping: boolean
 }
 
 /** Label for the tag cloud's toggle in the given state. */
@@ -952,11 +953,11 @@ export function showBrowseUI(
   // never leaves its selected chip in the clipped rows. The user's
   // own toggles win after that.
   let chipRailExpanded = countSectionActive('category', bootEffectiveState) > 0
-  // Last measured "the chips need more than 2 rows". Assumed true
+  // Last measured "clamping to 2 rows saves room". Assumed true
   // until the row is first laid out (a long cloud is the case the
   // clamp exists for), then kept from the latest measurement so a
   // re-render while the panel is hidden paints the last known state.
-  let tagCloudOverflows = true
+  let tagCloudWorthClamping = true
 
   // ----- Filter rail render -----
 
@@ -1020,7 +1021,7 @@ export function showBrowseUI(
         tagOptions,
         categoryActive,
         t('browse.filter.tags.aria'),
-        { expanded: chipRailExpanded, overflows: tagCloudOverflows },
+        { expanded: chipRailExpanded, worthClamping: tagCloudWorthClamping },
       ),
     ))
 
@@ -1098,15 +1099,24 @@ export function showBrowseUI(
   /**
    * Measure the Category tag cloud and patch its clamp in place.
    *
-   * The clamp is decided from the rendered row, not the chip count:
-   * with `is-clamped` applied, `scrollHeight` is the chips' full
-   * height and `clientHeight` is capped at the 2-row preview, so the
-   * cloud overflows exactly when the first exceeds the second. A wide
-   * panel that fits every chip in 2 rows gets no toggle and no fade;
-   * a narrow one with a dozen long tags does. At phone widths the
-   * clamp rule doesn't apply (accessibility.css keeps the row one
-   * sideways-scrolling line), so the heights match and the phone row
-   * is left alone.
+   * The clamp is decided from the rendered layout, not the chip
+   * count, and only when it pays for itself. Clamping hides the
+   * rows past the 2-row preview but adds the toggle's own line, so
+   * a cloud just over two rows would come out taller clamped than
+   * open. The filter group is therefore laid out both ways — clamped
+   * with its toggle, open without — and the clamp is kept only when
+   * it makes the group shorter by more than one chip's height.
+   * Comparing the two real heights counts the toggle's margin and
+   * the gaps without reading any CSS value, and follows the UI scale
+   * and font. Both layouts happen before the browser paints and the
+   * classes are settled right after, so nothing flickers and a
+   * focused toggle keeps its focus.
+   *
+   * A wide panel whose chips fit in two rows, or run only a little
+   * past them, gets no toggle and no fade; a narrow one with a dozen
+   * long tags does. At phone widths neither the clamp nor the toggle
+   * applies (accessibility.css keeps the row one sideways-scrolling
+   * line), so the two heights match and the phone row is left alone.
    *
    * Skips the measurement while the row isn't laid out (panel
    * hidden, Category section collapsed); the rail's ResizeObserver
@@ -1115,18 +1125,25 @@ export function showBrowseUI(
   function syncTagCloud(): void {
     const row = rail?.querySelector<HTMLElement>('[data-tag-cloud]')
     const toggle = rail?.querySelector<HTMLElement>('[data-tag-cloud-toggle]')
-    if (!row || !toggle) return
+    const group = row?.parentElement
+    if (!row || !toggle || !group) return
     if (row.clientWidth > 0) {
       row.classList.add('is-clamped')
-      tagCloudOverflows = row.scrollHeight > row.clientHeight + 1
+      toggle.classList.remove('hidden')
+      const clampedHeight = group.offsetHeight
+      row.classList.remove('is-clamped')
+      toggle.classList.add('hidden')
+      const saved = group.offsetHeight - clampedHeight
+      const chipHeight = row.querySelector<HTMLElement>('.browse-chip')?.offsetHeight ?? 0
+      tagCloudWorthClamping = saved > chipHeight
     }
-    row.classList.toggle('is-clamped', tagCloudOverflows && !chipRailExpanded)
+    row.classList.toggle('is-clamped', tagCloudWorthClamping && !chipRailExpanded)
     // Focus moving backwards into the clipped row (Shift+Tab from the
     // toggle) makes the browser scroll it to the last chip before
     // `focusin` expands the cloud, and that offset comes back with
     // the clamp. Every preview starts from the first row.
     if (row.classList.contains('is-clamped')) row.scrollTop = 0
-    toggle.classList.toggle('hidden', !tagCloudOverflows)
+    toggle.classList.toggle('hidden', !tagCloudWorthClamping)
     toggle.setAttribute('aria-expanded', String(chipRailExpanded))
     toggle.textContent = tagCloudToggleLabel(chipRailExpanded)
   }
