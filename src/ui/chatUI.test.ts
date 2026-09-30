@@ -1621,6 +1621,26 @@ describe('immersive voice (VR/AR HUD)', () => {
     expect(getImmersiveVoiceState(Date.now() + 60_000)?.phase).toBe('idle')
   })
 
+  it('can try again after an engine that fails inside start()', () => {
+    // The browser engine reports the error and ends before start()
+    // returns when `rec.start()` throws. The session it then hands back
+    // is already over, and must not be kept as the live one.
+    const start = vi.fn((opts: SttStartOptions) => {
+      opts.onError(new Error('not-allowed'))
+      opts.onEnd()
+      return { stop: () => {} }
+    })
+    registerSttEngine({ provider: 'local', supportsLanguage: () => true, isAvailable: () => true, start })
+    initChatUI(makeCallbacks())
+
+    toggleImmersiveVoice()
+    expect(getImmersiveVoiceState()?.phase).toBe('error')
+    toggleImmersiveVoice()
+    toggleImmersiveVoice()
+    expect(start).toHaveBeenCalledTimes(3)
+    expect(getImmersiveVoiceState()?.phase).toBe('error')
+  })
+
   it('stops speaking when the mic is tapped mid-reply', async () => {
     let finish: () => void = () => {}
     const tts = fakeTts([])

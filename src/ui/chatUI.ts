@@ -875,6 +875,11 @@ function startListening(): void {
   sttSuppressAutoSend = false
   let sawFinal = false
   let sttError = false
+  // An engine may end before start() returns — the browser engine does
+  // when `rec.start()` throws. The session it hands back is then
+  // already over; keeping it would leave both mics toggling a dead
+  // session until the page reloads.
+  let ended = false
   // The immersive turn this mic was opened for, if the HUD opened it.
   const turnId = immersiveTurnId
   const startedAt = Date.now()
@@ -882,7 +887,7 @@ function startListening(): void {
   const langBase = baseLanguage(lang)
   setMicListening(true)
   callbacks?.announce(t('chat.announce.voiceListening'))
-  sttSession = engine.start({
+  const session = engine.start({
     lang,
     interim: true,
     // Fill the input live so the user sees what's being heard and
@@ -902,6 +907,7 @@ function startListening(): void {
       callbacks?.announce(t('chat.announce.voiceError'))
     },
     onEnd: () => {
+      ended = true
       const hadFinal = sawFinal
       const suppressed = sttSuppressAutoSend
       sttSuppressAutoSend = false
@@ -925,6 +931,7 @@ function startListening(): void {
       if (hadFinal && !sttError && !suppressed && input.value.trim()) void handleSend()
     },
   })
+  if (!ended) sttSession = session
 }
 
 /** Stop capture; the engine's `onEnd` resets the UI (and may auto-send). */
