@@ -125,6 +125,13 @@ let ttsSessionId = 0
  * unchanged. See {@link toggleImmersiveVoice}.
  */
 let immersiveTurn = false
+/**
+ * Which turn is live — bumped each time the HUD starts one. A reply's
+ * speech can outlast its turn (a barge-in cancels it, and its cleanup
+ * runs when the cancelled speech drains), so whatever ends a turn names
+ * the turn it means and leaves a newer one alone.
+ */
+let immersiveTurnId = 0
 let immersivePhase: 'listening' | 'thinking' | 'speaking' = 'listening'
 /** Transcript while listening, the question while thinking, the sentence being spoken after. */
 let immersiveCaption = ''
@@ -865,6 +872,8 @@ function startListening(): void {
   sttSuppressAutoSend = false
   let sawFinal = false
   let sttError = false
+  // The immersive turn this mic was opened for, if the HUD opened it.
+  const turnId = immersiveTurnId
   const startedAt = Date.now()
   const provider = engine.provider
   const langBase = baseLanguage(lang)
@@ -886,7 +895,7 @@ function startListening(): void {
       logger.warn('[voice] STT error', err)
       sttError = true
       endListening()
-      failImmersiveTurn()
+      failImmersiveTurn(turnId)
       callbacks?.announce(t('chat.announce.voiceError'))
     },
     onEnd: () => {
@@ -896,7 +905,7 @@ function startListening(): void {
       endListening()
       // Nothing heard, or the send already happened elsewhere: the
       // immersive turn ends here rather than waiting on a reply.
-      if (!(hadFinal && !sttError && !suppressed && input.value.trim())) finishImmersiveTurn()
+      if (!(hadFinal && !sttError && !suppressed && input.value.trim())) finishImmersiveTurn(turnId)
       // Tier B: no transcript text — only provider/lang/duration/success.
       emit({
         event_type: 'voice_interaction',
@@ -995,6 +1004,7 @@ export function toggleImmersiveVoice(): void {
   }
   if (isStreaming) return
   immersiveTurn = true
+  immersiveTurnId++
   immersivePhase = 'listening'
   immersiveCaption = ''
   immersiveEndedAt = 0
@@ -1002,7 +1012,7 @@ export function toggleImmersiveVoice(): void {
   startListening()
   // No engine resolved, or the input is missing: startListening
   // returned without a session, and the HUD has to say so.
-  if (!sttSession) failImmersiveTurn()
+  if (!sttSession) failImmersiveTurn(immersiveTurnId)
 }
 
 /**
@@ -1023,14 +1033,19 @@ export function endImmersiveVoice(): void {
   immersiveErrorAt = 0
 }
 
-function finishImmersiveTurn(): void {
-  if (!immersiveTurn) return
+/**
+ * End turn `turnId` — a no-op when that turn is no longer the live one
+ * (or, for a panel send's `null`, was never an immersive turn at all).
+ */
+function finishImmersiveTurn(turnId: number | null): void {
+  if (!immersiveTurn || turnId !== immersiveTurnId) return
   immersiveTurn = false
   immersiveEndedAt = Date.now()
 }
 
-function failImmersiveTurn(): void {
-  if (!immersiveTurn) return
+/** As {@link finishImmersiveTurn}, but the HUD reports a failure. */
+function failImmersiveTurn(turnId: number | null): void {
+  if (!immersiveTurn || turnId !== immersiveTurnId) return
   immersiveTurn = false
   immersiveCaption = ''
   immersiveErrorAt = Date.now()
@@ -1440,6 +1455,9 @@ async function handleSend(): Promise<void> {
     setVoiceAudioFocus(false)
     return
   }
+  // The immersive turn this send answers. A send from the panel has
+  // none, so its cleanup below can't end a turn the HUD starts later.
+  const sendTurnId = immersiveTurn ? immersiveTurnId : null
   if (immersiveTurn) {
     immersivePhase = 'thinking'
     immersiveCaption = text
@@ -1728,11 +1746,14 @@ async function handleSend(): Promise<void> {
   // When auto-speak is off, ttsChain is already resolved → immediate.
   // Restore the ducked dataset audio at the same point. Skip if a newer
   // turn has since started speaking — it now owns the mic/ducking.
+  // A barge-in doesn't bump ttsSessionId, so this also runs after the
+  // HUD mic has cancelled this reply to start the next turn; the turn
+  // id keeps it from ending that one.
   void ttsChain.finally(() => {
     if (turnSpeakId !== ttsSessionId) return
     handsFree?.setBusy(false)
     setVoiceAudioFocus(false)
-    finishImmersiveTurn()
+    finishImmersiveTurn(sendTurnId)
   })
 
   // Clean up empty actions array

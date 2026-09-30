@@ -17,6 +17,8 @@ import {
 } from './chatUI'
 import type { ChatCallbacks } from './chatUI'
 import { loadConfig, saveConfig } from '../services/docentService'
+import { t } from '../i18n'
+import { until } from '../test-utils'
 import {
   createFakeSttEngine,
   registerSttEngine,
@@ -1421,6 +1423,29 @@ describe('immersive voice (VR/AR HUD)', () => {
 
   const LOAD_ICE = { type: 'action', action: { type: 'load-dataset', datasetId: 'DS_ICE', datasetTitle: 'Sea Ice' } }
 
+  /**
+   * How many sends have run to their last step. `handleSend` announces
+   * this when it is done, so it anchors a "didn't happen" assertion on
+   * the chain having finished rather than on a count of event-loop turns.
+   */
+  function sendsFinished(cb: MockCallbacks): number {
+    return cb.announce.mock.calls.filter((c) => c[0] === t('chat.announce.docentResponded')).length
+  }
+
+  /**
+   * Whether a turn has restored the ducked dataset audio. It does that
+   * once its speech has drained, so this anchors "nothing more was
+   * spoken" where the send finishing would come too early.
+   */
+  function audioRestored(cb: MockCallbacks): boolean {
+    return (cb.onVoiceAudioFocus as ReturnType<typeof vi.fn>).mock.calls.some((c) => c[0] === false)
+  }
+
+  function sendFromPanel(text: string): void {
+    ;(document.getElementById('chat-input') as HTMLTextAreaElement).value = text
+    ;(document.getElementById('chat-send') as HTMLButtonElement).click()
+  }
+
   beforeEach(() => {
     resetVoiceEngines()
     endImmersiveVoice()
@@ -1572,6 +1597,39 @@ describe('immersive voice (VR/AR HUD)', () => {
     toggleImmersiveVoice()
     expect(tts.cancel).toHaveBeenCalled()
     await vi.waitFor(() => expect(getImmersiveVoiceState()?.phase).toBe('idle'))
+  })
+
+  it('keeps a HUD turn alive when the reply it interrupted finishes draining', async () => {
+    // A panel reply is still being read aloud when the HUD mic is
+    // tapped — asked in 2D, then entered VR while Orbit was talking.
+    let finish: () => void = () => {}
+    const tts = fakeTts([])
+    const speak = vi.fn<(text: string) => Promise<void>>()
+      .mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve }))
+      .mockResolvedValue(undefined)
+    tts.speak = speak
+    tts.cancel.mockImplementation(() => finish())
+    registerSttEngine(heldSttEngine('show me sea ice'))
+    registerTtsEngine(tts)
+    saveConfig({ ...loadConfig(), voiceAutoSpeak: true })
+    await replyWith({ type: 'delta', text: 'Oceans cover most of the planet.' })
+    const cb = makeCallbacks()
+    initChatUI(cb)
+    sendFromPanel('tell me about the oceans')
+    await until(() => speak.mock.calls.length === 1, 'the panel reply being read aloud')
+
+    toggleImmersiveVoice()
+    expect(getImmersiveVoiceState()?.phase).toBe('listening')
+    // The barge-in cancelled the old speech; its turn restores the
+    // ducked audio when that drains, and must end nothing else.
+    await until(() => audioRestored(cb), 'the old reply drained')
+    expect(getImmersiveVoiceState()?.phase).toBe('listening')
+
+    // So the turn is still the HUD's: its reply's Load is carried out.
+    await replyWith({ type: 'delta', text: 'Sea ice is a good fit.' }, LOAD_ICE)
+    toggleImmersiveVoice()
+    await until(() => sendsFinished(cb) === 2, 'the HUD turn finished')
+    expect(cb.onLoadDataset.mock.calls).toEqual([['DS_ICE']])
   })
 
   it('stops listening without sending when the immersive session ends', async () => {
