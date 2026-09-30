@@ -1258,7 +1258,8 @@ class InteractiveSphere {
       carriesAlphaStream(dataset) || dataset.renderEncoding === RENDER_ENCODING_DATA_LUMA || !!dataset.releaseEncoding
     const coverage = transparent ? await this.measureDatasetCoverage(dataset, slot) : null
     if (gen !== this.mapLayerGen) return
-    await this.applyMapLayers(withBordersChoice(defaultLayers(layers, { transparent, coverage }), this.viewerBorders, layers), slot, gen)
+    const streamed = dataset.format === 'application/dash+xml'
+    await this.applyMapLayers(withBordersChoice(defaultLayers(layers, { streamed, transparent, coverage }), this.viewerBorders, layers), slot, gen)
   }
 
   /** Fraction of the slot's first frame that hides the Earth, or null if it cannot be read. */

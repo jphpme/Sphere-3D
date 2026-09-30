@@ -14,12 +14,13 @@
  *     palette — gets a basemap underneath, so its see-through regions
  *     show the Earth rather than black. It costs nothing where the data
  *     is opaque.
- *   - Data with no transparency gets country borders on top, drawn white,
- *     so a full-cover field (a temperature map, a projection) still says
- *     where it is. The owner's rule (2026-09-30, the same in the desktop
- *     apps): "no transparency" is what the shader does — an opaque
- *     picture, or a transparent one whose first frame has no see-through
- *     texel beyond a 0.1 % tolerance, measured by `measureCoverage`.
+ *   - A streamed dataset with no transparency gets country borders on
+ *     top, drawn white, so a full-cover field (a temperature map, a
+ *     projection) still says where it is. The owner's rule (2026-09-30,
+ *     the same in the desktop apps): only streams, never a catalog picture
+ *     or a plain video; "no transparency" is what the shader does — an
+ *     opaque stream, or a transparent one whose first frame has no
+ *     see-through texel beyond a 0.1 % tolerance (`measureCoverage`).
  *
  * A visitor can change either from the layer picker. The basemap choice
  * holds until the next dataset loads, which starts from its own default;
@@ -47,6 +48,12 @@ export const NO_LAYERS: LayerSelection = { basemapId: null, overlays: [] }
 
 /** What the defaults depend on. */
 export interface DatasetLayerFacts {
+  /**
+   * A streamed dataset (a DASH row from the stream host). Only these get
+   * the automatic borders: a catalog picture or a plain video never does,
+   * as in the desktop apps, where local files and images never do.
+   */
+  readonly streamed: boolean
   /** Frames carry transparency: an alpha stream or a value-encoded palette. */
   readonly transparent: boolean
   /** Fraction (0..1) of the first frame that hides the Earth, or null when unmeasured. */
@@ -88,7 +95,7 @@ export function defaultLayers(layers: readonly CatalogLayer[], facts: DatasetLay
   // one only when its frames say so. Unmeasured transparency gets no
   // borders: better a missing aid than lines scribbled over a sparse map.
   const hidesEarth = !facts.transparent || (facts.coverage !== null && facts.coverage >= FULL_COVER)
-  const borders = hidesEarth ? pickBorders(layers) : null
+  const borders = facts.streamed && hidesEarth ? pickBorders(layers) : null
   return {
     basemapId: basemap?.id ?? null,
     overlays: borders ? [{ id: borders.id, tint: tintFor(borders) }] : [],

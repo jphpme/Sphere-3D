@@ -26,7 +26,7 @@ const LIVE: CatalogLayer[] = [
 
 describe('defaultLayers', () => {
   it('puts relief and bathymetry under a sparse transparent stream, and nothing on top', () => {
-    expect(defaultLayers(LIVE, { transparent: true, coverage: 0.08 })).toEqual({
+    expect(defaultLayers(LIVE, { streamed: true, transparent: true, coverage: 0.08 })).toEqual({
       basemapId: 'builtin-nasa-relief-bathymetry',
       overlays: [],
     })
@@ -35,18 +35,18 @@ describe('defaultLayers', () => {
   it('adds white borders only when a transparent stream has no see-through texel (0.1 % tolerated)', () => {
     // The owner's rule, shared with the desktop apps: a field that leaves
     // any of the Earth showing (the Van Gogh wind at 93 %) gets no borders.
-    expect(defaultLayers(LIVE, { transparent: true, coverage: 0.93 })).toEqual({
+    expect(defaultLayers(LIVE, { streamed: true, transparent: true, coverage: 0.93 })).toEqual({
       basemapId: 'builtin-nasa-relief-bathymetry',
       overlays: [],
     })
-    expect(defaultLayers(LIVE, { transparent: true, coverage: 0.9995 })).toEqual({
+    expect(defaultLayers(LIVE, { streamed: true, transparent: true, coverage: 0.9995 })).toEqual({
       basemapId: 'builtin-nasa-relief-bathymetry',
       overlays: [{ id: 'builtin-nasa-reference-features', tint: 'white' }],
     })
   })
 
   it('gives an opaque picture borders and no basemap it would hide anyway', () => {
-    expect(defaultLayers(LIVE, { transparent: false, coverage: null })).toEqual({
+    expect(defaultLayers(LIVE, { streamed: true, transparent: false, coverage: null })).toEqual({
       basemapId: null,
       overlays: [{ id: 'builtin-nasa-reference-features', tint: 'white' }],
     })
@@ -58,16 +58,21 @@ describe('defaultLayers', () => {
       { id: 'builtin-noaa-country-borders-black', title: 'Country Borders (black)', kind: 'overlay' as const, url: '/x' },
       { id: 'builtin-noaa-country-borders-white', title: 'Country Borders (white)', kind: 'overlay' as const, url: '/y' },
     ]
-    expect(defaultLayers(withBorders, { transparent: false, coverage: null }).overlays)
+    expect(defaultLayers(withBorders, { streamed: true, transparent: false, coverage: null }).overlays)
       .toEqual([{ id: 'builtin-noaa-country-borders-white', tint: 'source' }])
   })
 
+  it('never adds borders to a catalog picture or a plain video, opaque or not', () => {
+    expect(defaultLayers(LIVE, { streamed: false, transparent: false, coverage: null }).overlays).toEqual([])
+    expect(defaultLayers(LIVE, { streamed: false, transparent: true, coverage: 1 }).overlays).toEqual([])
+  })
+
   it('adds no borders while a transparent stream\'s coverage is unmeasured', () => {
-    expect(defaultLayers(LIVE, { transparent: true, coverage: null }).overlays).toEqual([])
+    expect(defaultLayers(LIVE, { streamed: true, transparent: true, coverage: null }).overlays).toEqual([])
   })
 
   it('offers nothing when the catalog has no layers', () => {
-    expect(defaultLayers([], { transparent: true, coverage: 1 })).toEqual({ basemapId: null, overlays: [] })
+    expect(defaultLayers([], { streamed: true, transparent: true, coverage: 1 })).toEqual({ basemapId: null, overlays: [] })
   })
 })
 
@@ -85,7 +90,7 @@ describe('the viewer\'s word on borders', () => {
   })
 
   it('keeps borders the viewer asked for on a dataset that would not get them', () => {
-    const sparse = defaultLayers(LIVE, { transparent: true, coverage: 0.08 })
+    const sparse = defaultLayers(LIVE, { streamed: true, transparent: true, coverage: 0.08 })
     expect(withBordersChoice(sparse, 'on', LIVE)).toEqual({
       basemapId: 'builtin-nasa-relief-bathymetry',
       overlays: [borders],
@@ -93,7 +98,7 @@ describe('the viewer\'s word on borders', () => {
   })
 
   it('keeps borders off where the viewer turned them off, and changes nothing without a word', () => {
-    const opaque = defaultLayers(LIVE, { transparent: false, coverage: null })
+    const opaque = defaultLayers(LIVE, { streamed: true, transparent: false, coverage: null })
     expect(withBordersChoice(opaque, 'off', LIVE).overlays).toEqual([])
     expect(withBordersChoice(opaque, null, LIVE)).toBe(opaque)
   })
