@@ -2,7 +2,7 @@
 // Copyright 2026 The Zyra Project
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { displayDatasetInfo, pickDirectFile } from './datasetLoader'
+import { displayDatasetInfo, pickDirectFile, renderStreamCredit } from './datasetLoader'
 import type { Dataset } from '../types'
 import { until } from '../test-utils'
 
@@ -554,5 +554,45 @@ describe('pickDirectFile', () => {
 
   it('returns undefined for an empty list so the caller can name the failure', () => {
     expect(pickDirectFile([])).toBeUndefined()
+  })
+})
+
+describe('renderStreamCredit', () => {
+  const CREDIT = {
+    text: 'Contains modified EUMETSAT OSI SAF data <v3.1>, CC BY 4.0.',
+    placement: 'panel',
+    sources: [
+      { label: 'Sea ice concentration', licenseName: 'CC BY 4.0', licenseUrl: 'https://creativecommons.org/licenses/by/4.0/', sourcePage: 'https://doi.org/10.24381/cds.3cd8b812' },
+      // A second source under the same licence, and one whose link is not a web link.
+      { label: 'Interim record', licenseName: 'CC BY 4.0', licenseUrl: 'https://creativecommons.org/licenses/by/4.0/', sourcePage: 'javascript:alert(1)' },
+    ],
+  }
+  const mountSlot = (datasetId: string) => {
+    document.body.innerHTML = `<div id="info-body"><div class="info-stream-credit" data-dataset-id="${datasetId}"></div></div>`
+    return document.querySelector<HTMLElement>('.info-stream-credit')!
+  }
+
+  it('shows the credit with links to its source and licence', () => {
+    const slot = mountSlot('R2_DASH_seaice')
+    renderStreamCredit('R2_DASH_seaice', CREDIT)
+    expect(slot.querySelector('.info-stream-credit-text')!.textContent).toBe('Contains modified EUMETSAT OSI SAF data <v3.1>, CC BY 4.0.')
+    const links = Array.from(slot.querySelectorAll('a')).map(a => [a.textContent, a.getAttribute('href'), a.getAttribute('rel')])
+    expect(links).toEqual([
+      ['Sea ice concentration \u2197', 'https://doi.org/10.24381/cds.3cd8b812', 'noopener noreferrer'],
+      ['CC BY 4.0 \u2197', 'https://creativecommons.org/licenses/by/4.0/', 'noopener noreferrer'],
+    ])
+  })
+
+  it('writes the credit as text, never as markup', () => {
+    const slot = mountSlot('R2_DASH_seaice')
+    renderStreamCredit('R2_DASH_seaice', { ...CREDIT, text: '<img src=x onerror=alert(1)>' })
+    expect(slot.querySelector('img')).toBeNull()
+    expect(slot.textContent).toContain('<img src=x onerror=alert(1)>')
+  })
+
+  it('leaves the panel alone once it shows another dataset', () => {
+    const slot = mountSlot('R2_DASH_other')
+    renderStreamCredit('R2_DASH_seaice', CREDIT)
+    expect(slot.innerHTML).toBe('')
   })
 })

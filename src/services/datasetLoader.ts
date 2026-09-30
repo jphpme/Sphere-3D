@@ -27,6 +27,7 @@ import { fetchEventsForDataset, type PublicEvent } from './eventsService'
 import { openAddToPlaylistPopover } from '../ui/playlistUI'
 import { openDownloadDialog } from '../ui/downloadDialogUI'
 import { t, tAttr } from '../i18n'
+import type { DsaAttribution } from './dsaMetadata'
 
 /** Tier B dwell handle for the info panel — non-null while the
  * panel is expanded (collapsed = user can't read the body so it
@@ -642,6 +643,40 @@ function renderCreditRow(label: string, value: string, affiliationUrl?: string):
     + `</div>`
 }
 
+/** Only web links leave the panel; anything else in a descriptor is dropped. */
+function webUrl(url: string | null): string | null {
+  return url && /^https?:\/\//i.test(url) ? url : null
+}
+
+/**
+ * AYNI — show the credit a stream's publisher asks to be given with its
+ * data (the .dsa's `attribution`), with links to the source and the
+ * licence. For CC BY data the credit is a condition of the licence, so
+ * it needs somewhere a viewer can reach. Fills the slot
+ * `displayDatasetInfo` leaves; a no-op when the panel has moved on to
+ * another dataset.
+ */
+export function renderStreamCredit(datasetId: string, credit: DsaAttribution): void {
+  const slot = document.querySelector<HTMLElement>('#info-body .info-stream-credit')
+  if (!slot || slot.getAttribute('data-dataset-id') !== datasetId) return
+  const links: string[] = []
+  const seen = new Set<string>()
+  const link = (url: string | null, label: string | null) => {
+    const href = webUrl(url)
+    if (!href || !label || seen.has(href)) return
+    seen.add(href)
+    links.push(`<a href="${escapeAttr(href)}" target="_blank" rel="noopener noreferrer" class="info-catalog-link">${escapeHtml(label)} \u2197</a>`)
+  }
+  for (const source of credit.sources) {
+    link(source.sourcePage, source.label)
+    link(source.licenseUrl, source.licenseName)
+  }
+  slot.innerHTML =
+    `<p class="info-section-label">${escapeHtml(t('infoPanel.section.dataCredit'))}</p>`
+    + `<p class="info-stream-credit-text">${escapeHtml(credit.text)}</p>`
+    + (links.length ? `<p class="info-stream-credit-links">${links.join(' ')}</p>` : '')
+}
+
 /**
  * Build the related-datasets section. Combines the manually-curated
  * `EnrichedMetadata.relatedDatasets` (rendered first, in author
@@ -1035,6 +1070,11 @@ export function displayDatasetInfo(
     html += `<p class="info-section-label">${escapeHtml(t('infoPanel.section.credits'))}</p>`
     html += `<dl class="info-credits">${creditRows.join('')}</dl>`
   }
+
+  // --- AYNI: the data credit a stream's publisher asks for. Its .dsa
+  // arrives after the panel is drawn, so `renderStreamCredit` fills this
+  // slot then; it stays empty for a dataset with no such credit. --------
+  html += `<div class="info-stream-credit" data-dataset-id="${escapeAttr(dataset.id)}"></div>`
 
   // --- "In the news" — approved current events linked to this dataset.
   // Placeholder filled async by `renderInTheNews` after the panel mounts;

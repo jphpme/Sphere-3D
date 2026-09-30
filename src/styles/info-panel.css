@@ -421,6 +421,23 @@
 }
 
 
+/* AYNI: the credit a stream's publisher asks to be shown with its data
+   (the .dsa's attribution), and links to its source and licence. Filled
+   by renderStreamCredit once the descriptor arrives. */
+.info-stream-credit-text {
+    margin: 0;
+    font-size: calc(0.7rem * var(--ui-scale));
+    line-height: 1.45;
+    color: var(--color-text-secondary);
+}
+
+.info-stream-credit-links {
+    margin: calc(0.3rem * var(--ui-scale)) 0 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: calc(0.2rem * var(--ui-scale)) calc(0.75rem * var(--ui-scale));
+}
+
 /* Responsive — tablet/mobile */
 @media (max-width: 768px) {
     #info-panel {

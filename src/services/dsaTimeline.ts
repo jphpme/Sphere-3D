@@ -39,8 +39,13 @@
  * See {@link file://./../../docs/VR_PLAYBACK_TRACK_PLAN.md VR_PLAYBACK_TRACK_PLAN.md}.
  */
 
-/** How the DSA's provenance block describes one span of frames. */
-export type DsaFrameAvailability = 'real' | 'filled' | 'missing' | 'estimated' | 'unknown'
+/**
+ * How the DSA's provenance block describes one span of frames.
+ * `interpolated` (DSA 1.7) is a frame computed between two measured
+ * ones: the years between GHSL's five-year epochs, or between the IPCC
+ * sea-level projection's decades.
+ */
+export type DsaFrameAvailability = 'real' | 'filled' | 'missing' | 'estimated' | 'interpolated' | 'unknown'
 
 /** One span of frames whose provenance is not simply "real". */
 export interface DsaAvailabilitySpan {
@@ -128,6 +133,7 @@ const AVAILABILITY_KINDS: readonly DsaFrameAvailability[] = [
   'filled',
   'missing',
   'estimated',
+  'interpolated',
   'unknown',
 ]
 

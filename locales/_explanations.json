@@ -38,6 +38,7 @@
   "help.guide.section.tools": "Help-guide HTML blob. Same constraints as help.guide.section.exploring. Preserve the strong-tagged section names (View, Layout, Clear, Ayni Chatbot settings) but translate them to match the corresponding tools.* strings.",
   "help.guide.section.tours": "Help-guide HTML blob. Same constraints as help.guide.section.exploring.",
   "infoPanel.news.viewOnGlobe.aria": "Accessible label for the 'View on globe' button on an 'In the news' event card in the dataset info panel. The button navigates the globe to the event — flying to its location and/or seeking the dataset to its time, depending on what the event has. Preserve {title} (the event's headline).",
+  "infoPanel.section.dataCredit": "Heading in the dataset info panel above the credit line a data provider requires to be shown with its data (for example \"Contains modified EUMETSAT OSI SAF data … CC BY 4.0\"), followed by links to the source and its licence.",
   "outputs.decoders.hint": "Explains the decoder-budget field. \"A single window reports\" refers to the per-window limit the app already applies; the point is that it cannot see other windows on the same machine.",
   "outputs.decoders.label": "Label for a number field setting how many windows on this machine may play video at once. \"Decoder\" is the video-decoding hardware/software, one per playing video.",
   "outputs.decoders.spent": "Shown when the decoder budget is fully used and no further output can be added. Names the three ways out.",

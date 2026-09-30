@@ -40,6 +40,28 @@ export interface DsaCompleteness {
   readonly lastChecked: string | null
 }
 
+/** One source the publisher credits, with the licence its data came under. */
+export interface DsaAttributionSource {
+  readonly label: string | null
+  readonly licenseName: string | null
+  readonly licenseUrl: string | null
+  readonly sourcePage: string | null
+}
+
+/**
+ * AYNI — the credit the publisher asks to be shown with the data. For
+ * CC BY sources (OSI SAF sea ice, GHSL, the IPCC atlases) showing it is
+ * a condition of the licence, so it reaches the info panel and the
+ * chatbot's context.
+ */
+export interface DsaAttribution {
+  /** The credit sentence, as written. */
+  readonly text: string
+  /** Where the publisher asks for it: `panel` | `overlay`, as written. */
+  readonly placement: string | null
+  readonly sources: readonly DsaAttributionSource[]
+}
+
 export interface DsaMetadata {
   readonly title: string | null
   readonly description: string | null
@@ -54,6 +76,7 @@ export interface DsaMetadata {
   readonly units: string | null
   readonly sourceUrl: string | null
   readonly completeness: DsaCompleteness | null
+  readonly attribution: DsaAttribution | null
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -105,6 +128,8 @@ export function parseDsaMetadata(raw: unknown, lang = 'en'): DsaMetadata | null 
   if (!dsa) return null
   const availability = asRecord(dsa.dataAvailability)
   const links = asRecord(dsa.links)
+  const credit = asRecord(dsa.attribution)
+  const creditText = str(credit?.text)
   return {
     title: localized(dsa.title, lang),
     description: localized(dsa.description, lang),
@@ -125,6 +150,23 @@ export function parseDsaMetadata(raw: unknown, lang = 'en'): DsaMetadata | null 
           missingFrames: num(availability.missingFrameCount),
           fillPolicy: str(availability.fillPolicy),
           lastChecked: str(availability.lastChecked),
+        }
+      : null,
+    attribution: credit && creditText
+      ? {
+          text: creditText,
+          placement: str(credit.placement),
+          sources: (Array.isArray(credit.sources) ? credit.sources : []).flatMap((entry): DsaAttributionSource[] => {
+            const source = asRecord(entry)
+            return source
+              ? [{
+                  label: str(source.label),
+                  licenseName: str(source.licenseName),
+                  licenseUrl: str(source.license),
+                  sourcePage: str(source.sourcePage),
+                }]
+              : []
+          }),
         }
       : null,
   }
@@ -215,6 +257,12 @@ export function describeStreamForDocent(
     lines.push(`Visualization: produced by Pachamama Studios${pipeline}${data}`)
   }
   if (meta?.sourceUrl) lines.push(`Original data source (data provider, not the maker of the visualization): ${meta.sourceUrl}`)
+  if (meta?.attribution) {
+    lines.push(`Data credit, as its publisher asks it to be given: ${meta.attribution.text}`)
+    const licences = Array.from(new Set(meta.attribution.sources.flatMap(s =>
+      s.licenseName ? [s.licenseUrl ? `${s.licenseName} (${s.licenseUrl})` : s.licenseName] : [])))
+    if (licences.length) lines.push(`Data licence: ${licences.join('; ')}`)
+  }
   if (meta?.units) lines.push(`Units: ${meta.units}`)
   if (meta?.keywords.length) lines.push(`Descriptor keywords: ${meta.keywords.join(', ')}`)
 
@@ -234,10 +282,18 @@ export function describeStreamForDocent(
     if (c.realFrames !== null && c.expectedFrames !== null) {
       parts.push(`${c.realFrames} of ${c.expectedFrames} frames are real data`)
     }
-    if (c.filledFrames) {
+    // The descriptor counts interpolated frames among the filled ones, but
+    // they are not gaps: the source publishes every fifth or tenth year
+    // and the frames between are computed.
+    const interpolated = timeline
+      ? timeline.availability.spans.reduce((n, s) => n + (s.availability === 'interpolated' ? s.frameCount : 0), 0)
+      : 0
+    const filled = Math.max(0, (c.filledFrames ?? 0) - interpolated)
+    if (filled) {
       const how = c.fillPolicy ? FILL_POLICY_WORDS[c.fillPolicy] ?? `(fill policy: ${c.fillPolicy})` : ''
-      parts.push(`${c.filledFrames} are gaps filled ${how}`.trim())
+      parts.push(`${filled} are gaps filled ${how}`.trim())
     }
+    if (interpolated) parts.push(`${interpolated} are interpolated between measured frames, not measurements`)
     if (c.missingFrames) parts.push(`${c.missingFrames} are missing`)
     // A bare status with no counts (a forecast writes `unknown`) tells a
     // visitor nothing, so it is only worth a line alongside numbers.
@@ -258,6 +314,8 @@ export function describeStreamForDocent(
         : 'a filled gap — no data arrived for this time'
     } else if (kind === 'real') {
       what = 'real data'
+    } else if (kind === 'interpolated') {
+      what = 'interpolated between measured frames, not a measurement'
     } else if (kind === 'missing' || kind === 'estimated') {
       what = `${kind} (as the descriptor marks it)`
     } else {
@@ -270,7 +328,7 @@ export function describeStreamForDocent(
   if (lines.length === 0) return ''
   return [
     'Stream descriptor (.dsa) — the publisher\'s own metadata for the stream on the globe. ' +
-      'Answer questions about its source, time coverage, update time, cadence and data gaps from these lines, ' +
+      'Answer questions about its source, credit and licence, time coverage, update time, cadence and data gaps from these lines, ' +
       'and say so when a question goes beyond them:',
     ...lines.map(l => `- ${l}`),
   ].join('\n')

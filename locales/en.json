@@ -498,6 +498,7 @@
   "infoPanel.news.viewOnGlobe.aria": "View {title} on the globe",
   "infoPanel.relatedDatasets": "Related datasets",
   "infoPanel.section.credits": "Credits",
+  "infoPanel.section.dataCredit": "Data credit",
   "infoPanel.section.links": "Links",
   "infoPanel.source": "Source",
   "infoPanel.thumbnail.alt": "{title} thumbnail",

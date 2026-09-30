@@ -215,3 +215,88 @@ describe('describeStreamForDocent — a monthly record', () => {
     expect(text).not.toMatch(/Frame on screen: 2024-/)
   })
 })
+
+describe('the data credit (attribution)', () => {
+  // The OSI SAF sea-ice record: CC BY 4.0, so the credit must reach the viewer.
+  const SEA_ICE = {
+    schemaVersion: '1.7',
+    id: 'osisaf-sea-ice-yearly',
+    title: { en: 'Observed Sea Ice at Its Yearly Minimum' },
+    type: 'stream',
+    dataProductType: 'historical',
+    links: { source: 'https://doi.org/10.24381/cds.3cd8b812' },
+    attribution: {
+      text: 'Contains modified EUMETSAT OSI SAF Global Sea Ice Concentration Climate Data Record (OSI-450, v3.1), CC BY 4.0.',
+      sources: [{
+        label: 'Sea ice concentration daily gridded data',
+        licenseName: 'CC BY 4.0',
+        license: 'https://creativecommons.org/licenses/by/4.0/',
+        sourcePage: 'https://doi.org/10.24381/cds.3cd8b812',
+      }],
+      modified: true,
+      placement: 'panel',
+    },
+  }
+
+  it('reads the credit, where it is asked for, and its sources', () => {
+    expect(parseDsaMetadata(SEA_ICE)?.attribution).toEqual({
+      text: 'Contains modified EUMETSAT OSI SAF Global Sea Ice Concentration Climate Data Record (OSI-450, v3.1), CC BY 4.0.',
+      placement: 'panel',
+      sources: [{
+        label: 'Sea ice concentration daily gridded data',
+        licenseName: 'CC BY 4.0',
+        licenseUrl: 'https://creativecommons.org/licenses/by/4.0/',
+        sourcePage: 'https://doi.org/10.24381/cds.3cd8b812',
+      }],
+    })
+  })
+
+  it('has none for a descriptor without a credit sentence', () => {
+    expect(parseDsaMetadata(AIRCRAFT)?.attribution).toBeNull()
+    expect(parseDsaMetadata({ ...SEA_ICE, attribution: { placement: 'panel' } })?.attribution).toBeNull()
+  })
+
+  it('gives the chatbot the credit and the licence', () => {
+    const text = describeStreamForDocent(parseDsaMetadata(SEA_ICE), null)
+    expect(text).toContain('Data credit, as its publisher asks it to be given: Contains modified EUMETSAT OSI SAF')
+    expect(text).toContain('Data licence: CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/)')
+  })
+})
+
+describe('describeStreamForDocent — interpolated frames', () => {
+  // GHSL population: measured every five years, the years between computed.
+  const GHSL = {
+    schemaVersion: '1.7',
+    id: 'ghsl-population',
+    title: { en: 'Where People Live (GHSL)' },
+    type: 'stream',
+    timeEnabled: true,
+    timeRange: { start: '1975-01-01T23:00:00Z', end: '1986-01-01T16:59:12Z' },
+    timeRangeEndMode: 'exclusive',
+    timeTotalFrames: 11,
+    timeCadenceSeconds: 31_556_952,
+    videoFrameRate: 6,
+    dataAvailability: {
+      status: 'complete',
+      expectedFrameCount: 11,
+      realFrameCount: 3,
+      filledFrameCount: 8,
+      missingFrameCount: 0,
+      ranges: [
+        { startFrame: 1, frameCount: 4, availability: 'interpolated', method: 'interpolate_linear' },
+        { startFrame: 6, frameCount: 4, availability: 'interpolated', method: 'interpolate_linear' },
+      ],
+    },
+  }
+
+  it('says they are interpolated, not gaps filled', () => {
+    const text = describeStreamForDocent(parseDsaMetadata(GHSL), timeline(GHSL), 2)
+    expect(text).toContain('Data completeness (complete): 3 of 11 frames are real data; 8 are interpolated between measured frames, not measurements')
+    expect(text).not.toContain('gaps filled')
+    expect(text).toContain('Frame on screen: 1977 — interpolated between measured frames, not a measurement')
+  })
+
+  it('still calls a measured year real data', () => {
+    expect(describeStreamForDocent(parseDsaMetadata(GHSL), timeline(GHSL), 5)).toContain('Frame on screen: 1980 — real data')
+  })
+})

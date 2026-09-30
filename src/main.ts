@@ -92,7 +92,7 @@ import {
   type PlaybackState,
 } from './ui/playbackController'
 import {
-  loadImageDataset, loadVideoDataset, displayDatasetInfo,
+  loadImageDataset, loadVideoDataset, displayDatasetInfo, renderStreamCredit,
   type EventNavResult,
 } from './services/datasetLoader'
 import { resolveRegion } from './data/regions'
@@ -2014,6 +2014,18 @@ class InteractiveSphere {
     }
   }
 
+  /**
+   * AYNI — put the credit a stream's publisher asks for (its .dsa's
+   * `attribution`) into the info panel once the descriptor has arrived.
+   * The panel is drawn first, so this fills the slot it leaves.
+   */
+  private async showStreamCredit(dataset: Dataset): Promise<void> {
+    const url = dataset.timelineLink
+    if (!url) return
+    const meta = await this.dsaTimelines.loadMetadata(url)
+    if (meta?.attribution) renderStreamCredit(dataset.id, meta.attribution)
+  }
+
   /** Seek the primary playback to an instant on that axis. */
   private seekTimelineDate(epochMs: number): void {
     const url = this.appState.currentDataset?.timelineLink
@@ -2266,6 +2278,7 @@ class InteractiveSphere {
       (id) => this.loadDataset(id, 'browse'),
       (ev) => this.navigateToEvent(ev),
     )
+    void this.showStreamCredit(dataset)
 
     // Repopulate the picker with every loaded dataset (in panel order)
     // and wire the change handler once.

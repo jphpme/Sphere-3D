@@ -46,7 +46,7 @@
 export interface TimelineAvailabilitySpan {
   readonly startFrame: number
   readonly frameCount: number
-  readonly availability: 'real' | 'filled' | 'missing' | 'estimated' | 'unknown'
+  readonly availability: 'real' | 'filled' | 'missing' | 'estimated' | 'interpolated' | 'unknown'
 }
 
 /** Everything the strip needs to draw one frame of the axis. */
@@ -528,6 +528,8 @@ function spanColor(availability: TimelineAvailabilitySpan['availability']): stri
     case 'missing':
       return 'rgba(255, 90, 90, 0.34)'
     case 'estimated':
+    // Computed between measured frames: not a measurement either.
+    case 'interpolated':
       return 'rgba(120, 200, 255, 0.28)'
     default:
       return REMAINDER
