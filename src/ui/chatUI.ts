@@ -1029,13 +1029,17 @@ export function toggleImmersiveVoice(): void {
  * listen the HUD started is stopped without sending: the user left the
  * place they were speaking to, so what was heard stays in the chat
  * input for them to send or discard. A reply already in flight still
- * lands in the chat.
+ * lands in the chat — and is read aloud there only if auto-speak is on:
+ * the turn's forced speech was for the headset, and ends with it.
  */
 export function endImmersiveVoice(): void {
   if (immersiveTurn && sttSession) {
     sttSuppressAutoSend = true
     stopListening()
   }
+  // beginSpeaking already picked an engine for this turn, so clearing
+  // the turn alone wouldn't stop pumpSpeech reading the reply out in 2D.
+  if (immersiveTurn && !loadConfig().voiceAutoSpeak) stopSpeaking()
   immersiveTurn = false
   immersiveCaption = ''
   immersiveEndedAt = 0

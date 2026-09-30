@@ -1726,6 +1726,47 @@ describe('immersive voice (VR/AR HUD)', () => {
     expect((document.getElementById('chat-input') as HTMLTextAreaElement).value).toBe('hello')
   })
 
+  /** A HUD question whose reply is held back until `release()`. */
+  async function askWithReplyHeld(text: string): Promise<{ cb: MockCallbacks; spoken: string[]; release: () => void }> {
+    const { processMessage } = await import('../services/docentService')
+    let release: () => void = () => {}
+    vi.mocked(processMessage).mockImplementation(async function* () {
+      await new Promise<void>((r) => { release = r })
+      yield { type: 'delta' as const, text }
+      yield { type: 'done' as const, fallback: false }
+    })
+    const spoken: string[] = []
+    registerSttEngine(createFakeSttEngine({ provider: 'local', transcript: 'show me sea ice' }))
+    registerTtsEngine(fakeTts(spoken))
+    const cb = makeCallbacks()
+    initChatUI(cb)
+    toggleImmersiveVoice()
+    await until(() => getImmersiveVoiceState()?.phase === 'thinking', 'the question was sent')
+    return { cb, spoken, release: () => release() }
+  }
+
+  it('does not read the reply aloud in 2D when the session ends mid-reply with auto-speak off', async () => {
+    const { cb, spoken, release } = await askWithReplyHeld('Here is sea ice.')
+    expect(loadConfig().voiceAutoSpeak).toBe(false)
+
+    endImmersiveVoice()
+    release()
+    await until(() => audioRestored(cb), 'the turn drained')
+    // The reply still lands in the chat; auto-speak governs the panel.
+    expect(getMessages()[1]?.text).toBe('Here is sea ice.')
+    expect(spoken).toEqual([])
+  })
+
+  it('keeps reading the reply when the session ends mid-reply with auto-speak on', async () => {
+    saveConfig({ ...loadConfig(), voiceAutoSpeak: true })
+    const { cb, spoken, release } = await askWithReplyHeld('Here is sea ice.')
+
+    endImmersiveVoice()
+    release()
+    await until(() => audioRestored(cb), 'the turn drained')
+    expect(spoken).toEqual(['Here is sea ice.'])
+  })
+
   it('ignores a tap while Orbit is still thinking', async () => {
     const { processMessage } = await import('../services/docentService')
     let release: () => void = () => {}
