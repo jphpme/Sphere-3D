@@ -19,6 +19,7 @@
 
 import type * as THREE from 'three'
 import { t } from '../i18n'
+import { wrapText } from './vrTourOverlay'
 
 /** World-space size of the HUD plane. Wide strip that tucks below the globe. */
 const HUD_WIDTH = 0.6
@@ -483,32 +484,40 @@ function drawVoiceButton(ctx: CanvasRenderingContext2D, phase: VrVoicePhase, h: 
 /**
  * Break `text` into at most `maxLines` lines that fit `maxWidth`,
  * ending the last with an ellipsis when the text runs over.
+ *
+ * Words wrap as they do on the tour panels (`wrapText`, which also
+ * shortens a word too wide for a line of its own — a URL, say). Text
+ * with no spaces at all has no words to wrap: Japanese and Chinese are
+ * written that way, and as one "word" a whole reply would be cut down
+ * to a single line. That is broken by character instead.
  */
 function wrapLines(ctx: CanvasRenderingContext2D, text: string, maxWidth: number, maxLines: number): string[] {
-  const words = text.split(/\s+/).filter(Boolean)
+  // One paragraph: a caption is a sentence, and a hard break inside it
+  // would spend one of very few lines.
+  const flat = text.replace(/\s+/g, ' ').trim()
+  const lines = flat.includes(' ') ? wrapText(ctx, flat, maxWidth) : wrapByCharacter(ctx, flat, maxWidth)
+  if (lines.length <= maxLines) return lines
+  const kept = lines.slice(0, maxLines)
+  let last = kept[maxLines - 1]!.replace(/…$/, '')
+  while (last.length > 1 && ctx.measureText(`${last}…`).width > maxWidth) last = last.slice(0, -1)
+  kept[maxLines - 1] = `${last.trimEnd()}…`
+  return kept
+}
+
+/** Fill each line with as many characters as fit — for text without spaces. */
+function wrapByCharacter(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
   const lines: string[] = []
   let line = ''
-  for (let i = 0; i < words.length; i++) {
-    const candidate = line ? `${line} ${words[i]}` : words[i]!
-    if (ctx.measureText(candidate).width <= maxWidth || !line) {
-      line = candidate
-      continue
-    }
-    lines.push(line)
-    line = words[i]!
-    if (lines.length === maxLines - 1) {
-      // Last line: take everything left, and trim it to fit.
-      line = words.slice(i).join(' ')
-      break
+  // By code point, so a surrogate pair is never split across lines.
+  for (const char of text) {
+    if (line && ctx.measureText(line + char).width > maxWidth) {
+      lines.push(line)
+      line = char
+    } else {
+      line += char
     }
   }
   if (line) lines.push(line)
-  const last = lines.length - 1
-  if (last >= 0 && ctx.measureText(lines[last]!).width > maxWidth) {
-    let s = lines[last]!
-    while (s.length > 1 && ctx.measureText(s + '…').width > maxWidth) s = s.slice(0, -1)
-    lines[last] = s.trimEnd() + '…'
-  }
   return lines
 }
 
