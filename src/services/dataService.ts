@@ -559,12 +559,21 @@ function resolveRealtimeDashAsset(pathOrUrl: string | undefined, baseUrl: string
  * (AYNI: the CMIP6 scenarios, one frame a year to 2100) is neither live
  * nor a forecast; calling it "Real Time" would misstate it.
  */
-type RealtimeDashKind = 'real-time' | 'forecast' | 'projection'
+type RealtimeDashKind = 'real-time' | 'forecast' | 'projection' | 'reanalysis' | 'historical'
 
+/**
+ * Reanalysis (ERA5, CAMS) and historical records (sea level, sea ice,
+ * burned area, population) are past data, some of it from 1940: they
+ * are titled by their declared type, as the desktop apps show it, not
+ * "Real Time". The type is what says so. Their paths don't: the newer
+ * ones all arrive under `/observed/`, whichever of the two they are.
+ */
 function realtimeDashKind(entry: RealtimeDashEntry): RealtimeDashKind {
   const path = entry.mpd ?? entry.releaseDescriptorUrl ?? ''
   if (entry.dataProductType === 'projection' || /\/projection\//.test(path)) return 'projection'
   if (entry.dataProductType === 'forecast' || entry.type === 'forecast' || /\/forecast\//.test(path)) return 'forecast'
+  if (entry.dataProductType === 'reanalysis' || /\/reanalysis\//.test(path)) return 'reanalysis'
+  if (entry.dataProductType === 'historical') return 'historical'
   return 'real-time'
 }
 
@@ -572,11 +581,13 @@ const REALTIME_DASH_KIND_LABEL: Record<RealtimeDashKind, string> = {
   'real-time': 'Real Time',
   forecast: 'Forecast',
   projection: 'Projection',
+  reanalysis: 'Reanalysis',
+  historical: 'Historical',
 }
 
 function prefixedRealtimeDashTitle(rawTitle: string, kind: RealtimeDashKind): string {
   const cleanTitle = rawTitle.trim() || 'Untitled dataset'
-  const titleWithoutKind = cleanTitle.replace(/^(?:Real Time|Forecast|Projection):\s*/i, '')
+  const titleWithoutKind = cleanTitle.replace(/^(?:Real Time|Forecast|Projection|Reanalysis|Historical):\s*/i, '')
   // A projection's own name already says what it is ("Projected Surface
   // Temperature Change (CMIP6): SSP2-4.5"); a prefix would repeat it.
   if (kind === 'projection') return titleWithoutKind

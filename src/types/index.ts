@@ -136,8 +136,10 @@ export interface Dataset {
   /** Realtime/forecast DASH streams from the Cloudflare R2 catalog;
    * set by `fetchRealtimeDashDatasets` so the UI can tag/prefix them.
    * AYNI: `projection` is a scenario run to a future date (the CMIP6
-   * temperature projections, 1950–2100) — neither live nor a forecast. */
-  realtimeKind?: 'real-time' | 'forecast' | 'projection'
+   * temperature projections, 1950–2100) — neither live nor a forecast.
+   * `reanalysis` and `historical` are past records (ERA5 from 1940,
+   * satellite sea level), titled by that type rather than "Real Time". */
+  realtimeKind?: 'real-time' | 'forecast' | 'projection' | 'reanalysis' | 'historical'
 
   /**
    * Resolved URL of the stream's `.dsa` annotation — the file beside the

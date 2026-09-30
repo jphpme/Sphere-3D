@@ -486,6 +486,37 @@ describe('DataService — node-mode', () => {
       expect(svc.getDatasetById('R2_DASH_declared')).toMatchObject({ title: 'Declared', realtimeKind: 'projection' })
     })
 
+    it('titles reanalysis and historical records by their type, not as real time', async () => {
+      stubFetch(() => new Response(JSON.stringify({
+        datasets: [
+          // The monthly ERA5 record: under /observed/, declared a reanalysis.
+          { id: 'era5', display_name: 'Temperature (ERA5), monthly', dataProductType: 'reanalysis', valueEncoded: true,
+            releaseDescriptorUrl: 'global/observed/era5/t2m_monthly/latest.json' },
+          // An hourly ERA5 stream already on the site, under /reanalysis/.
+          row('tcc', { mpd: 'global/reanalysis/ecmwf-era5/tcc_grouped/stream.mpd' }),
+          { id: 'sealevel', display_name: 'Sea Level (satellite altimetry)', dataProductType: 'historical', valueEncoded: true,
+            releaseDescriptorUrl: 'global/observed/c3s-altimetry/sla_monthly/latest.json' },
+          row('live'),
+        ],
+      }), { status: 200 }))
+      const svc = new DataService()
+      await svc.fetchDatasets()
+      expect(svc.getDatasetById('R2_DASH_era5')).toMatchObject({
+        title: 'Reanalysis: Temperature (ERA5), monthly',
+        realtimeKind: 'reanalysis',
+      })
+      expect(svc.getDatasetById('R2_DASH_era5')!.tags).toContain('Reanalysis')
+      expect(svc.getDatasetById('R2_DASH_era5')!.tags).not.toContain('Real Time')
+      expect(svc.getDatasetById('R2_DASH_tcc')).toMatchObject({ title: 'Reanalysis: tcc', realtimeKind: 'reanalysis' })
+      expect(svc.getDatasetById('R2_DASH_sealevel')).toMatchObject({
+        title: 'Historical: Sea Level (satellite altimetry)',
+        realtimeKind: 'historical',
+      })
+      expect(svc.getDatasetById('R2_DASH_sealevel')!.enriched?.categories?.Source).toEqual(['Historical'])
+      // A live stream is still real time.
+      expect(svc.getDatasetById('R2_DASH_live')).toMatchObject({ title: 'Real Time: live', realtimeKind: 'real-time' })
+    })
+
     it('offers global transparent streams, direct or value-encoded, as real-time overlays', async () => {
       stubFetch(() => new Response(JSON.stringify({
         datasets: [
