@@ -1121,6 +1121,11 @@ export function showBrowseUI(
       tagCloudOverflows = row.scrollHeight > row.clientHeight + 1
     }
     row.classList.toggle('is-clamped', tagCloudOverflows && !chipRailExpanded)
+    // Focus moving backwards into the clipped row (Shift+Tab from the
+    // toggle) makes the browser scroll it to the last chip before
+    // `focusin` expands the cloud, and that offset comes back with
+    // the clamp. Every preview starts from the first row.
+    if (row.classList.contains('is-clamped')) row.scrollTop = 0
     toggle.classList.toggle('hidden', !tagCloudOverflows)
     toggle.setAttribute('aria-expanded', String(chipRailExpanded))
     toggle.textContent = tagCloudToggleLabel(chipRailExpanded)

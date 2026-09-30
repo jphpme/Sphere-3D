@@ -1831,6 +1831,20 @@ describe('Category tag cloud clamp', () => {
     expect(document.activeElement).toBe(first)
   })
 
+  it('starts the preview from the first row again after "Show fewer"', () => {
+    showBrowseUI(cloud, makeCallbacks())
+    toggle().click()
+    // What Shift+Tab from the toggle leaves behind: the browser
+    // scrolled the clipped row to its last chip before the focus
+    // expanded it, and restores that offset with the clamp.
+    row().scrollTop = 98
+
+    toggle().click()
+
+    expect(row().classList.contains('is-clamped')).toBe(true)
+    expect(row().scrollTop).toBe(0)
+  })
+
   it('measures the cloud when its collapsed section opens', () => {
     // Category collapsed at boot: the row can't be measured yet.
     localStorage.setItem('sos-browse-section-open.v1', JSON.stringify({ category: false }))
