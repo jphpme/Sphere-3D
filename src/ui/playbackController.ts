@@ -15,7 +15,13 @@ import { t } from '../i18n'
 import { reportError } from '../analytics'
 
 // --- Playback constants ---
-const LOOP_RESTART_DELAY_MS = 2000
+/**
+ * How long a dataset rests on its last frame before it starts again.
+ * The owner's rule (2026-09-30, the same in the desktop apps): every
+ * loop holds the last frame for 4 s; a playlist's own timing and the
+ * change from one dataset to the next are not loops and keep theirs.
+ */
+export const LOOP_END_HOLD_MS = 4000
 const VIDEO_END_THRESHOLD = 0.05
 const SCRUBBER_MAX = 1000
 const DEFAULT_FRAME_STEP = 1 / 30
@@ -29,6 +35,8 @@ export interface PlaybackState {
   captionTrack: TextTrack | null
   displayInterval: { intervalMs: number; showTime: boolean } | null
   loopPauseTimer: ReturnType<typeof setTimeout> | null
+  /** The element the loop-end listeners are on, so they come off with the loop. */
+  loopEndTarget: { video: HTMLVideoElement; onEnd: () => void } | null
 }
 
 /** Create a fresh playback state with all fields at their defaults. */
@@ -39,7 +47,51 @@ export function createPlaybackState(): PlaybackState {
     captionTrack: null,
     displayInterval: null,
     loopPauseTimer: null,
+    loopEndTarget: null,
   }
+}
+
+/**
+ * The end of a loop: hold the last frame for `LOOP_END_HOLD_MS`, then
+ * start again from the beginning. Reached from the element's own
+ * `timeupdate` and `ended` events as well as the rAF loop, because a
+ * headset session stops the page's animation frames and a dataset
+ * would otherwise end there and stay ended. The transport still reads
+ * "playing" through the hold: nobody pressed pause.
+ */
+function checkLoopEnd(state: PlaybackState, hlsService: HLSService, appState: AppState): void {
+  const video = hlsService.getVideo()
+  if (!video || state.loopPauseTimer || !appState.isPlaying) return
+  if (!(video.duration > 0)) return
+  const atEnd = video.ended || (!video.paused && video.currentTime >= video.duration - VIDEO_END_THRESHOLD)
+  if (!atEnd) return
+  video.pause()
+  state.loopPauseTimer = setTimeout(() => {
+    state.loopPauseTimer = null
+    // Still at the end, still playing: anything else was the user's doing.
+    const current = hlsService.getVideo()
+    if (!current || !appState.isPlaying) return
+    if (!current.ended && current.currentTime < current.duration - VIDEO_END_THRESHOLD) return
+    current.currentTime = 0
+    current.play().catch(() => {})
+  }, LOOP_END_HOLD_MS)
+}
+
+/** True while the dataset rests on its last frame between loops. */
+export function isHoldingLoopEnd(state: PlaybackState): boolean {
+  return state.loopPauseTimer !== null
+}
+
+/**
+ * A user action during the hold — a pause, a seek, a step — takes the
+ * hold off: the next play starts from wherever the user left it (the
+ * start, after a pause at the end), not from the hold's restart.
+ */
+export function cancelLoopHold(state: PlaybackState): boolean {
+  if (!state.loopPauseTimer) return false
+  clearTimeout(state.loopPauseTimer)
+  state.loopPauseTimer = null
+  return true
 }
 
 // --- Playback loop ---
@@ -55,6 +107,14 @@ export function startPlaybackLoop(
   onTick?: () => void,
 ): void {
   stopPlaybackLoop(state)
+
+  const endVideo = hlsService?.getVideo() ?? null
+  if (hlsService && endVideo) {
+    const onEnd = () => checkLoopEnd(state, hlsService, appState)
+    endVideo.addEventListener('timeupdate', onEnd)
+    endVideo.addEventListener('ended', onEnd)
+    state.loopEndTarget = { video: endVideo, onEnd }
+  }
 
   const loop = () => {
     // Fires every frame regardless of primary play/pause state. Used
@@ -79,17 +139,8 @@ export function startPlaybackLoop(
           state.scrubbing = false
         }
 
-        // Auto-loop: pause at end, then restart after 2 seconds
-        if (!video.paused && video.currentTime >= video.duration - VIDEO_END_THRESHOLD && !state.loopPauseTimer) {
-          video.pause()
-          state.loopPauseTimer = setTimeout(() => {
-            state.loopPauseTimer = null
-            if (hlsService && appState.isPlaying) {
-              video.currentTime = 0
-              video.play().catch(() => {})
-            }
-          }, LOOP_RESTART_DELAY_MS)
-        }
+        // The loop's end: hold the last frame, then start again.
+        checkLoopEnd(state, hlsService, appState)
 
         const scrubber = document.getElementById('scrubber') as HTMLInputElement
         if (scrubber && !scrubber.matches(':active')) {
@@ -119,6 +170,12 @@ export function stopPlaybackLoop(state: PlaybackState): void {
     cancelAnimationFrame(state.playbackUpdateId)
     state.playbackUpdateId = null
   }
+  if (state.loopEndTarget) {
+    const { video, onEnd } = state.loopEndTarget
+    video.removeEventListener('timeupdate', onEnd)
+    video.removeEventListener('ended', onEnd)
+    state.loopEndTarget = null
+  }
 }
 
 // --- Transport controls ---
@@ -128,10 +185,25 @@ export function togglePlayPause(
   hlsService: HLSService | null,
   appState: AppState,
   announce: (msg: string) => void,
+  state?: PlaybackState,
 ): void {
   if (!hlsService) return
 
+  // Resting on the last frame between loops still counts as playing:
+  // the press is a pause, and it leaves the dataset on that frame.
+  if (state && cancelLoopHold(state)) {
+    appState.isPlaying = false
+    updatePlayButton(true)
+    announce(t('playback.announce.paused'))
+    return
+  }
+
   if (hlsService.paused) {
+    // Paused on the last frame: play starts over, not one frame of the end.
+    const video = hlsService.getVideo()
+    if (video && video.duration > 0 && (video.ended || video.currentTime >= video.duration - VIDEO_END_THRESHOLD)) {
+      video.currentTime = 0
+    }
     hlsService.play()?.catch(e => {
       logger.warn('[App] Play failed:', e)
     })
@@ -194,6 +266,7 @@ export function rewind(
   announce: (msg: string) => void,
 ): void {
   if (!hlsService) return
+  cancelLoopHold(state)
   hlsService.currentTime = 0
   hlsService.pause()
   appState.isPlaying = false
@@ -210,6 +283,7 @@ export function fastForward(
   announce: (msg: string) => void,
 ): void {
   if (!hlsService) return
+  cancelLoopHold(state)
   const video = hlsService.getVideo()
   if (video && video.duration) {
     video.currentTime = Math.max(0, video.duration - VIDEO_END_THRESHOLD)
@@ -233,7 +307,7 @@ export function stepFrame(
   const video = hlsService.getVideo()
   if (!video || !video.duration) return
 
-  if (!video.paused) {
+  if (!video.paused || cancelLoopHold(state)) {
     hlsService.pause()
     appState.isPlaying = false
     updatePlayButton(true)
@@ -258,6 +332,7 @@ export function onScrub(
   value: number,
   hlsService: HLSService | null,
   state: PlaybackState,
+  appState?: AppState,
 ): void {
   if (!hlsService) return
   const fraction = value / SCRUBBER_MAX
@@ -265,6 +340,8 @@ export function onScrub(
   if (video && video.duration) {
     video.currentTime = fraction * video.duration
     state.scrubbing = true
+    // A scrub during the hold plays on from where it landed.
+    if (cancelLoopHold(state) && appState?.isPlaying) video.play().catch(() => {})
   }
 }
 
@@ -485,7 +562,7 @@ export function seekToDate(
   state.scrubbing = true
 
   // Pause if playing so user can inspect the moment
-  if (!video.paused) {
+  if (!video.paused || cancelLoopHold(state)) {
     hlsService.pause()
     appState.isPlaying = false
     updatePlayButton(true)

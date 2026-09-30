@@ -16,6 +16,9 @@ import {
   resetPlaybackState,
   loadCaptions,
   checkSeekToDate,
+  cancelLoopHold,
+  isHoldingLoopEnd,
+  LOOP_END_HOLD_MS,
   type PlaybackState,
 } from './playbackController'
 import type { AppState } from '../types'
@@ -60,6 +63,8 @@ function makeMockHls(overrides: Record<string, any> = {}) {
       currentTime: overrides.currentTime ?? 0,
       duration: overrides.duration ?? 60,
       readyState: 4,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
     }),
     video: {
       muted: false,
@@ -424,6 +429,140 @@ describe('toggleCaptions', () => {
 // ---------------------------------------------------------------------------
 // resetPlaybackState
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// The rest on the last frame between loops
+// ---------------------------------------------------------------------------
+describe('the loop-end hold', () => {
+  /** A video element as the loop sees it: the events are real, the transport is faked. */
+  function makeVideo(duration = 60) {
+    const video = document.createElement('video')
+    let time = 0
+    let paused = false
+    let ended = false
+    Object.defineProperty(video, 'duration', { get: () => duration, configurable: true })
+    Object.defineProperty(video, 'currentTime', { get: () => time, set: (v: number) => { time = v; ended = false }, configurable: true })
+    Object.defineProperty(video, 'paused', { get: () => paused, configurable: true })
+    Object.defineProperty(video, 'ended', { get: () => ended, configurable: true })
+    Object.defineProperty(video, 'readyState', { get: () => 4, configurable: true })
+    const play = vi.fn(async () => { paused = false })
+    const pause = vi.fn(() => { paused = true })
+    video.play = play
+    video.pause = pause
+    const hls = {
+      get paused() { return paused },
+      play,
+      pause,
+      getVideo: () => video,
+      video,
+    } as any
+    return {
+      video, hls, play, pause,
+      /** The element reaches the end on its own clock. */
+      reachEnd(byEvent: 'timeupdate' | 'ended') {
+        time = byEvent === 'ended' ? duration : duration - 0.01
+        if (byEvent === 'ended') { ended = true; paused = true }
+        video.dispatchEvent(new Event(byEvent))
+      },
+    }
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    rafCallbacks = []
+  })
+
+  it('holds the last frame for 4 s, then starts again from the beginning, without a rAF', () => {
+    const { video, hls, play, pause, reachEnd } = makeVideo()
+    const state = createPlaybackState()
+    const appState = makeAppState({ isPlaying: true })
+    startPlaybackLoop(state, hls, null, appState, vi.fn())
+    reachEnd('timeupdate')
+    expect(pause).toHaveBeenCalledTimes(1)
+    expect(isHoldingLoopEnd(state)).toBe(true)
+    // The transport still reads playing: nobody pressed pause.
+    expect(appState.isPlaying).toBe(true)
+    vi.advanceTimersByTime(LOOP_END_HOLD_MS - 1)
+    expect(play).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(1)
+    expect(video.currentTime).toBe(0)
+    expect(play).toHaveBeenCalledTimes(1)
+    expect(isHoldingLoopEnd(state)).toBe(false)
+    stopPlaybackLoop(state)
+  })
+
+  it('takes a natural end (a headset, where timeupdate came too seldom) as the loop\'s end too', () => {
+    const { video, hls, play, reachEnd } = makeVideo()
+    const state = createPlaybackState()
+    startPlaybackLoop(state, hls, null, makeAppState({ isPlaying: true }), vi.fn())
+    reachEnd('ended')
+    expect(isHoldingLoopEnd(state)).toBe(true)
+    vi.advanceTimersByTime(LOOP_END_HOLD_MS)
+    expect(video.currentTime).toBe(0)
+    expect(play).toHaveBeenCalledTimes(1)
+    stopPlaybackLoop(state)
+  })
+
+  it('a press during the hold pauses on the last frame, and the next play starts from 0', () => {
+    const { video, hls, play, reachEnd } = makeVideo()
+    const state = createPlaybackState()
+    const appState = makeAppState({ isPlaying: true })
+    startPlaybackLoop(state, hls, null, appState, vi.fn())
+    reachEnd('timeupdate')
+    togglePlayPause(hls, appState, vi.fn(), state)
+    expect(appState.isPlaying).toBe(false)
+    expect(isHoldingLoopEnd(state)).toBe(false)
+    vi.advanceTimersByTime(LOOP_END_HOLD_MS)
+    expect(play).not.toHaveBeenCalled()
+    expect(video.currentTime).toBeCloseTo(59.99)
+    togglePlayPause(hls, appState, vi.fn(), state)
+    expect(video.currentTime).toBe(0)
+    expect(play).toHaveBeenCalledTimes(1)
+    stopPlaybackLoop(state)
+  })
+
+  it('a scrub during the hold plays on from where it landed', () => {
+    const { video, hls, play, reachEnd } = makeVideo()
+    const state = createPlaybackState()
+    const appState = makeAppState({ isPlaying: true })
+    startPlaybackLoop(state, hls, null, appState, vi.fn())
+    reachEnd('timeupdate')
+    onScrub(500, hls, state, appState)
+    expect(video.currentTime).toBe(30)
+    expect(play).toHaveBeenCalledTimes(1)
+    expect(isHoldingLoopEnd(state)).toBe(false)
+    vi.advanceTimersByTime(LOOP_END_HOLD_MS)
+    expect(video.currentTime).toBe(30)
+    stopPlaybackLoop(state)
+  })
+
+  it('does not restart a dataset the user seeked away from during the hold', () => {
+    const { video, hls, play, reachEnd } = makeVideo()
+    const state = createPlaybackState()
+    startPlaybackLoop(state, hls, null, makeAppState({ isPlaying: true }), vi.fn())
+    reachEnd('timeupdate')
+    video.currentTime = 10
+    vi.advanceTimersByTime(LOOP_END_HOLD_MS)
+    expect(video.currentTime).toBe(10)
+    expect(play).not.toHaveBeenCalled()
+    stopPlaybackLoop(state)
+  })
+
+  it('stopping the loop takes the listeners off and cancelLoopHold clears the timer', () => {
+    const { video, hls, play, reachEnd } = makeVideo()
+    const state = createPlaybackState()
+    startPlaybackLoop(state, hls, null, makeAppState({ isPlaying: true }), vi.fn())
+    reachEnd('timeupdate')
+    expect(cancelLoopHold(state)).toBe(true)
+    expect(cancelLoopHold(state)).toBe(false)
+    stopPlaybackLoop(state)
+    reachEnd('timeupdate')
+    expect(isHoldingLoopEnd(state)).toBe(false)
+    vi.advanceTimersByTime(LOOP_END_HOLD_MS)
+    expect(play).not.toHaveBeenCalled()
+    expect(video.currentTime).toBeCloseTo(59.99)
+  })
+})
+
 describe('resetPlaybackState', () => {
   beforeEach(() => {
     document.body.innerHTML = `

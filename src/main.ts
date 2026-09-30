@@ -92,6 +92,7 @@ import {
   updatePlayButton, toggleCaptions, resetPlaybackState, initPlaybackPositioning,
   seekToDate,
   checkSeekToDate,
+  cancelLoopHold,
   type PlaybackState,
 } from './ui/playbackController'
 import {
@@ -2026,7 +2027,7 @@ class InteractiveSphere {
       getAllRenderers: () => this.viewports.getAll(),
       getPrimarySlot: () => this.viewports.getPrimaryIndex(),
       togglePlayPause: () => {
-        togglePlayPause(this.hlsService, this.appState, (m) => this.announce(m))
+        togglePlayPause(this.hlsService, this.appState, (m) => this.announce(m), this.playback)
       },
       isPlaying: () => this.appState.isPlaying,
       setPlaybackRate: (rate) => {
@@ -2192,6 +2193,8 @@ class InteractiveSphere {
     // Mid-frame: the decoder lands inside the frame that represents the
     // instant instead of on the boundary between two of them.
     video.currentTime = videoTimeForDateMs(timeline, epochMs)
+    // A seek during the rest on the last frame plays on from the seek.
+    if (cancelLoopHold(this.playback) && this.appState.isPlaying) void video.play().catch(() => {})
   }
 
   /**
@@ -4565,7 +4568,7 @@ class InteractiveSphere {
     })
     document.getElementById('play-btn')?.addEventListener('click', () => {
       const wasPaused = this.hlsService?.paused ?? true
-      togglePlayPause(this.hlsService, this.appState, (m) => this.announce(m))
+      togglePlayPause(this.hlsService, this.appState, (m) => this.announce(m), this.playback)
       this.emitPlaybackAction(wasPaused ? 'play' : 'pause')
     })
     document.getElementById('step-fwd-btn')?.addEventListener('click', () => {
@@ -4605,7 +4608,7 @@ class InteractiveSphere {
     const scrubber = document.getElementById('scrubber') as HTMLInputElement
     if (scrubber) {
       scrubber.addEventListener('input', () => {
-        onScrub(parseInt(scrubber.value, 10), this.hlsService, this.playback)
+        onScrub(parseInt(scrubber.value, 10), this.hlsService, this.playback, this.appState)
       })
     }
 
@@ -4617,7 +4620,7 @@ class InteractiveSphere {
 
       if (e.code === 'Space') {
         e.preventDefault()
-        togglePlayPause(this.hlsService, this.appState, (m) => this.announce(m))
+        togglePlayPause(this.hlsService, this.appState, (m) => this.announce(m), this.playback)
       } else if (e.code === 'ArrowLeft') {
         e.preventDefault()
         stepFrame(-1, this.hlsService, this.appState, this.playback, (m) => this.announce(m))
