@@ -1831,6 +1831,24 @@ describe('Category tag cloud clamp', () => {
     expect(document.activeElement).toBe(first)
   })
 
+  it('stays clamped when a chip takes focus from a mouse click', () => {
+    showBrowseUI(cloud, makeCallbacks())
+
+    // A click focuses the chip without `:focus-visible`. happy-dom
+    // can't tell the two kinds of focus apart, so answer for it.
+    const first = chip('Tag01')
+    const matches = first.matches.bind(first)
+    vi.spyOn(first, 'matches').mockImplementation(
+      selector => selector !== ':focus-visible' && matches(selector),
+    )
+    first.focus()
+
+    expect(document.activeElement).toBe(first)
+    expect(row().classList.contains('is-clamped')).toBe(true)
+    expect(toggle().getAttribute('aria-expanded')).toBe('false')
+    expect(toggle().textContent).toBe('Show more')
+  })
+
   it('starts the preview from the first row again after "Show fewer"', () => {
     showBrowseUI(cloud, makeCallbacks())
     toggle().click()
