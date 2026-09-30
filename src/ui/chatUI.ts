@@ -912,9 +912,14 @@ function startListening(): void {
       const suppressed = sttSuppressAutoSend
       sttSuppressAutoSend = false
       endListening()
+      // Auto-send on a committed transcript (push-to-talk turn) —
+      // unless an error was reported (could be partial/wrong) or a
+      // manual send already terminated this session. Decided once:
+      // the turn either goes on to a reply or ends here, never both.
+      const willSend = hadFinal && !sttError && !suppressed && !!input.value.trim()
       // Nothing heard, or the send already happened elsewhere: the
       // immersive turn ends here rather than waiting on a reply.
-      if (!(hadFinal && !sttError && !suppressed && input.value.trim())) finishImmersiveTurn(turnId)
+      if (!willSend) finishImmersiveTurn(turnId)
       // Tier B: no transcript text — only provider/lang/duration/success.
       emit({
         event_type: 'voice_interaction',
@@ -925,10 +930,7 @@ function startListening(): void {
         lang: langBase,
         success: hadFinal && !sttError,
       })
-      // Auto-send on a committed transcript (push-to-talk turn) —
-      // unless an error was reported (could be partial/wrong) or a
-      // manual send already terminated this session.
-      if (hadFinal && !sttError && !suppressed && input.value.trim()) void handleSend()
+      if (willSend) void handleSend()
     },
   })
   if (!ended) sttSession = session
