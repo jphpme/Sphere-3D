@@ -87,7 +87,7 @@ let ttsGeneration = 0
  * boundary is a silence that long while the next one is fetched. With
  * it, the next sentence synthesizes while the current one plays.
  */
-const prefetched = new Map<string, { audio: Promise<string | null>; abort: AbortController }>()
+const prefetched = new Map<string, { audio: Promise<Synthesized>; abort: AbortController }>()
 /**
  * Upper bound on requests started ahead — a cancelled reply abandons at
  * most this many, plus the one for the sentence `speak()` is waiting on.
@@ -97,19 +97,29 @@ const MAX_PREFETCHED = 3
 const RETRYABLE_STATUS = new Set([500, 502, 504])
 const RETRY_DELAY_MS = 300
 
+/**
+ * The server answered, and the answer was no (a 4xx, or the kill
+ * switch). Kept apart from `null`, which is a failure that may pass
+ * (gateway errors, a dropped connection, Stop): only that one is worth
+ * asking about again.
+ */
+const REFUSED = Symbol('refused')
+type Synthesized = string | null | typeof REFUSED
+
 const prefetchKey = (text: string, lang: string): string => `${lang}\u0000${text}`
 
 /**
- * POST one sentence to `/synthesize`, returning its base64 audio or null
- * (soft-fail: this runs inside the TTS queue chain, where a throw would
- * reject the chain and wedge the Stop-speaking UI). One retry on a
+ * POST one sentence to `/synthesize`, returning its base64 audio, null
+ * for a failure that may pass, or {@link REFUSED} (soft-fail: this runs
+ * inside the TTS queue chain, where a throw would reject the chain and
+ * wedge the Stop-speaking UI). One retry on a
  * gateway error or a dropped connection: the endpoint answers 502 on a
  * transient Workers AI failure, and without the retry that sentence is
  * silently skipped mid-reply. Not once `signal` is aborted, though: a
  * retry after Stop would be a second billed synthesis for audio nobody
  * will hear.
  */
-async function synthesize(text: string, lang: string, signal: AbortSignal): Promise<string | null> {
+async function synthesize(text: string, lang: string, signal: AbortSignal): Promise<Synthesized> {
   for (let attempt = 0; attempt < 2; attempt++) {
     if (attempt > 0) await retryPause(signal)
     if (signal.aborted) return null
@@ -129,7 +139,7 @@ async function synthesize(text: string, lang: string, signal: AbortSignal): Prom
     if (!res.ok) {
       if (RETRYABLE_STATUS.has(res.status)) continue
       noteKill(res, await readCode(res))
-      return null
+      return REFUSED
     }
     try {
       const data = await res.json() as { audio?: string; format?: string }
@@ -195,13 +205,15 @@ export const cloudTtsEngine: TtsEngine = {
     // A prefetch makes both of its attempts early, while the previous
     // sentence plays. If both failed, ask again now that it is this
     // sentence's turn rather than leave a gap in the reply — unless Stop
-    // was pressed or the server turned voice off in the meantime.
-    if (!audio && ahead && generation === ttsGeneration && !cloudVoiceDisabled) {
+    // was pressed or the server turned voice off in the meantime. A
+    // refusal (a spent quota, a rate limit) is an answer, not a failure:
+    // asking again would only repeat it.
+    if (audio === null && ahead && generation === ttsGeneration && !cloudVoiceDisabled) {
       audio = await synthesize(text, opts.lang, abort.signal)
     }
     if (currentRequest === abort) currentRequest = null
     // Stopped while this sentence was being synthesized: stay silent.
-    if (!audio || generation !== ttsGeneration) return
+    if (typeof audio !== 'string' || !audio || generation !== ttsGeneration) return
     await playDataUrl(`data:audio/mpeg;base64,${audio}`)
   },
   prefetch: (text, opts) => {

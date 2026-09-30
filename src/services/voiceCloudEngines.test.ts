@@ -274,6 +274,19 @@ describe('cloud TTS', () => {
       expect(played).toEqual([])
     })
 
+    it('does not ask again when the prefetch was refused', async () => {
+      // A spent quota or a rate limit answers 429. That is an answer, not
+      // a failure that may pass: a second request would only repeat it.
+      const fetchMock = vi.fn(async () => new Response(JSON.stringify({ code: 'quota_exhausted' }), { status: 429 }))
+      vi.stubGlobal('fetch', fetchMock)
+
+      cloudTtsEngine.prefetch!('Second.', { lang: 'en' })
+      await cloudTtsEngine.speak('Second.', { lang: 'en' })
+
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      expect(played).toEqual([])
+    })
+
     // Stop has to reach the sentence `speak()` is waiting on whether its
     // request was started ahead of time or by `speak()` itself.
     describe.each([
