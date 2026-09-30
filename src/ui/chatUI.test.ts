@@ -1487,11 +1487,12 @@ describe('immersive voice (VR/AR HUD)', () => {
     const spoken: string[] = []
     registerTtsEngine(fakeTts(spoken))
     await replyWith({ type: 'delta', text: 'Here is sea ice.' })
-    initChatUI(makeCallbacks())
-    ;(document.getElementById('chat-input') as HTMLTextAreaElement).value = 'show me sea ice'
-    ;(document.getElementById('chat-send') as HTMLButtonElement).click()
-    await vi.waitFor(() => expect(getMessages()[1]?.text).toBe('Here is sea ice.'))
-    await flush()
+    const cb = makeCallbacks()
+    initChatUI(cb)
+    sendFromPanel('show me sea ice')
+    await until(() => sendsFinished(cb) === 1, 'the send finished')
+    await until(() => audioRestored(cb), 'the turn drained')
+    expect(getMessages()[1]?.text).toBe('Here is sea ice.')
     expect(spoken).toEqual([])
   })
 
@@ -1549,10 +1550,9 @@ describe('immersive voice (VR/AR HUD)', () => {
     await replyWith({ type: 'delta', text: 'Sea ice is a good fit.' }, LOAD_ICE)
     const cb = makeCallbacks()
     initChatUI(cb)
-    ;(document.getElementById('chat-input') as HTMLTextAreaElement).value = 'show me sea ice'
-    ;(document.getElementById('chat-send') as HTMLButtonElement).click()
-    await vi.waitFor(() => expect(getMessages()[1]?.actions).toHaveLength(1))
-    await flush()
+    sendFromPanel('show me sea ice')
+    await until(() => sendsFinished(cb) === 1, 'the send finished')
+    expect(getMessages()[1]?.actions).toHaveLength(1)
     expect(cb.onLoadDataset).not.toHaveBeenCalled()
   })
 
@@ -1766,13 +1766,20 @@ describe('immersive voice (VR/AR HUD)', () => {
   })
 
   it('stops listening without sending when the immersive session ends', async () => {
-    registerSttEngine(heldSttEngine('hello'))
+    const held = heldSttEngine('hello')
+    const sessionEnded = vi.fn()
+    registerSttEngine({
+      ...held,
+      start: (opts) => held.start({ ...opts, onEnd: () => { opts.onEnd(); sessionEnded() } }),
+    })
     initChatUI(makeCallbacks())
     toggleImmersiveVoice()
     await vi.waitFor(() => expect(getImmersiveVoiceState()?.caption).toBe('hello'))
     endImmersiveVoice()
     expect(getImmersiveVoiceState()).toEqual({ phase: 'idle', caption: '' })
-    await flush()
+    // The session committed "hello" and ran to its end — the point
+    // where a transcript is normally sent.
+    expect(sessionEnded).toHaveBeenCalledTimes(1)
     // Left in the input for the 2D user to send or discard.
     expect(getMessages()).toHaveLength(0)
     expect((document.getElementById('chat-input') as HTMLTextAreaElement).value).toBe('hello')
