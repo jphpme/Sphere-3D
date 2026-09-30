@@ -1506,6 +1506,45 @@ describe('immersive voice (VR/AR HUD)', () => {
     expect(cb.onLoadDataset).toHaveBeenCalledTimes(1)
   })
 
+  it('does not swap the dataset the reply is about for a related one it also suggests', async () => {
+    // Orbit often attaches a Load for the dataset being viewed. The
+    // reply's first Load is the rule, and that one is already showing.
+    registerSttEngine(createFakeSttEngine({ provider: 'local', transcript: 'what am I looking at' }))
+    await replyWith(
+      { type: 'delta', text: 'This is sea surface temperature. Sea ice is related.' },
+      { type: 'action', action: { type: 'load-dataset', datasetId: 'DS_SST', datasetTitle: 'Sea Surface Temperature' } },
+      LOAD_ICE,
+      { type: 'action', action: { type: 'fly-to', lat: 10, lon: 20 } },
+    )
+    const cb = makeCallbacks()
+    cb.getCurrentDataset.mockReturnValue({ id: 'DS_SST' })
+    initChatUI(cb)
+
+    toggleImmersiveVoice()
+    await until(() => sendsFinished(cb) === 1, 'the send finished')
+    expect(cb.onLoadDataset).not.toHaveBeenCalled()
+    // Nothing is loading, so the reply's fly-to has no load to wait for.
+    expect(cb.onFlyTo).toHaveBeenCalledWith(10, 20, undefined)
+  })
+
+  it('holds the fly-to until the Load it carried out lands', async () => {
+    registerSttEngine(createFakeSttEngine({ provider: 'local', transcript: 'show me sea ice' }))
+    await replyWith(
+      { type: 'delta', text: 'Sea ice is a good fit.' },
+      LOAD_ICE,
+      { type: 'action', action: { type: 'fly-to', lat: 10, lon: 20 } },
+    )
+    const cb = makeCallbacks()
+    cb.getCurrentDataset.mockReturnValue({ id: 'DS_SST' })
+    initChatUI(cb)
+
+    toggleImmersiveVoice()
+    await until(() => sendsFinished(cb) === 1, 'the send finished')
+    expect(cb.onLoadDataset.mock.calls).toEqual([['DS_ICE']])
+    // The host flushes it once the dataset is on the globe, as after a click.
+    expect(cb.onFlyTo).not.toHaveBeenCalled()
+  })
+
   it('leaves the Load as a button on a panel turn', async () => {
     await replyWith({ type: 'delta', text: 'Sea ice is a good fit.' }, LOAD_ICE)
     const cb = makeCallbacks()

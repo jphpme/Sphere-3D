@@ -1693,19 +1693,26 @@ async function handleSend(): Promise<void> {
           // globe sat still because the same reply also recommended a
           // different dataset and the fly-to was queued behind it.
           flushMeasurementGlobeActions()
-          if (loadActions.length === 0 || allAlreadyLoaded) {
+          // No one can tap a Load button in the headset, so an immersive
+          // turn does what the tap would — for the reply's first Load
+          // only, never a later one: Orbit often leads with a Load for
+          // the dataset being viewed and then suggests a related one,
+          // and carrying that out would replace what the user asked about.
+          const firstLoad = immersiveTurn && !autoLoaded ? loadActions[0] : undefined
+          // The first Load is the dataset already showing: tapping it
+          // would change nothing, so nothing is loaded. The deferred
+          // fly-to / seek then has no load to wait for — the other Loads
+          // can't be tapped either — and runs now, as it does when every
+          // Load is already on the globe.
+          const firstLoadShowing = firstLoad?.type === 'load-dataset' && firstLoad.datasetId === currentDataset?.id
+          if (loadActions.length === 0 || allAlreadyLoaded || firstLoadShowing) {
             flushPendingGlobeActions()
           } else {
-            if (immersiveTurn && !autoLoaded) {
-              // No one can tap a Load button in the headset, so do what
-              // the tap would: load the first dataset the reply
-              // recommends. The host flushes the deferred fly-to / seek
-              // once it lands (flushPendingGlobeActions), as after a click.
-              const next = loadActions.find(a => a.type === 'load-dataset' && a.datasetId !== currentDataset?.id)
-              if (next?.type === 'load-dataset') {
-                callbacks.onLoadDataset(next.datasetId)
-                callbacks.announce(t('chat.announce.loading'))
-              }
+            if (firstLoad?.type === 'load-dataset') {
+              // The host flushes the deferred fly-to / seek once the
+              // dataset lands (flushPendingGlobeActions), as after a click.
+              callbacks.onLoadDataset(firstLoad.datasetId)
+              callbacks.announce(t('chat.announce.loading'))
             }
             // A load is pending, so the deferred set-time seek hasn't run —
             // it flushes once the user taps Load. Any set-time error stamped
