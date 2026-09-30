@@ -1005,6 +1005,10 @@ export function toggleImmersiveVoice(): void {
   }
   if (sttSession) {
     stopListening()
+    // An engine that answers later keeps the session open after the
+    // tap — cloud STT uploads and transcribes before it ends. That wait
+    // is already Orbit's, so the HUD stops inviting another tap to send.
+    if (sttSession && immersiveTurn) immersivePhase = 'thinking'
     return
   }
   if (immersiveTurn && immersivePhase === 'speaking') {

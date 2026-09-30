@@ -1584,6 +1584,38 @@ describe('immersive voice (VR/AR HUD)', () => {
     await vi.waitFor(() => expect(getMessages()[0]?.text).toBe('where is the ozone hole'))
   })
 
+  it('shows thinking after the send tap while the engine is still transcribing', async () => {
+    // Cloud STT has no live transcript: stop() uploads the recording,
+    // and the session only ends when the transcription comes back.
+    let answer: () => void = () => {}
+    registerSttEngine({
+      provider: 'local',
+      supportsLanguage: () => true,
+      isAvailable: () => true,
+      start: (opts) => ({
+        stop: () => {
+          answer = () => {
+            opts.onResult({ transcript: 'where is the ozone hole', isFinal: true })
+            opts.onEnd()
+          }
+        },
+      }),
+    })
+    await replyWith({ type: 'delta', text: 'Over Antarctica.' })
+    const cb = makeCallbacks()
+    initChatUI(cb)
+
+    toggleImmersiveVoice()
+    expect(getImmersiveVoiceState()?.phase).toBe('listening')
+    toggleImmersiveVoice()
+    // Not "Listening… tap the mic to send" for the whole upload.
+    expect(getImmersiveVoiceState()).toEqual({ phase: 'thinking', caption: '' })
+
+    answer()
+    await until(() => sendsFinished(cb) === 1, 'the send finished')
+    expect(getMessages()[0]).toMatchObject({ role: 'user', text: 'where is the ozone hole' })
+  })
+
   it('shows the reply as the caption when no voice can speak it', async () => {
     registerSttEngine(createFakeSttEngine({ provider: 'local', transcript: 'show me sea ice' }))
     await replyWith({ type: 'delta', text: 'Here is **sea ice**.' })
