@@ -3,8 +3,10 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  bordersChoice,
   coverageOfPixels,
   defaultLayers,
+  withBordersChoice,
   fetchLayerCatalog,
   resetLayerCatalog,
   type CatalogLayer,
@@ -30,8 +32,14 @@ describe('defaultLayers', () => {
     })
   })
 
-  it('adds white borders when a transparent stream still hides most of the Earth (Van Gogh wind)', () => {
+  it('adds white borders only when a transparent stream has no see-through texel (0.1 % tolerated)', () => {
+    // The owner's rule, shared with the desktop apps: a field that leaves
+    // any of the Earth showing (the Van Gogh wind at 93 %) gets no borders.
     expect(defaultLayers(LIVE, { transparent: true, coverage: 0.93 })).toEqual({
+      basemapId: 'builtin-nasa-relief-bathymetry',
+      overlays: [],
+    })
+    expect(defaultLayers(LIVE, { transparent: true, coverage: 0.9995 })).toEqual({
       basemapId: 'builtin-nasa-relief-bathymetry',
       overlays: [{ id: 'builtin-nasa-reference-features', tint: 'white' }],
     })
@@ -60,6 +68,34 @@ describe('defaultLayers', () => {
 
   it('offers nothing when the catalog has no layers', () => {
     expect(defaultLayers([], { transparent: true, coverage: 1 })).toEqual({ basemapId: null, overlays: [] })
+  })
+})
+
+describe('the viewer\'s word on borders', () => {
+  const borders = { id: 'builtin-nasa-reference-features', tint: 'white' as const }
+  const grid = { id: 'builtin-noaa-graticule', tint: 'white' as const }
+  const withBorders = { basemapId: null, overlays: [borders] }
+  const without = { basemapId: null, overlays: [grid] }
+
+  it('reads a switch of the borders overlay, and nothing from other changes', () => {
+    expect(bordersChoice(without, { basemapId: null, overlays: [grid, borders] }, LIVE)).toBe('on')
+    expect(bordersChoice(withBorders, without, LIVE)).toBe('off')
+    expect(bordersChoice(without, { basemapId: 'builtin-nasa-blue-marble', overlays: [] }, LIVE)).toBeNull()
+    expect(bordersChoice(without, withBorders, [])).toBeNull()
+  })
+
+  it('keeps borders the viewer asked for on a dataset that would not get them', () => {
+    const sparse = defaultLayers(LIVE, { transparent: true, coverage: 0.08 })
+    expect(withBordersChoice(sparse, 'on', LIVE)).toEqual({
+      basemapId: 'builtin-nasa-relief-bathymetry',
+      overlays: [borders],
+    })
+  })
+
+  it('keeps borders off where the viewer turned them off, and changes nothing without a word', () => {
+    const opaque = defaultLayers(LIVE, { transparent: false, coverage: null })
+    expect(withBordersChoice(opaque, 'off', LIVE).overlays).toEqual([])
+    expect(withBordersChoice(opaque, null, LIVE)).toBe(opaque)
   })
 })
 

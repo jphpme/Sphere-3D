@@ -11,10 +11,13 @@
 import { MapRenderer } from './services/mapRenderer'
 import {
   NO_LAYERS,
+  bordersChoice,
   defaultLayers,
   fetchLayerCatalog,
   measureCoverage,
   resolveLayerImages,
+  withBordersChoice,
+  type BordersChoice,
   type LayerSelection,
 } from './services/mapLayers'
 import type { MapLayerImages } from './services/earthTileLayer'
@@ -433,6 +436,11 @@ class InteractiveSphere {
   // --- AYNI: layer stack (services/mapLayers.ts) ---
   /** The basemap + overlays chosen for the loaded dataset. */
   private mapLayerSelection: LayerSelection = NO_LAYERS
+  /**
+   * The viewer's own word on borders, from the picker. The next dataset
+   * undoes only the automatic switch-on (mapLayers.withBordersChoice).
+   */
+  private viewerBorders: BordersChoice | null = null
   /** Their decoded images; the same object until the stack changes, which the VR poll relies on. */
   private mapLayerImages: MapLayerImages | null = null
   /** The slot the stack belongs to (the one its dataset loaded into). */
@@ -610,9 +618,17 @@ class InteractiveSphere {
         fullscreen: this.fullscreen ?? undefined,
       })
       // AYNI: the Layers section of the Tools menu. A choice there applies to
-      // the loaded dataset's slot and holds until the next dataset loads.
+      // the loaded dataset's slot; the basemap holds until the next dataset
+      // loads, a word on borders stays.
       this.layerPicker = mountLayerPicker(
-        selection => { void this.applyMapLayers(selection, this.mapLayerSlot) },
+        selection => {
+          // Read before applyMapLayers replaces it.
+          const before = this.mapLayerSelection
+          void fetchLayerCatalog().then(layers => {
+            this.viewerBorders = bordersChoice(before, selection, layers) ?? this.viewerBorders
+          })
+          void this.applyMapLayers(selection, this.mapLayerSlot)
+        },
         id => { void this.setRtOverlay(id) },
       )
       void fetchLayerCatalog().then(layers => this.layerPicker?.update(layers, this.mapLayerSelection))
@@ -1238,7 +1254,7 @@ class InteractiveSphere {
       carriesAlphaStream(dataset) || dataset.renderEncoding === RENDER_ENCODING_DATA_LUMA || !!dataset.releaseEncoding
     const coverage = transparent ? await this.measureDatasetCoverage(dataset, slot) : null
     if (gen !== this.mapLayerGen) return
-    await this.applyMapLayers(defaultLayers(layers, { transparent, coverage }), slot, gen)
+    await this.applyMapLayers(withBordersChoice(defaultLayers(layers, { transparent, coverage }), this.viewerBorders, layers), slot, gen)
   }
 
   /** Fraction of the slot's first frame that hides the Earth, or null if it cannot be read. */

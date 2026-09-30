@@ -14,14 +14,17 @@
  *     palette — gets a basemap underneath, so its see-through regions
  *     show the Earth rather than black. It costs nothing where the data
  *     is opaque.
- *   - Data that hides most of the Earth gets country borders on top, drawn
- *     white, so a full-cover field (the Van Gogh wind, a temperature map)
- *     still says where it is. "Most" is measured on the first frame
- *     (`measureCoverage`), because an alpha stream's flag says nothing
- *     about how much of the sphere it actually covers.
+ *   - Data with no transparency gets country borders on top, drawn white,
+ *     so a full-cover field (a temperature map, a projection) still says
+ *     where it is. The owner's rule (2026-09-30, the same in the desktop
+ *     apps): "no transparency" is what the shader does — an opaque
+ *     picture, or a transparent one whose first frame has no see-through
+ *     texel beyond a 0.1 % tolerance, measured by `measureCoverage`.
  *
- * A visitor can change either from the layer picker; that choice holds
- * until the next dataset loads, which starts from its own defaults.
+ * A visitor can change either from the layer picker. The basemap choice
+ * holds until the next dataset loads, which starts from its own default;
+ * a choice about borders stays across datasets, because only the
+ * automatic switch-on is undone (`withBordersChoice`).
  */
 
 import type { MapLayerTint } from './earthTileLayer'
@@ -50,8 +53,8 @@ export interface DatasetLayerFacts {
   readonly coverage: number | null
 }
 
-/** Above this measured coverage the data hides the Earth, and borders go on top. */
-export const FULL_COVER = 0.7
+/** From this measured coverage the data has no transparency (0.1 % tolerated), and borders go on top. */
+export const FULL_COVER = 0.999
 
 const PREFERRED_BASEMAP = 'builtin-nasa-relief-bathymetry'
 
@@ -81,14 +84,52 @@ export function defaultLayers(layers: readonly CatalogLayer[], facts: DatasetLay
   const basemap = facts.transparent
     ? basemaps.find(l => l.id === PREFERRED_BASEMAP) ?? basemaps[0] ?? null
     : null
-  // An opaque picture hides the Earth by definition; a transparent one
-  // only when its frames say so. Unmeasured transparency gets no borders:
-  // better a missing aid than lines scribbled over a sparse map.
+  // An opaque picture has no transparency by definition; a transparent
+  // one only when its frames say so. Unmeasured transparency gets no
+  // borders: better a missing aid than lines scribbled over a sparse map.
   const hidesEarth = !facts.transparent || (facts.coverage !== null && facts.coverage >= FULL_COVER)
   const borders = hidesEarth ? pickBorders(layers) : null
   return {
     basemapId: basemap?.id ?? null,
     overlays: borders ? [{ id: borders.id, tint: tintFor(borders) }] : [],
+  }
+}
+
+/** A viewer's standing choice about the borders overlay. */
+export type BordersChoice = 'on' | 'off'
+
+/**
+ * What a viewer's change to the layers says about borders: switched on,
+ * switched off, or nothing about them.
+ */
+export function bordersChoice(
+  before: LayerSelection,
+  after: LayerSelection,
+  layers: readonly CatalogLayer[],
+): BordersChoice | null {
+  const borders = pickBorders(layers)
+  if (!borders) return null
+  const had = before.overlays.some(o => o.id === borders.id)
+  const has = after.overlays.some(o => o.id === borders.id)
+  return had === has ? null : has ? 'on' : 'off'
+}
+
+/**
+ * A dataset's defaults with the viewer's choice about borders kept: only
+ * the automatic switch-on is undone by the next dataset, never what the
+ * viewer asked for.
+ */
+export function withBordersChoice(
+  selection: LayerSelection,
+  choice: BordersChoice | null,
+  layers: readonly CatalogLayer[],
+): LayerSelection {
+  const borders = choice ? pickBorders(layers) : null
+  if (!borders) return selection
+  const others = selection.overlays.filter(o => o.id !== borders.id)
+  return {
+    basemapId: selection.basemapId,
+    overlays: choice === 'on' ? [...others, { id: borders.id, tint: tintFor(borders) }] : others,
   }
 }
 
