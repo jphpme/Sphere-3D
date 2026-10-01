@@ -49,10 +49,14 @@ describe('followPlayback', () => {
     const behind = followPlayback(playing, 2, { ...local, time: 11.5 })
     expect(behind.seekTo).toBeNull()
     expect(behind.rate).toBeCloseTo(1.1, 6)
-    // A quarter of a second ahead: a little slower.
-    const ahead = followPlayback(playing, 2, { ...local, time: 12.25 })
+    // Four tenths of a second ahead: a little slower, in a whole step.
+    const ahead = followPlayback(playing, 2, { ...local, time: 12.4 })
     expect(ahead.seekTo).toBeNull()
-    expect(ahead.rate).toBeCloseTo(0.95, 6)
+    expect(ahead.rate).toBeCloseTo(0.925, 6)
+    // A quarter of a second is jitter for a follower at the lead's rate...
+    expect(followPlayback(playing, 2, { ...local, time: 12.25 })).toEqual({ toggle: false, seekTo: null, rate: null })
+    // ...but one already trimming keeps closing it, at the smallest step.
+    expect(followPlayback(playing, 2, { ...local, time: 11.8, rate: 1.1 }).rate).toBeCloseTo(1.05, 6)
     // Two seconds behind is still a trim, capped.
     const far = followPlayback(playing, 2, { ...local, time: 10 })
     expect(far.seekTo).toBeNull()
@@ -63,10 +67,28 @@ describe('followPlayback', () => {
     expect(followPlayback(playing, 2, { ...local, time: 11.95, rate: 1.1 }).rate).toBe(1)
   })
 
-  it('seeks only one that is seconds out', () => {
+  it('seeks only one that is seconds out, aiming where the lead will be once it lands', () => {
     const fix = followPlayback(playing, 2, { ...local, time: 20 })
-    expect(fix.seekTo).toBe(12)
+    expect(fix.seekTo).toBe(13) // the lead at 12, plus the assumed second a seek takes
     expect(fix.rate).toBeNull()
+  })
+
+  it('stops seeking where seeks are expensive, and trims instead', () => {
+    // Seeks take 8 s here: 6 s behind is not worth one.
+    const cheap = followPlayback(playing, 2, { ...local, time: 6 })
+    expect(cheap.seekTo).not.toBeNull()
+    const costly = followPlayback(playing, 2, { ...local, time: 6 }, 8)
+    expect(costly.seekTo).toBeNull()
+    expect(costly.rate).toBeCloseTo(1 + MAX_RATE_TRIM, 6)
+    // Twenty seconds behind is, and it aims eight seconds past the lead.
+    expect(followPlayback({ ...playing, time: 40 }, 2, { ...local, time: 20 }, 8).seekTo).toBe(50)
+  })
+
+  it('measures the gap round the loop', () => {
+    // The lead has looped to 3 s; the follower is at 117 of 120: six seconds behind, not 114 ahead.
+    const fix = followPlayback({ ...playing, time: 3 }, 0, { ...local, time: 117 })
+    expect(fix.seekTo).not.toBeNull()
+    expect(fix.seekTo).toBeCloseTo(4, 6)
   })
 
   it('leaves the loop to each device: nothing near either end', () => {
@@ -86,7 +108,7 @@ describe('followPlayback', () => {
   it('compares positions as fractions when the two videos differ in length', () => {
     // The lead is a quarter of the way in; so should a follower be whose rendition is 2 s longer.
     const fix = followPlayback({ ...playing, time: 30 }, 0, { ...local, time: 0, duration: 122 })
-    expect(fix.seekTo).toBeCloseTo(30.5, 6)
+    expect(fix.seekTo).toBeCloseTo(31.5, 6) // a quarter of the way in, plus the assumed second a seek takes
   })
 
   it('takes the lead’s rate', () => {
@@ -271,6 +293,7 @@ describe('startRoomSync', () => {
     vi.advanceTimersByTime(5000)
     expect(video.currentTime).toBe(10)
     // Advancing again, a second behind: a trim, not a seek.
+    now = 0
     held.paused = false
     video.currentTime = 59
     client.onState(state({ playback: { paused: false, time: 60, duration: 120, rate: 1 } }))
@@ -279,6 +302,26 @@ describe('startRoomSync', () => {
     // No longer following: the lead's own rate, not the trimmed one.
     client.onStatus(status('lead', 1))
     expect(video.playbackRate).toBe(1)
+    sync.stop()
+  })
+
+it('learns what a seek costs, and does not seek again while one is landing', () => {
+    const sync = start()
+    client.onStatus(status('follower'))
+    const v = video as unknown as { readyState: number; seeking: boolean; paused: boolean }
+    v.paused = false
+    video.currentTime = 10
+    client.onState(state({ playback: { paused: false, time: 60, duration: 120, rate: 1 } }))
+    expect(video.currentTime).toBe(61) // aimed a second past the lead
+    // Buffering for nine seconds: no second seek, however far behind it falls.
+    v.readyState = 2
+    for (let i = 0; i < 36; i++) { now += 250; vi.advanceTimersByTime(250) }
+    expect(video.currentTime).toBe(61)
+    // It lands. Now 8 s behind a lead that moved on, with seeks known to cost 9 s: a trim.
+    v.readyState = 4
+    vi.advanceTimersByTime(250)
+    expect(video.currentTime).toBe(61)
+    expect(video.playbackRate).toBeCloseTo(1.1, 6)
     sync.stop()
   })
 

@@ -25,6 +25,10 @@ const SECONDS = Number(process.env.ROOM_PROBE_SECONDS ?? 45)
 const CODE = `P${Date.now().toString(36).toUpperCase().slice(-5)}`
 /** Slow the follower's CPU by this factor, to stand in for a phone. */
 const THROTTLE = Number(process.env.ROOM_PROBE_THROTTLE ?? 1)
+/** Limit the follower's and the solo page's download to this many Mbit/s; 0 for no limit. */
+const MBPS = Number(process.env.ROOM_PROBE_MBPS ?? 0)
+/** Play this dataset (by id) instead of the first card in the browser. */
+const DATASET = process.env.ROOM_PROBE_DATASET ?? ''
 
 async function open(page: Page, url: string): Promise<void> {
   await page.route(/localhost:4173\/(api|dash|realtime)\//, async (route) => {
@@ -90,29 +94,40 @@ async function main(): Promise<void> {
   const follower = await page(412, 915)
   const solo = await page(412, 915)
   try {
-    await open(lead, `${BASE}/?room=${CODE}`)
+    const start = DATASET ? `${BASE}/dataset/${DATASET}` : `${BASE}/`
+    await open(lead, `${start}?room=${CODE}`)
     await lead.locator('.room-chip').waitFor({ state: 'attached', timeout: 30000 })
     await waitFor('the lead to lead', async () => (await lead.locator('.room-chip').innerText()).includes('you lead'))
     await open(follower, `${BASE}/?room=${CODE}`)
-    await open(solo, `${BASE}/`)
-    if (THROTTLE > 1) {
-      for (const p of [follower, solo]) {
-        const cdp = await p.context().newCDPSession(p)
-        await cdp.send('Emulation.setCPUThrottlingRate', { rate: THROTTLE })
+    await open(solo, start)
+    for (const p of [follower, solo]) {
+      const cdp = await p.context().newCDPSession(p)
+      if (THROTTLE > 1) await cdp.send('Emulation.setCPUThrottlingRate', { rate: THROTTLE })
+      if (MBPS > 0) {
+        await cdp.send('Network.enable')
+        await cdp.send('Network.emulateNetworkConditions', {
+          offline: false,
+          latency: 30,
+          downloadThroughput: (MBPS * 1e6) / 8,
+          uploadThroughput: (10 * 1e6) / 8,
+        })
       }
     }
 
     // The same dataset on the lead (the follower takes it from the room) and on the solo page.
     for (const p of [lead, solo]) {
       await p.getByRole('button', { name: /Got it|No thanks/ }).first().click({ timeout: 3000 }).catch(() => {})
+      if (DATASET) continue // already loading from its address
       if (p === solo) await p.evaluate(() => document.getElementById('tools-menu-browse')?.click())
       await p.getByRole('button', { name: /^Load/ }).first().click({ timeout: 20000 })
     }
     for (const [name, p] of [['lead', lead], ['follower', follower], ['solo', solo]] as const) {
       await waitFor(`the ${name}'s video`, () => watch(p))
     }
-    await lead.locator('#play-btn').click()
-    await solo.evaluate(() => document.getElementById('play-btn')?.click())
+    // Start whichever is paused; a dataset opened from its address may already play.
+    for (const p of [lead, solo]) {
+      if ((await read(p))!.paused) await p.evaluate(() => document.getElementById('play-btn')?.click())
+    }
     await waitFor('the lead to play', async () => !(await read(lead))!.paused)
     await waitFor('the follower to play', async () => !(await read(follower))!.paused)
     // Count from here: the start-up seek and play are not the complaint.
@@ -125,7 +140,10 @@ async function main(): Promise<void> {
       if (a && b) apart.push(Math.abs(a.time / a.duration - b.time / b.duration) * a.duration)
     }
 
-    console.log(`over ${SECONDS} s${THROTTLE > 1 ? `, follower and solo CPU slowed ${THROTTLE}x` : ''}:`)
+    console.log(
+      `over ${SECONDS} s${THROTTLE > 1 ? `, follower and solo CPU slowed ${THROTTLE}x` : ''}` +
+        `${MBPS > 0 ? `, follower and solo download limited to ${MBPS} Mbit/s` : ''}:`,
+    )
     for (const [name, p] of [['lead', lead], ['follower', follower], ['solo', solo]] as const) {
       const r = (await read(p))!
       console.log(

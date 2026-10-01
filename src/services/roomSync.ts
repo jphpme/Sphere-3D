@@ -72,17 +72,23 @@ const HEARTBEAT_MS = 1000
 const FOLLOW_TICK_MS = 250
 /** A playing follower within this of the lead is in step, seconds. */
 export const IN_STEP_S = 0.1
-/** A playing follower seeks only when further than this from the lead. */
+/** A playing follower seeks only when further than this from the lead, and further than its seeks cost. */
 export const SEEK_PLAYING_S = 2.5
+/** What a seek is assumed to cost until one has been measured on this device, seconds. */
+export const ASSUMED_SEEK_COST_S = 1
 /** Between the two it trims its rate: by this much per second of gap… */
 const TRIM_PER_SECOND = 0.2
-/** …up to this fraction of the lead's rate, which the eye does not notice. */
+/** …up to this fraction of the lead's rate, which the eye does not notice… */
 export const MAX_RATE_TRIM = 0.1
+/** …in steps of this much. */
+const TRIM_STEP = 0.025
+/** A follower at the lead's rate starts trimming only past this gap, seconds. */
+const TRIM_START_S = 0.3
 /** A paused follower holds the lead's frame to within this. */
 const SEEK_PAUSED_S = 0.08
 /** Within this of either end a video is left to its own loop: both devices rest on the last frame and start over by the same rule. */
 const END_ZONE_S = 0.4
-/** After a seek, leave the decoder alone this long. */
+/** After a seek has landed, leave the decoder alone this long. */
 const SEEK_SETTLE_MS = 3000
 /** A dataset load is not asked for again within this. */
 const LOAD_RETRY_MS = 10000
@@ -110,20 +116,34 @@ export interface PlaybackCorrection {
  * devices can pick renditions of slightly different length.
  *
  * Paused, the follower takes the lead's frame. Playing, it is in one of
- * three bands: in step (the lead's own rate), a gap of up to
- * SEEK_PLAYING_S (the lead's rate trimmed by up to MAX_RATE_TRIM, faster
- * when behind and slower when ahead), or further out (one seek). Near
- * either end of the video it does nothing: the loop is each device's own.
+ * three bands: in step (the lead's own rate), a gap the rate can close
+ * (the lead's rate trimmed by up to MAX_RATE_TRIM, faster when behind and
+ * slower when ahead), or further out (one seek). Near either end of the
+ * video it does nothing: the loop is each device's own.
+ *
+ * `seekCostS` is how long a seek takes to land on this device, measured
+ * by the caller. A seek is the expensive way to catch up — on a stream
+ * near the limit of the connection it stalls the video for many seconds,
+ * by which time the lead is far ahead again, and a follower that seeks
+ * again loops for good — so the seek band starts above what a seek costs,
+ * and a seek aims at where the lead will be once it has landed.
+ *
+ * Gaps are measured round the loop: every device loops the same video, so
+ * a follower at the end and a lead just past the start are close.
  */
 export function followPlayback(
   playback: RoomPlayback,
   elapsedS: number,
   local: { paused: boolean; time: number; duration: number; rate: number },
+  seekCostS: number = ASSUMED_SEEK_COST_S,
 ): PlaybackCorrection {
   const target = (leadTime(playback, elapsedS) / playback.duration) * local.duration
   const toggle = playback.paused !== local.paused
   const setRate = (rate: number): number | null => (Math.abs(local.rate - rate) > 0.004 ? rate : null)
-  const gap = target - local.time
+  const duration = local.duration
+  const gap = playback.paused
+    ? target - local.time
+    : ((((target - local.time + duration / 2) % duration) + duration) % duration) - duration / 2
   if (playback.paused) {
     return {
       toggle,
@@ -134,9 +154,22 @@ export function followPlayback(
   const nearEnd = (time: number): boolean => time >= local.duration - END_ZONE_S
   if (nearEnd(target) || nearEnd(local.time)) return { toggle, seekTo: null, rate: setRate(playback.rate) }
   if (Math.abs(gap) <= IN_STEP_S) return { toggle, seekTo: null, rate: setRate(playback.rate) }
-  if (Math.abs(gap) > SEEK_PLAYING_S) return { toggle, seekTo: Math.max(0, target), rate: setRate(playback.rate) }
-  const trim = Math.max(-MAX_RATE_TRIM, Math.min(MAX_RATE_TRIM, gap * TRIM_PER_SECOND))
-  return { toggle, seekTo: null, rate: setRate(playback.rate * (1 + trim)) }
+  if (Math.abs(gap) > Math.max(SEEK_PLAYING_S, 1.5 * seekCostS + 1)) {
+    // Land where the lead will be by then, short of the end so the landing
+    // is not straight into the loop.
+    const aim = Math.min(duration - END_ZONE_S - 0.1, target + seekCostS * playback.rate)
+    return { toggle, seekTo: Math.max(0, aim), rate: setRate(playback.rate) }
+  }
+  // A follower at the lead's own rate is left there until it is clearly
+  // out (TRIM_START_S): every rate change is work for the decoder and the
+  // audio path, and a gap that comes and goes is message jitter, not drift.
+  const untrimmed = Math.abs(local.rate - playback.rate) <= 0.004
+  if (untrimmed && Math.abs(gap) <= TRIM_START_S) return { toggle, seekTo: null, rate: null }
+  // In steps, so a gap closing steadily changes the rate a few times, not on every tick.
+  const raw = Math.max(-MAX_RATE_TRIM, Math.min(MAX_RATE_TRIM, gap * TRIM_PER_SECOND))
+  const trim = Math.sign(raw) * Math.max(TRIM_STEP, Math.round(Math.abs(raw) / TRIM_STEP) * TRIM_STEP)
+  const rate = playback.rate * (1 + trim)
+  return { toggle, seekTo: null, rate: Math.abs(local.rate - rate) > 0.004 ? rate : null }
 }
 
 /**
@@ -225,6 +258,10 @@ export function startRoomSync(code: string, host: RoomSyncHost, opts: RoomSyncOp
   let followed: { state: RoomState; at: number } | null = null
   let lastSeekAt = -Infinity
   let loadAsked: { id: string; at: number } | null = null
+  /** How long seeks take to land on this device, from the last one measured. */
+  let seekCostS = ASSUMED_SEEK_COST_S
+  /** A seek in flight: when it was issued. */
+  let seekIssuedAt: number | null = null
   /** The lead's own rate, to put back when this device stops following: a trimmed rate is not this video's rate. */
   let untrimmedRate: number | null = null
 
@@ -251,19 +288,28 @@ export function startRoomSync(code: string, host: RoomSyncHost, opts: RoomSyncOp
     const video = host.getVideo()
     if (!state.playback || !video || !(video.duration > 0) || video.readyState < 2) return
     const playing = host.isPlaying()
-    const fix = followPlayback(state.playback, (now - at) / 1000, {
-      paused: !playing,
-      time: video.currentTime,
-      duration: video.duration,
-      rate: video.playbackRate,
-    })
-    if (fix.toggle) host.togglePlayPause()
     // A video that is mid-seek, still buffering, or not advancing though
     // the app has it playing (resting on its last frame between loops, or
     // held by the browser until the page is tapped) has no position worth
     // correcting. Steering it would be a seek every few seconds on a
     // picture that is not moving: a slideshow.
     const advancing = !video.seeking && video.readyState >= 3 && !(playing && video.paused)
+    if (seekIssuedAt !== null && advancing) {
+      // A seek is over once the video plays on from it: now its cost is
+      // known, and it is known before the next decision is made with it.
+      seekCostS = Math.max(0.3, (now - seekIssuedAt) / 1000)
+      seekIssuedAt = null
+      lastSeekAt = now
+    }
+    const fix = followPlayback(
+      state.playback,
+      (now - at) / 1000,
+      { paused: !playing, time: video.currentTime, duration: video.duration, rate: video.playbackRate },
+      seekCostS,
+    )
+    if (fix.toggle) host.togglePlayPause()
+    // Not while a seek is still landing, nor on a video that is not moving.
+    if (seekIssuedAt !== null) return
     if (!state.playback.paused && !advancing) return
     if (fix.rate !== null) {
       untrimmedRate = state.playback.rate
@@ -271,6 +317,8 @@ export function startRoomSync(code: string, host: RoomSyncHost, opts: RoomSyncOp
     }
     if (fix.seekTo !== null && !video.seeking && now - lastSeekAt > SEEK_SETTLE_MS) {
       lastSeekAt = now
+      // A paused video lands at once; only a playing one has a cost to learn.
+      if (!state.playback.paused) seekIssuedAt = now
       video.currentTime = fix.seekTo
     }
   }

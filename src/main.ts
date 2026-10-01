@@ -4690,7 +4690,11 @@ class InteractiveSphere {
             zoom: view.zoom,
             bearing: view.bearing,
             pitch: view.pitch,
-            duration: 150,
+            // Longer than the 100 ms between the lead's messages, so each
+            // ease is still running when the next one takes over from it
+            // and the globe never comes to rest mid-gesture. (150 ms let
+            // it stop between messages: still frames in every drag.)
+            duration: 260,
             easing: (t) => t,
           })
         },
