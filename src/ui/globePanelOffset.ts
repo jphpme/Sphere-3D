@@ -202,8 +202,16 @@ export function initGlobePanelOffset(options: GlobePanelOffsetOptions): GlobePan
     const globe = grid.children.length > 1 ? 0 : all
     // For what belongs under the globe (the date label): where it goes.
     const root = document.documentElement.style
-    if (globe) root.setProperty('--panel-push-globe', `${((rtl() ? 1 : -1) * globe) / 2}px`)
-    else root.removeProperty('--panel-push-globe')
+    // And for what is anchored to the inline-end edge of its panel (the
+    // legend, the colorbar, the map's own corner controls): the whole way.
+    const sign = rtl() ? 1 : -1
+    if (globe) {
+      root.setProperty('--panel-push-globe', `${(sign * globe) / 2}px`)
+      root.setProperty('--panel-push-view', `${sign * globe}px`)
+    } else {
+      root.removeProperty('--panel-push-globe')
+      root.removeProperty('--panel-push-view')
+    }
     moveTo(globe)
   }
 
@@ -226,6 +234,7 @@ export function initGlobePanelOffset(options: GlobePanelOffsetOptions): GlobePan
       window.removeEventListener('resize', refresh)
       pushButtons(0, 0)
       document.documentElement.style.removeProperty('--panel-push-globe')
+      document.documentElement.style.removeProperty('--panel-push-view')
       target = 0
       settle()
     },

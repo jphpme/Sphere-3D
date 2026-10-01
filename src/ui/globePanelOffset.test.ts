@@ -153,6 +153,8 @@ describe('initGlobePanelOffset', () => {
     expect(document.body.classList.contains('buttons-beside-panel')).toBe(true)
     // Half as far for what belongs under the globe (the date label).
     expect(root.style.getPropertyValue('--panel-push-globe')).toBe('-210px')
+    // The whole way for what hangs off the globe panel's own edge.
+    expect(root.style.getPropertyValue('--panel-push-view')).toBe('-420px')
 
     closeBrowse()
     expect(root.style.getPropertyValue('--panel-push-top')).toBe('')
