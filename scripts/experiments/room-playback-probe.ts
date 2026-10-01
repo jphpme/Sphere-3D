@@ -44,17 +44,27 @@ const watch = (page: Page): Promise<boolean> =>
     const video = Array.from(document.querySelectorAll('video')).find((el) => el.duration > 0)
     if (!video) return false
     const counts: Record<string, number> = { seeking: 0, play: 0, pause: 0, waiting: 0, stalled: 0, ratechange: 0 }
-    for (const name of Object.keys(counts)) video.addEventListener(name, () => { counts[name]++ })
-    ;(window as unknown as { __probe: unknown }).__probe = { counts, video, start: video.currentTime }
+    // Each event with when it happened and where the playhead was: a
+    // seek to 0 at a loop is not a seek to chase the lead.
+    const log: string[] = []
+    const t0 = performance.now()
+    for (const name of Object.keys(counts)) {
+      video.addEventListener(name, () => {
+        counts[name]++
+        log.push(`${((performance.now() - t0) / 1000).toFixed(1)}s ${name}@${video.currentTime.toFixed(1)}`)
+      })
+    }
+    ;(window as unknown as { __probe: unknown }).__probe = { counts, video, log }
     return true
   })
 
-const read = (page: Page): Promise<{ counts: Record<string, number>; time: number; duration: number; paused: boolean; dropped: number; total: number } | null> =>
+const read = (page: Page): Promise<{ log: string[]; counts: Record<string, number>; time: number; duration: number; paused: boolean; dropped: number; total: number } | null> =>
   page.evaluate(() => {
-    const probe = (window as unknown as { __probe?: { counts: Record<string, number>; video: HTMLVideoElement } }).__probe
+    const probe = (window as unknown as { __probe?: { counts: Record<string, number>; video: HTMLVideoElement; log: string[] } }).__probe
     if (!probe) return null
     const quality = probe.video.getVideoPlaybackQuality?.()
     return {
+      log: probe.log,
       counts: probe.counts,
       time: probe.video.currentTime,
       duration: probe.video.duration,
@@ -123,6 +133,7 @@ async function main(): Promise<void> {
           `stalls=${r.counts.waiting + r.counts.stalled} rate changes=${r.counts.ratechange} ` +
           `dropped=${r.dropped}/${r.total} frames  at ${r.time.toFixed(1)}/${r.duration.toFixed(1)} s`,
       )
+      if (name !== 'solo') console.log(`           ${r.log.join(', ')}`)
     }
     apart.sort((x, y) => x - y)
     console.log(
