@@ -3,14 +3,16 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { RoomClientOptions, RoomStatus } from './roomClient'
-import type { RoomState } from './roomProtocol'
-import { followPlayback, leadTime, shouldSend, startRoomSync, type RoomSyncHost } from './roomSync'
+import type { RoomLayers, RoomState, RoomView } from './roomProtocol'
+import { followPlayback, leadTime, shouldSend, startRoomSync, viewsDiffer, type RoomSyncHost } from './roomSync'
 
 const playing = { paused: false, time: 10, duration: 120, rate: 1 }
 const state = (over: Partial<RoomState> = {}): RoomState => ({
   datasetId: 'DS_1',
   playback: playing,
   globe: { q: [0, 0, 0, 1], scale: 1, aligned: true },
+  view: null,
+  layers: null,
   ...over,
 })
 
@@ -81,12 +83,52 @@ describe('shouldSend', () => {
   })
 })
 
+describe('viewsDiffer', () => {
+  const view = { lat: 10, lon: 20, zoom: 2, bearing: 0, pitch: 0 }
+
+  it('ignores jitter and sees a real move', () => {
+    expect(viewsDiffer(view, { ...view, lat: 10.01 })).toBe(false)
+    expect(viewsDiffer(view, { ...view, lat: 11 })).toBe(true)
+    expect(viewsDiffer(view, { ...view, zoom: 2.5 })).toBe(true)
+    expect(viewsDiffer(view, { ...view, bearing: 5 })).toBe(true)
+  })
+
+  it('is finer close in', () => {
+    const near = { ...view, zoom: 12 }
+    expect(viewsDiffer(near, { ...near, lat: 10.01 })).toBe(true)
+  })
+
+  it('takes longitude the short way round', () => {
+    expect(viewsDiffer({ ...view, lon: 179.999 }, { ...view, lon: -179.999 })).toBe(false)
+  })
+})
+
+describe('shouldSend, for the camera and the layers', () => {
+  const view = { lat: 10, lon: 20, zoom: 2, bearing: 0, pitch: 0 }
+  const layers: RoomLayers = { basemapId: null, overlays: [], rt: null }
+
+  it('reports a camera move and a layer change, not a still globe', () => {
+    expect(shouldSend(state({ view, layers }), state({ view, layers }), 100)).toBe(false)
+    expect(shouldSend(state({ view, layers }), state({ view: { ...view, lon: 40 }, layers }), 100)).toBe(true)
+    expect(shouldSend(state({ view, layers }), state({ view, layers: { ...layers, rt: 'DS_RT' } }), 100)).toBe(true)
+    expect(shouldSend(state({ view, layers }), state({ view, layers: { ...layers, overlays: [{ id: 'b', tint: 'white' }] } }), 100)).toBe(true)
+  })
+})
+
 describe('startRoomSync', () => {
   let now = 0
   let client: RoomClientOptions
   let sent: RoomState[]
   let video: { currentTime: number; duration: number; playbackRate: number; readyState: number; seeking: boolean }
-  let host: RoomSyncHost & { datasetId: string | null; playingNow: boolean; loads: string[]; followed: unknown[] }
+  let host: RoomSyncHost & {
+    datasetId: string | null
+    playingNow: boolean
+    loads: string[]
+    followed: unknown[]
+    view: RoomView | null
+    views: RoomView[]
+    layers: RoomLayers[]
+  }
 
   const status = (role: RoomStatus['role'], count = 2): RoomStatus => ({ code: 'ROOM42', connected: true, role, count })
 
@@ -107,6 +149,13 @@ describe('startRoomSync', () => {
       togglePlayPause: () => { host.playingNow = !host.playingNow },
       getGlobe: () => null,
       setFollowedGlobe: (g) => { host.followed.push(g) },
+      view: null,
+      views: [],
+      layers: [],
+      getView: () => host.view,
+      setView: (v) => { host.views.push(v); host.view = v },
+      getLayers: () => null,
+      setLayers: (l) => { host.layers.push(l) },
     }
   })
 
@@ -128,7 +177,13 @@ describe('startRoomSync', () => {
     client.onStatus(status('lead'))
     vi.advanceTimersByTime(100)
     expect(sent).toHaveLength(1)
-    expect(sent[0]).toEqual({ datasetId: 'DS_1', playback: { paused: false, time: 10, duration: 120, rate: 1 }, globe: null })
+    expect(sent[0]).toEqual({
+      datasetId: 'DS_1',
+      playback: { paused: false, time: 10, duration: 120, rate: 1 },
+      globe: null,
+      view: null,
+      layers: null,
+    })
     // Playing on, as predicted: silence until the heartbeat.
     for (let i = 0; i < 5; i++) { now += 100; video.currentTime += 0.1; vi.advanceTimersByTime(100) }
     expect(sent).toHaveLength(1)
@@ -167,6 +222,31 @@ describe('startRoomSync', () => {
     expect(host.followed.at(-1)).toEqual(globe)
     client.onStatus(status('lead', 1))
     expect(host.followed.at(-1)).toBeNull()
+    sync.stop()
+  })
+
+it('as a follower, moves its camera when the lead\u2019s moves, and not when it already matches', () => {
+    const sync = start()
+    client.onStatus(status('follower'))
+    const view = { lat: -12, lon: -77, zoom: 4, bearing: 0, pitch: 0 }
+    client.onState(state({ view }))
+    expect(host.views).toEqual([view])
+    client.onState(state({ view })) // the heartbeat: already there
+    expect(host.views).toHaveLength(1)
+    client.onState(state({ view: { ...view, lon: -60 } }))
+    expect(host.views).toHaveLength(2)
+    sync.stop()
+  })
+
+  it('as a follower, takes the lead\u2019s layers once the same dataset is up', () => {
+    const sync = start()
+    client.onStatus(status('follower'))
+    const layers: RoomLayers = { basemapId: 'relief', overlays: [{ id: 'borders', tint: 'black' }], rt: null }
+    client.onState(state({ datasetId: 'DS_2', layers }))
+    expect(host.layers).toHaveLength(0) // still loading DS_2
+    host.datasetId = 'DS_2'
+    vi.advanceTimersByTime(250)
+    expect(host.layers.at(-1)).toEqual(layers)
     sync.stop()
   })
 

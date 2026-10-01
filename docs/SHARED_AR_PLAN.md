@@ -186,15 +186,19 @@ one.
   leaves, the next longest takes over. The anchor's own screen does not
   join. Handing the lead to a chosen person is not built.
 - **What travels:** the dataset's id, the playhead (paused, time,
-  duration, rate) and, in AR, the sphere's orientation and scale. The
+  duration, rate), the layer stack (basemap, overlays and their tint,
+  the real-time overlay), the browser globe's camera (centre, zoom,
+  bearing, pitch) and, in AR, the sphere's orientation and scale. So a
+  room works with no AR at all, on any device with a browser. The
   orientation is given in the marker's frame when the lead scanned the
   marker, so a follower who scanned the same marker sees the same side of
   the sphere from where they stand. Each device loads and decodes the
   dataset itself; a room costs a few hundred bytes a second.
 - **Followers are not locked.** Whatever a follower changes is put back
   by the lead's next message, at most a second later.
-- **Not shared yet:** the layer stack and palette, tours, the Orbit chat,
-  and the 2D globe's camera.
+- **Not shared yet:** the colour palette and range of a data-encoded
+  dataset, the labels / borders / terrain toggles, the 1/2/4-globe
+  layout, tours and the Orbit chat.
 - **A Quest can join** a room as lead or follower for the dataset and
   playhead; without a marker scan its sphere is its own.
 
@@ -203,8 +207,9 @@ it: `npx wrangler deploy --config workers/rooms/wrangler.toml`.
 
 Verified with `scripts/experiments/room-sync-check.ts`: two browser
 pages against a local room — roles, the follower loading the lead's
-dataset, playing in step, pause and seek followed, and succession when
-the lead leaves. The sphere's orientation between two phones needs
+dataset, playing in step, pause and seek followed, the camera following
+a drag, a layer switched on the lead appearing on the follower, and
+succession when the lead leaves. The sphere's orientation between two phones needs
 phones.
 
 ### Phase 4: headsets and fallbacks

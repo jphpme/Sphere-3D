@@ -26,7 +26,32 @@ export interface RoomState {
   playback: RoomPlayback | null
   /** The sphere in AR; null while the lead is not in an AR session. */
   globe: RoomGlobe | null
+  /** The browser globe's camera; null when the lead has none to report. */
+  view: RoomView | null
+  /** The layer stack around the dataset; null when the lead reports none. */
+  layers: RoomLayers | null
 }
+
+/** Where the browser globe's camera looks, in MapLibre's own terms. */
+export interface RoomView {
+  lat: number
+  /** Degrees east, -180 to 180. */
+  lon: number
+  zoom: number
+  bearing: number
+  pitch: number
+}
+
+/** The basemap under the dataset, the overlays above it, and the real-time overlay stream. */
+export interface RoomLayers {
+  basemapId: string | null
+  overlays: { id: string; tint: 'source' | 'white' | 'black' }[]
+  /** The dataset id of the real-time overlay playing over the dataset, or null. */
+  rt: string | null
+}
+
+/** Most overlays a state may name. */
+export const ROOM_MAX_OVERLAYS = 8
 
 export interface RoomPlayback {
   paused: boolean
@@ -120,7 +145,34 @@ export function parseRoomState(raw: unknown): RoomState | null {
     if (norm < 0.9 || norm > 1.1) return null
     globe = { q: [x / norm, y / norm, z / norm, w / norm], scale: g.scale, aligned: g.aligned }
   }
-  return { datasetId, playback, globe }
+  let view: RoomView | null = null
+  if (r.view !== null && r.view !== undefined) {
+    const v = r.view as Record<string, unknown>
+    if (typeof r.view !== 'object') return null
+    if (!finite(v.lat) || !finite(v.lon) || !finite(v.zoom) || !finite(v.bearing) || !finite(v.pitch)) return null
+    if (Math.abs(v.lat) > 90 || v.zoom < -4 || v.zoom > 30 || v.pitch < 0 || v.pitch > 90) return null
+    // Longitude and bearing are angles: any turn count means the same place.
+    const wrap = (deg: number): number => ((((deg + 180) % 360) + 360) % 360) - 180
+    view = { lat: v.lat, lon: wrap(v.lon), zoom: v.zoom, bearing: wrap(v.bearing), pitch: v.pitch }
+  }
+  let layers: RoomLayers | null = null
+  if (r.layers !== null && r.layers !== undefined) {
+    const l = r.layers as Record<string, unknown>
+    if (typeof r.layers !== 'object') return null
+    const id = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 200
+    if (l.basemapId !== null && !id(l.basemapId)) return null
+    if (l.rt !== null && !id(l.rt)) return null
+    if (!Array.isArray(l.overlays) || l.overlays.length > ROOM_MAX_OVERLAYS) return null
+    const overlays: RoomLayers['overlays'] = []
+    for (const raw of l.overlays as unknown[]) {
+      const o = raw as Record<string, unknown> | null
+      if (typeof o !== 'object' || o === null || !id(o.id)) return null
+      if (o.tint !== 'source' && o.tint !== 'white' && o.tint !== 'black') return null
+      overlays.push({ id: o.id, tint: o.tint })
+    }
+    layers = { basemapId: l.basemapId, overlays, rt: l.rt }
+  }
+  return { datasetId, playback, globe, view, layers }
 }
 
 function parseJson(text: unknown): Record<string, unknown> | null {

@@ -132,6 +132,7 @@ import { initVrButton } from './ui/vrButton'
 import { flyToOnGlobe, getRoomGlobe, isVrActive, setFollowedRoomGlobe } from './services/vrSession'
 import { roomCodeFromSearch } from './services/roomClient'
 import { startRoomSync } from './services/roomSync'
+import type { RoomLayers } from './services/roomProtocol'
 import { mountRoomChip } from './ui/roomChip'
 import type { VrDatasetTexture } from './services/vrScene'
 import { buildReleaseLut, releaseCropRect, resolveDashRelease } from './services/dashRelease'
@@ -1290,6 +1291,33 @@ class InteractiveSphere {
     const scale = dataset.renderEncoding === RENDER_ENCODING_DATA_LUMA ? dataset.colorScale : undefined
     if (scale) return measureCoverage(source, { kind: 'palette', lut: buildColorScaleLut(scale) })
     return measureCoverage(source, { kind: 'alpha' })
+  }
+
+  /** AYNI: the layer stack a shared session's lead last asked for, and when. */
+  private roomLayersAsked: { key: string; at: number } | null = null
+
+  /**
+   * AYNI: take the lead's layer stack (roomSync). A no-op when it is
+   * already on, and not asked for twice within a few seconds, because
+   * both the images and the real-time overlay's stream take time to
+   * arrive and this is called on every beat until they have.
+   */
+  private applyRoomLayers(layers: RoomLayers): void {
+    const keyOf = (basemapId: string | null, overlays: ReadonlyArray<{ id: string; tint: string }>, rt: string | null) =>
+      JSON.stringify([basemapId, overlays.map((o) => [o.id, o.tint]), rt])
+    const want = keyOf(layers.basemapId, layers.overlays, layers.rt)
+    const selection = this.mapLayerSelection
+    if (want === keyOf(selection.basemapId, selection.overlays, this.rtOverlay?.id ?? null)) {
+      this.roomLayersAsked = null
+      return
+    }
+    const now = Date.now()
+    if (this.roomLayersAsked?.key === want && now - this.roomLayersAsked.at < 6000) return
+    this.roomLayersAsked = { key: want, at: now }
+    if (keyOf(layers.basemapId, layers.overlays, null) !== keyOf(selection.basemapId, selection.overlays, null)) {
+      void this.applyMapLayers({ basemapId: layers.basemapId, overlays: layers.overlays }, this.mapLayerSlot)
+    }
+    if (layers.rt !== (this.rtOverlay?.id ?? null)) void this.setRtOverlay(layers.rt)
   }
 
   /** Put a selection on the slot's globe (and the VR globe, which polls mapLayerImages). */
@@ -4576,6 +4604,42 @@ class InteractiveSphere {
         ),
         getGlobe: getRoomGlobe,
         setFollowedGlobe: setFollowedRoomGlobe,
+        getView: () => {
+          const map = this.viewports.getPrimary()?.getMap()
+          if (!map) return null
+          const center = map.getCenter()
+          return {
+            lat: center.lat,
+            lon: center.lng,
+            zoom: map.getZoom(),
+            bearing: map.getBearing(),
+            pitch: map.getPitch(),
+          }
+        },
+        setView: (view) => {
+          const map = this.viewports.getPrimary()?.getMap()
+          if (!map) return
+          // MapLibre does not wrap the camera's longitude, so the lead's
+          // is taken the short way round from wherever this globe is.
+          const here = map.getCenter().lng
+          const lng = here + (((((view.lon - here + 180) % 360) + 360) % 360) - 180)
+          // A short linear ease: at ten messages a second it reads as
+          // the lead's own motion rather than a string of jumps.
+          map.easeTo({
+            center: [lng, view.lat],
+            zoom: view.zoom,
+            bearing: view.bearing,
+            pitch: view.pitch,
+            duration: 150,
+            easing: (t) => t,
+          })
+        },
+        getLayers: () => ({
+          basemapId: this.mapLayerSelection.basemapId,
+          overlays: this.mapLayerSelection.overlays.map((o) => ({ id: o.id, tint: o.tint })),
+          rt: this.rtOverlay?.id ?? null,
+        }),
+        setLayers: (layers) => this.applyRoomLayers(layers),
       })
       mountRoomChip(document.getElementById('xr-dom-overlay') ?? document.body, room.onStatus)
     }

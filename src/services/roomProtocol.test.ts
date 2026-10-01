@@ -16,6 +16,8 @@ const state: RoomState = {
   datasetId: 'DS_1',
   playback: { paused: false, time: 12.5, duration: 120, rate: 1 },
   globe: { q: [0, 0, 0, 1], scale: 1.2, aligned: true },
+  view: { lat: -12.5, lon: -77, zoom: 3.2, bearing: 0, pitch: 0 },
+  layers: { basemapId: 'builtin-relief', overlays: [{ id: 'borders', tint: 'black' }], rt: null },
 }
 
 describe('room codes', () => {
@@ -46,6 +48,8 @@ describe('parseRoomState', () => {
       datasetId: null,
       playback: null,
       globe: null,
+      view: null,
+      layers: null,
     })
   })
 
@@ -54,7 +58,17 @@ describe('parseRoomState', () => {
     expect(parsed?.globe?.q).toEqual([0, 0, 0, 1])
   })
 
+  it('wraps a camera that has gone round the globe', () => {
+    const parsed = parseRoomState({ ...state, view: { lat: 10, lon: 540, zoom: 2, bearing: -190, pitch: 0 } })
+    expect(parsed?.view).toEqual({ lat: 10, lon: -180, zoom: 2, bearing: 170, pitch: 0 })
+  })
+
   it.each([
+    ['a latitude past the pole', { ...state, view: { ...state.view, lat: 95 } }],
+    ['a camera with no zoom', { ...state, view: { lat: 0, lon: 0, bearing: 0, pitch: 0 } }],
+    ['an overlay tint that is not one', { ...state, layers: { ...state.layers, overlays: [{ id: 'x', tint: 'pink' }] } }],
+    ['too many overlays', { ...state, layers: { ...state.layers, overlays: Array.from({ length: 9 }, () => ({ id: 'x', tint: 'white' })) } }],
+    ['a basemap id that is not a string', { ...state, layers: { ...state.layers, basemapId: 4 } }],
     ['a dataset id that is not a string', { ...state, datasetId: 7 }],
     ['an empty dataset id', { ...state, datasetId: '' }],
     ['a playhead that is not a number', { ...state, playback: { ...state.playback, time: 'now' } }],

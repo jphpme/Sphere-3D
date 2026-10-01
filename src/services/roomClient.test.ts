@@ -29,7 +29,7 @@ class FakeSocket extends EventTarget {
   }
 }
 
-const state: RoomState = { datasetId: 'DS_1', playback: null, globe: null }
+const state: RoomState = { datasetId: 'DS_1', playback: null, globe: null, view: null, layers: null }
 
 describe('room addresses', () => {
   it('reads the code from the page address', () => {

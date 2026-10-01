@@ -14,7 +14,10 @@
  *     npm run dev -- --port 4173
  *
  * The dev server has no backend, so its catalog and streams are answered
- * from the live site (ROOM_CHECK_LIVE). The AR half — the sphere's
+ * from the live site (ROOM_CHECK_LIVE). The camera and layer steps read
+ * each page's own state through the dev server's module graph, so they
+ * run only against a dev server and are skipped against a deployed site.
+ * The AR half — the sphere's
  * orientation — is not reachable from a headless browser; it is covered
  * by unit tests and needs phones.
  *
@@ -47,6 +50,22 @@ const video = (page: Page): Promise<{ time: number; paused: boolean; duration: n
   page.evaluate(() => {
     const v = Array.from(document.querySelectorAll("video")).find((el) => el.duration > 0)
     return v ? { time: v.currentTime, paused: v.paused, duration: v.duration } : null
+  })
+
+/** What this page would report as a lead; null where the module graph is not reachable. */
+const snapshot = (page: Page): Promise<{ view: Record<string, number> | null; layers: unknown } | null> =>
+  page.evaluate(async () => {
+    try {
+      // A dev server serves the app's own modules; a deployed bundle does not.
+      const path = '/services/roomSync.ts' // the dev server's root is src/
+      // Built at run time: the script runner would otherwise rewrite a
+      // literal import() into a require() the browser does not have.
+      const load = new Function('p', 'return import(p)') as (p: string) => Promise<unknown>
+      const mod = (await load(path)) as { activeRoomSync(): { snapshot(): unknown } | null }
+      return mod.activeRoomSync()?.snapshot() as { view: Record<string, number> | null; layers: unknown } | null
+    } catch {
+      return null
+    }
   })
 
 async function until<T>(what: string, read: () => Promise<T>, ok: (value: T) => boolean, ms = 30000): Promise<T> {
@@ -104,6 +123,34 @@ async function main(): Promise<void> {
       20000,
     )
     console.log(`✓ pause and seek followed: lead at ${target.time.toFixed(2)} s, follower at ${(await video(follower))!.time.toFixed(2)} s`)
+
+    if (await snapshot(lead)) {
+      // The lead drags its globe; the follower's camera goes with it.
+      const before = (await snapshot(follower))!.view!
+      await lead.mouse.move(500, 380)
+      await lead.mouse.down()
+      await lead.mouse.move(260, 300, { steps: 12 })
+      await lead.mouse.up()
+      await new Promise((r) => setTimeout(r, 1500)) // tick-drain-exempt: the drag's own inertia
+      const moved = (await snapshot(lead))!.view!
+      const close = (a: Record<string, number>, b: Record<string, number>): boolean =>
+        Math.abs(a.lat - b.lat) < 0.5 && Math.abs(((((a.lon - b.lon + 180) % 360) + 360) % 360) - 180) < 0.5 && Math.abs(a.zoom - b.zoom) < 0.05
+      if (close(before, moved)) throw new Error('the drag did not move the lead\u2019s camera')
+      await until('the follower\u2019s camera to match', async () => (await snapshot(follower))!.view!, (v) => close(v, moved), 15000)
+      const after = (await snapshot(follower))!.view!
+      console.log(`✓ camera followed: lead at ${moved.lat.toFixed(1)}, ${moved.lon.toFixed(1)} z${moved.zoom.toFixed(2)}; follower at ${after.lat.toFixed(1)}, ${after.lon.toFixed(1)} z${after.zoom.toFixed(2)}`)
+
+      // The lead switches an overlay; the follower's layer stack matches.
+      const layersBefore = JSON.stringify((await snapshot(lead))!.layers)
+      await lead.evaluate(() => document.getElementById('tools-menu-toggle')?.click())
+      await lead.locator('#tools-menu-layers [data-layer-id]').first().waitFor({ state: 'attached', timeout: 15000 })
+      await lead.evaluate(() => document.querySelector<HTMLElement>('#tools-menu-layers [data-layer-id]')?.click())
+      const layersAfter = await until('the lead\u2019s layers to change', async () => JSON.stringify((await snapshot(lead))!.layers), (l) => l !== layersBefore, 15000)
+      await until('the follower\u2019s layers to match', async () => JSON.stringify((await snapshot(follower))!.layers), (l) => l === layersAfter, 20000)
+      console.log(`✓ layers followed: ${layersAfter}`)
+    } else {
+      console.log('– camera and layers: skipped (no module graph on a deployed site)')
+    }
 
     // The lead leaves; the follower inherits the room.
     await lead.context().close()

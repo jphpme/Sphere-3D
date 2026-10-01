@@ -6,8 +6,9 @@
  * (`docs/SHARED_AR_PLAN.md`): the lead's sphere is described a few times
  * a second, and every follower makes its own sphere match.
  *
- * Three things travel: which dataset is on the sphere, where its playhead
- * is, and how the sphere is turned and sized in AR. Each follower loads
+ * What travels: which dataset is on the sphere, where its playhead is,
+ * the layers around it, where the browser globe's camera looks, and how
+ * the sphere is turned and sized in AR. Each follower loads
  * the dataset and decodes the video itself; only the description crosses
  * the network, so a room costs a few hundred bytes a second however large
  * the stream is.
@@ -30,7 +31,7 @@
  */
 
 import { connectRoom, type RoomClientHandle, type RoomStatus } from './roomClient'
-import type { RoomGlobe, RoomPlayback, RoomState } from './roomProtocol'
+import type { RoomGlobe, RoomLayers, RoomPlayback, RoomState, RoomView } from './roomProtocol'
 
 /** The app, as far as a shared session needs it. */
 export interface RoomSyncHost {
@@ -44,6 +45,14 @@ export interface RoomSyncHost {
   getGlobe(): RoomGlobe | null
   /** Make the AR sphere follow this pose; null hands it back to the user. */
   setFollowedGlobe(globe: RoomGlobe | null): void
+  /** The browser globe's camera. */
+  getView(): RoomView | null
+  /** Move the browser globe's camera there. */
+  setView(view: RoomView): void
+  /** The layer stack around the dataset. */
+  getLayers(): RoomLayers | null
+  /** Put that layer stack on; a no-op when it already is. */
+  setLayers(layers: RoomLayers): void
 }
 
 /** How often the lead looks at its own state, ms. */
@@ -98,6 +107,24 @@ export function followPlayback(
   }
 }
 
+/**
+ * Do two cameras differ by more than a still globe's jitter? Longitude
+ * is compared the short way round, and more finely the closer the camera
+ * is, since a hundredth of a degree is nothing from orbit and a street
+ * from zoom 14.
+ */
+export function viewsDiffer(a: RoomView, b: RoomView): boolean {
+  const fine = 0.5 / 2 ** Math.max(0, Math.min(a.zoom, b.zoom))
+  const turn = Math.abs(((((a.lon - b.lon + 180) % 360) + 360) % 360) - 180)
+  return (
+    Math.abs(a.lat - b.lat) > fine ||
+    turn > fine ||
+    Math.abs(a.zoom - b.zoom) > 0.01 ||
+    Math.abs(((((a.bearing - b.bearing + 180) % 360) + 360) % 360) - 180) > 0.2 ||
+    Math.abs(a.pitch - b.pitch) > 0.2
+  )
+}
+
 /** The angle between two orientations, radians. */
 function turnBetween(a: readonly number[], b: readonly number[]): number {
   const dot = Math.abs(a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3])
@@ -119,6 +146,9 @@ export function shouldSend(prev: RoomState | null, next: RoomState, elapsedMs: n
     if (Math.abs(leadTime(prev.playback, elapsedMs / 1000) - next.playback.time) > 0.25) return true
   }
   if ((prev.globe === null) !== (next.globe === null)) return true
+  if ((prev.view === null) !== (next.view === null)) return true
+  if (prev.view && next.view && viewsDiffer(prev.view, next.view)) return true
+  if (JSON.stringify(prev.layers) !== JSON.stringify(next.layers)) return true
   if (prev.globe && next.globe) {
     if (prev.globe.aligned !== next.globe.aligned) return true
     if (Math.abs(prev.globe.scale - next.globe.scale) > 0.005 * prev.globe.scale) return true
@@ -129,6 +159,8 @@ export function shouldSend(prev: RoomState | null, next: RoomState, elapsedMs: n
 
 export interface RoomSyncHandle {
   status(): RoomStatus
+  /** This device's own state right now, as a lead would report it. */
+  snapshot(): RoomState
   /** Called now with the current status, and on every change. Returns an unsubscribe. */
   onStatus(listener: (status: RoomStatus) => void): () => void
   stop(): void
@@ -171,6 +203,9 @@ export function startRoomSync(code: string, host: RoomSyncHost, opts: RoomSyncOp
       }
       return // nothing to steer until the same dataset is on the sphere
     }
+    // The same dataset is up: its surroundings next. (The host makes
+    // this a no-op once they match, so the tick may ask every time.)
+    if (state.layers) host.setLayers(state.layers)
     const video = host.getVideo()
     if (!state.playback || !video || !(video.duration > 0) || video.readyState < 2) return
     const fix = followPlayback(state.playback, (now - at) / 1000, {
@@ -201,7 +236,13 @@ export function startRoomSync(code: string, host: RoomSyncHost, opts: RoomSyncOp
             rate: video.playbackRate > 0 ? video.playbackRate : 1,
           }
         : null
-    return { datasetId: host.getDatasetId(), playback, globe: host.getGlobe() }
+    return {
+      datasetId: host.getDatasetId(),
+      playback,
+      globe: host.getGlobe(),
+      view: host.getView(),
+      layers: host.getLayers(),
+    }
   }
 
   function lead(): void {
@@ -217,6 +258,11 @@ export function startRoomSync(code: string, host: RoomSyncHost, opts: RoomSyncOp
     onState: (state) => {
       followed = { state, at: nowMs() }
       host.setFollowedGlobe(state.globe)
+      // The camera is moved when the lead says where it is, not on the
+      // follower's own tick: between messages the follower's globe is
+      // still, and re-applying a stale view would fight nothing.
+      const local = host.getView()
+      if (state.view && (!local || viewsDiffer(local, state.view))) host.setView(state.view)
       follow()
     },
     onStatus: (next) => {
@@ -238,6 +284,7 @@ export function startRoomSync(code: string, host: RoomSyncHost, opts: RoomSyncOp
 
   const handle: RoomSyncHandle = {
     status: () => ({ ...status }),
+    snapshot: readState,
     onStatus(listener) {
       listeners.add(listener)
       listener({ ...status })
