@@ -826,6 +826,14 @@ function closePopover(): void {
   isOpen = false
 }
 
+/**
+ * Close the popover from outside the menu: `globePanelOffset.ts` does
+ * when the browse panel has just opened and the window cannot hold both.
+ */
+export function closeToolsMenu(): void {
+  if (isOpen) closePopover()
+}
+
 /** Whether the popover is currently open — used by tests. */
 export function isToolsMenuOpen(): boolean {
   return isOpen
