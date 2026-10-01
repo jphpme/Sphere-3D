@@ -52,6 +52,8 @@ import { initToolsMenu, syncToolsMenuState, syncToolsMenuLayout, pulseBrowseButt
 import { initAccountUI } from './ui/accountUI'
 import { closeOutputUI, initOutputUI, openOutputUI } from './ui/outputUI'
 import { openCreditsPanel } from './ui/creditsPanel'
+import { initAnchorButton } from './ui/anchorPanel'
+import { initTimeLabelPosition } from './ui/timeLabelPosition'
 import { initChatUI, openChat, openChatSettings, notifyDatasetChanged, showChatTrigger, hideChatTrigger, closeChat, flushPendingGlobeActions, getImmersiveVoiceState, toggleImmersiveVoice, endImmersiveVoice } from './ui/chatUI'
 import { loadViewPreferences, saveViewPreferences, type ViewPreferences } from './utils/viewPreferences'
 import { renderColorbar, openDisplayControls, closeDisplayControls } from './ui/colorbarUI'
@@ -4553,6 +4555,9 @@ class InteractiveSphere {
     })
 
     document.getElementById('home-btn')?.addEventListener('click', () => this.goHome())
+    // AYNI: the anchor button under it, and the date at the bottom centre.
+    initAnchorButton()
+    initTimeLabelPosition()
 
     // Browse panel opens via the Tools menu's Browse button (see
     // openBrowsePanel). No standalone peek-out toggle tab.

@@ -51,22 +51,22 @@
     font-weight: var(--component-playback-time-label-font-weight);
     letter-spacing: 0.03em;
     padding: calc(0.4rem * var(--ui-scale)) calc(0.7rem * var(--ui-scale));
+    /* AYNI: always the bottom centre. `bottom` here is the resting
+       value; timeLabelPosition.ts lifts it clear of the playback bar,
+       the Tools buttons and the info panel wherever they reach the
+       middle of the screen. */
     position: absolute;
-    top: calc(0.75rem * var(--ui-scale));
-    /* Clear the help trigger pill (~80px) + gap */
-    inset-inline-end: calc(6rem * var(--ui-scale));
+    bottom: calc(0.75rem * var(--ui-scale));
+    left: 50%;
+    transform: translateX(-50%);
+    white-space: nowrap;
+    pointer-events: none;
     background: var(--glass-bg-light);
     backdrop-filter: var(--glass-blur);
     -webkit-backdrop-filter: var(--glass-blur);
     border: 1px solid var(--white-o08);
     border-radius: var(--component-playback-time-label-radius);
 }
-/* When the browse overlay is open, the help trigger is hidden,
-   so let the time label return to the corner. */
-body.browse-open #time-label {
-    inset-inline-end: calc(0.75rem * var(--ui-scale));
-}
-
 #home-btn:hover {
     background: var(--white-o10) !important;
     color: var(--color-text) !important;

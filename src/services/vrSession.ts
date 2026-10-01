@@ -43,6 +43,9 @@ import { createVrZoomOverlay, type VrZoomOverlayHandle } from '../ui/vrZoomOverl
 import { createVrPlacementTouch, type VrPlacementTouchHandle } from '../ui/vrPlacementTouch'
 import { createVrRotateTouch, type VrRotateTouchHandle } from '../ui/vrRotateTouch'
 import { tiltGlobe } from './vrGlobeTilt'
+import { createVrMarkerAlign, isMarkerAlignRequested } from './vrMarkerAlign'
+import type { MarkerFrame } from './sharedMarkerPose'
+import { createVrMarkerAlignTouch, type VrMarkerAlignTouchHandle } from '../ui/vrMarkerAlignTouch'
 import { createVrDebugPanel, type VrDebugPanelHandle } from './vrDebugPanel'
 import { GLOBE_RADIUS, MAX_GLOBE_SCALE, MIN_GLOBE_SCALE } from './vrScene'
 import { createVrPlacement, type VrPlacementHandle } from './vrPlacement'
@@ -433,6 +436,9 @@ let appliedMapLayers: MapLayerImages | null | undefined = undefined
 const LOADING_FALLBACK_S = 10
 const LOADING_READY_PAUSE_S = 0.25
 
+/** AYNI: clear air between a marker and the underside of the sphere above it, metres. */
+const MARKER_GLOBE_GAP_M = 0.12
+
 /** True while a VR session is live. */
 export function isVrActive(): boolean {
   return active !== null
@@ -707,6 +713,13 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     // the session. Optional because Quest browsers don't implement
     // it and must not fail the request.
     optionalFeatures.push('dom-overlay')
+    // AYNI: the marker scan reads the camera picture (vrMarkerAlign).
+    // Asked for only on a phone that opened the page with `?marker=1`,
+    // because the browser puts a camera prompt in front of the session
+    // for it; headset browsers do not offer it at all.
+    if (isMarkerAlignRequested() && isHandheldArUserAgent(navigator.userAgent)) {
+      optionalFeatures.push('camera-access')
+    }
   }
   // Root element handed to the dom-overlay module. Chrome on Android
   // renders this subtree over the camera feed; see index.html.
@@ -1046,6 +1059,13 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
    * user re-places.
    */
   let placementHeightOffset = 0
+  // AYNI: the marker scan. Null unless the session granted the camera
+  // picture, and useless without a surface to meet the marker on.
+  const markerAlign =
+    hitTestSource && placementRefSpace
+      ? createVrMarkerAlign(session, renderer.getContext())
+      : null
+  let markerTouch: VrMarkerAlignTouchHandle | null = null
   if (isAr) {
     const savedHandle = loadPersistedAnchorHandle()
     if (savedHandle) {
@@ -1151,6 +1171,7 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     hud.mesh.visible = true
     sceneRevealed = true
     syncPlacementChrome()
+    syncMarkerChrome()
   }
   scene.setTexture(ctx.getDatasetTexture(), finishLoading)
   hud.setState({
@@ -1265,6 +1286,8 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     placementTouch?.setPlacing(placingNow)
   }
   const onPlaceButton = (): void => {
+    // A placement by hand replaces the marker's: the two do not run together.
+    markerAlign?.stop()
     // Toggle Place mode. Re-tap exits without placing.
     setPlacing(!(placement?.isPlacing() ?? false))
   }
@@ -1357,6 +1380,51 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
         persisted: false,
       })
     })
+  }
+
+  /**
+   * AYNI: put the sphere on the marker. Position and heading both come
+   * from the marker, so every phone that scans the same sheet shows the
+   * sphere in the same place, turned the same way: floating above the
+   * marker's middle, the prime meridian facing the marker's bottom edge.
+   * The size is reset as well, so the phones agree on that too.
+   */
+  const applyMarkerFrame = (found: MarkerFrame, frame: XRFrame, refSpace: XRReferenceSpace): void => {
+    setPlacing(false)
+    cancelFlyTo()
+    if (typeof navigator !== 'undefined' && navigator.vibrate) navigator.vibrate(15)
+    scene.globe.scale.setScalar(1)
+    placementHeightOffset = GLOBE_RADIUS + MARKER_GLOBE_GAP_M
+    scene.globe.position.set(
+      found.position.x,
+      found.position.y + placementHeightOffset,
+      found.position.z,
+    )
+    // The sphere's own +X is longitude 0 (see flyToOnGlobe); a quarter
+    // turn about the vertical brings it round to the marker's +Z, its
+    // bottom edge.
+    scene.globe.quaternion
+      .set(found.orientation.x, found.orientation.y, found.orientation.z, found.orientation.w)
+      .multiply(new THREE_.Quaternion().setFromAxisAngle(new THREE_.Vector3(0, 1, 0), -Math.PI / 2))
+    // The previous anchor would pull the sphere back on the next frame.
+    if (currentAnchor) {
+      try { currentAnchor.delete() } catch { /* already gone */ }
+      currentAnchor = null
+    }
+    // Hold the spot with a tracked anchor, as a placement by hand does,
+    // so the sphere stays on the marker when the device refines its map.
+    const createFn = frame.createAnchor
+    if (!createFn) return
+    void createFn
+      .call(frame, new XRRigidTransform(found.position, found.orientation), refSpace)
+      .then((anchor) => {
+        if (!active) return
+        if (currentAnchor) {
+          try { currentAnchor.delete() } catch { /* already gone */ }
+        }
+        currentAnchor = anchor
+      })
+      .catch((err) => logger.warn('[VR] Failed to anchor the marker placement:', err))
   }
 
   /**
@@ -1508,6 +1576,24 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
   }
   syncPlacementChrome()
 
+  // AYNI: the marker scan's button, beside the placement chrome and
+  // revealed with it. Only where the scan exists (see markerAlign).
+  function syncMarkerChrome(): void {
+    if (!markerAlign || markerTouch || !sceneRevealed) return
+    if (!handheldAr || !domOverlayActive || !domOverlayRoot) return
+    markerTouch = createVrMarkerAlignTouch({
+      onToggle: () => {
+        if (markerAlign.isScanning()) {
+          markerAlign.stop()
+        } else {
+          setPlacing(false)
+          markerAlign.start()
+        }
+      },
+    })
+    markerTouch.mount(domOverlayRoot)
+  }
+
   // --- Handheld-AR zoom slider ---
   // The one sizing control a phone has: an explicit DOM slider, never a
   // touch gesture. Mounted once, INTO the overlay root so the browser
@@ -1572,6 +1658,8 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
       rotateTouchMounted = false
       placementTouch?.dispose()
       placementTouch = null
+      markerTouch?.dispose()
+      markerTouch = null
     },
     browse,
     tourControls,
@@ -1731,6 +1819,17 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
           active.scene.globe.position.copy(preview)
         }
       }
+    }
+
+    // AYNI: marker scan. Before the anchor sync, so the frame a marker
+    // is found on already shows the sphere above it.
+    if (markerAlign) {
+      if (markerAlign.isScanning() && frame && active.refSpace && active.hitTestSource) {
+        const found = markerAlign.update(frame, active.refSpace, active.hitTestSource, now)
+        if (found) applyMarkerFrame(found, frame, active.refSpace)
+      }
+      markerTouch?.setHidden(active.placement?.isPlacing() ?? false)
+      markerTouch?.setState(markerAlign.isScanning(), markerAlign.getStatus())
     }
 
     // Arm the rotate layer only when nothing else owns the touch: the
@@ -2044,6 +2143,10 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
             `scale=${active.scene.globe.scale.x.toFixed(2)}`,
           `loadT=${loopElapsed.toFixed(1)} ready=${loadingFinalized ? 'y' : 'n'} ` +
             `fade=${fadeStarted ? 'y' : 'n'} shown=${loadingDisposed ? 'y' : 'n'}`,
+          // AYNI: the marker scan. `-` = not on this session; the side is
+          // the marker's measured size, to hold a ruler against.
+          `marker=${markerAlign ? markerAlign.getStatus() : '-'} ` +
+            `side=${markerAlign?.getLastSize() ? `${(markerAlign.getLastSize()! * 100).toFixed(1)}cm` : '-'}`,
         ])
       }
     }
@@ -2095,6 +2198,7 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     cancelFlyTo()
     a.interaction.dispose()
     a.disposeZoomOverlay()
+    markerAlign?.dispose()
     if (debugPanel) {
       a.scene.scene.remove(debugPanel.mesh)
       debugPanel.dispose()

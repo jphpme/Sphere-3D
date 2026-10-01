@@ -78,6 +78,13 @@
 
                 <button id="home-btn" class="hidden" title="Browse datasets" aria-label="Browse datasets" data-i18n-title="home.aria" data-i18n-aria-label="home.aria" style="position: absolute; top: 0.75rem; left: 0.75rem; pointer-events: auto; padding: 0.3rem 0.55rem; font-size: 0.85rem; background: var(--glass-bg-light); backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur); border: 1px solid var(--white-o08); border-radius: 6px; color: var(--color-text-secondary); min-width: 36px; min-height: 36px; line-height: 1;">&#8962;</button>
 
+                <!-- AYNI: Show anchor — this screen as the shared-AR marker
+                     (anchorPanel.ts). Under the home button, and there whether
+                     or not a dataset is loaded. -->
+                <button id="anchor-btn" type="button" title="Show anchor" aria-label="Show anchor" data-i18n-title="anchor.button.aria" data-i18n-aria-label="anchor.button.aria">
+                    <svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true" focusable="false"><path fill="currentColor" fill-rule="evenodd" d="M1 1h14v14H1zM3.5 3.5v9h9v-9z"/><rect x="6" y="6" width="4" height="4" fill="currentColor"/></svg>
+                </button>
+
                 <div id="latlng-display" class="hidden" aria-hidden="true" style="position: absolute; top: 0.75rem; left: 6.5rem; font-size: 0.72rem; letter-spacing: 0.03em; padding: 0.4rem 0.7rem; background: var(--glass-bg-light); backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur); border: 1px solid var(--white-o08); border-radius: 6px; font-variant-numeric: tabular-nums; pointer-events: none;"></div>
 
 

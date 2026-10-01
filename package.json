@@ -46,6 +46,7 @@
     "test:ui": "vitest --ui",
     "test:coverage": "vitest run --coverage",
     "build:qa": "npx tsx scripts/build-qa-index.ts",
+    "build:anchor-marker": "npx tsx scripts/build-anchor-marker.ts",
     "build:privacy-page": "npx tsx scripts/build-privacy-page.ts",
     "check:privacy-page": "npx tsx scripts/build-privacy-page.ts --check",
     "build:setup-page": "npx tsx scripts/build-setup-page.ts",

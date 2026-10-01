@@ -6,6 +6,17 @@
  * See docs/CSS_ARCHITECTURE_PLAN.md Step 3.
  */
 
+/* AYNI — the top inline-end corner is a stack: the account chip on the
+   first row, Help under it (with Enter AR beside Help, see vr.css).
+   They used to share one row and sat on top of each other. Where there
+   is no account chip, Help keeps the first row. */
+:root {
+    --corner-row-2: calc(3.4rem * var(--ui-scale));
+}
+#account-control:not(.hidden) ~ #help-trigger {
+    top: var(--corner-row-2);
+}
+
 /* --- Help panel --- */
 #help-trigger {
     position: fixed;
@@ -403,10 +414,6 @@ body.tour-authoring-open #help-trigger {
     .help-btn-primary {
         min-height: max(44px, calc(44px * var(--ui-scale)));
     }
-    /* Clear the 48px circular help trigger */
-    #time-label {
-        inset-inline-end: calc(4.5rem * var(--ui-scale));
-    }
 }
 
 /* Tier 3 — portrait phone: full-screen sheet */
@@ -416,15 +423,6 @@ body.tour-authoring-open #help-trigger {
         inset-inline-end: calc(0.5rem * var(--ui-scale));
         width: max(40px, calc(40px * var(--ui-scale)));
         height: max(40px, calc(40px * var(--ui-scale)));
-    }
-    /* Clear the 40px help trigger at 0.5rem inset, and drop to a second
-       row: the first row already carries the lat/lng readout, which starts
-       at 6.5rem, and at 390 px the two boxes overlapped by ~33 px —
-       measured in Chromium, not guessed. A date is only useful whole, so
-       the label moves rather than truncating. */
-    #time-label {
-        inset-inline-end: calc(3.5rem * var(--ui-scale));
-        top: calc(3.25rem * var(--ui-scale));
     }
     #help-panel {
         top: 0;

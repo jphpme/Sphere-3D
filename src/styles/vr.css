@@ -40,6 +40,11 @@
     transition: background 0.15s, color 0.15s, border-color 0.15s;
 }
 
+/* AYNI: on the second row with Help when the account chip has the first. */
+#account-control:not(.hidden) ~ #vr-enter-btn {
+    top: var(--corner-row-2);
+}
+
 #vr-enter-btn:hover,
 #vr-enter-btn:focus-visible {
     background: var(--color-accent);
@@ -173,7 +178,8 @@ body.browse-open #vr-enter-btn {
  * centered) and the globe (middle of the view). */
 .vr-place-accept,
 .vr-place-cancel,
-.vr-place-replace {
+.vr-place-replace,
+.vr-marker-scan {
     position: fixed;
     z-index: 950;
     padding: calc(0.55rem * var(--ui-scale)) calc(1.1rem * var(--ui-scale));
@@ -220,6 +226,20 @@ body.browse-open #vr-enter-btn {
     opacity: 0.85;
 }
 
+/* AYNI — "Scan marker" / "Stop scanning" (vrMarkerAlignTouch): the
+ * opposite corner from Re-place, and hidden during placement, whose
+ * Cancel button takes this spot. */
+.vr-marker-scan {
+    bottom: calc(1rem * var(--ui-scale));
+    inset-inline-start: calc(1rem * var(--ui-scale));
+    padding: calc(0.35rem * var(--ui-scale)) calc(0.7rem * var(--ui-scale));
+    font-size: calc(0.72rem * var(--ui-scale));
+    min-height: max(36px, calc(36px * var(--ui-scale)));
+    opacity: 0.85;
+}
+
+.vr-marker-scan:hover,
+.vr-marker-scan:focus-visible,
 .vr-place-accept:hover,
 .vr-place-accept:focus-visible,
 .vr-place-cancel:hover,
@@ -248,6 +268,104 @@ body.browse-open #vr-enter-btn {
     font-size: calc(0.75rem * var(--ui-scale));
     letter-spacing: 0.03em;
     pointer-events: none;
+}
+
+/* AYNI — the Show anchor button: the home button's twin, one row
+   below it in the top inline-start corner. */
+#anchor-btn {
+    position: absolute;
+    /* The home button is 36px at 0.75rem on every screen (its inline
+       style), so its twin is too. */
+    top: calc(0.75rem + 36px + 0.5rem);
+    inset-inline-start: 0.75rem;
+    display: inline-grid;
+    place-items: center;
+    width: 36px;
+    height: 36px;
+    padding: 0;
+    pointer-events: auto;
+    background: var(--glass-bg-light);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
+    border: 1px solid var(--white-o08);
+    border-radius: 6px;
+    color: var(--color-text-secondary);
+    cursor: pointer;
+}
+
+#anchor-btn:hover,
+#anchor-btn:focus-visible {
+    background: var(--white-o10);
+    color: var(--color-text);
+    border-color: rgba(255, 255, 255, 0.35);
+}
+
+body.embed-mode #anchor-btn,
+body.catalog-empty #anchor-btn,
+body.tour-authoring-open #anchor-btn {
+    display: none;
+}
+
+/* AYNI — Show anchor (anchorPanel.ts): this screen as the
+   shared-AR marker. White whatever the theme, because the marker is
+   read as black on white, and above everything else on the page. */
+#anchor-panel {
+    --anchor-header: calc(3rem * var(--ui-scale));
+    position: fixed;
+    inset: 0;
+    z-index: 10001;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    background: #fff;
+    color: #111;
+}
+
+.anchor-panel-header {
+    flex: none;
+    box-sizing: border-box;
+    width: 100%;
+    height: var(--anchor-header);
+    display: flex;
+    align-items: center;
+    gap: calc(0.75rem * var(--ui-scale));
+    padding-inline: calc(0.75rem * var(--ui-scale));
+}
+
+.anchor-panel-hint {
+    flex: 1;
+    margin: 0;
+    font-size: calc(0.8rem * var(--ui-scale));
+    line-height: 1.25;
+}
+
+.anchor-panel-close {
+    flex: none;
+    width: max(44px, calc(2.25rem * var(--ui-scale)));
+    height: max(44px, calc(2.25rem * var(--ui-scale)));
+    border: 1px solid #111;
+    border-radius: 50%;
+    background: #fff;
+    color: #111;
+    font-size: calc(1rem * var(--ui-scale));
+    cursor: pointer;
+}
+
+.anchor-panel-close:focus-visible {
+    outline: 3px solid #15803d;
+    outline-offset: 2px;
+}
+
+/* The largest square the screen leaves under the header. The picture
+   carries its own white margin, so it may touch the edges. */
+.anchor-panel-marker {
+    flex: none;
+    width: min(100vw, 100vh - var(--anchor-header));
+    width: min(100vw, 100dvh - var(--anchor-header));
+    aspect-ratio: 1;
+    margin-block: auto;
+    user-select: none;
+    -webkit-user-select: none;
 }
 
 /* AYNI — a passing note (showVrNotice in src/ui/vrButton.ts): a small
