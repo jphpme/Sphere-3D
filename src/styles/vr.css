@@ -359,7 +359,7 @@ body.tour-authoring-open #anchor-btn {
 /* The marker and, beside it, the QR code that joins the session: under
    each other on an upright screen, side by side on a wide one. */
 .anchor-panel-body {
-    --anchor-join: calc(10.5rem * var(--ui-scale));
+    --anchor-join: calc(13.5rem * var(--ui-scale));
     flex: 1;
     min-height: 0;
     width: 100%;
@@ -390,8 +390,8 @@ body.tour-authoring-open #anchor-btn {
 }
 
 .anchor-panel-qr {
-    width: calc(8rem * var(--ui-scale));
-    height: calc(8rem * var(--ui-scale));
+    width: calc(11rem * var(--ui-scale));
+    height: calc(11rem * var(--ui-scale));
 }
 
 .anchor-panel-qr svg {
