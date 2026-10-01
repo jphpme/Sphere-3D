@@ -56,7 +56,9 @@
     border-color: rgba(34, 197, 94, 0.45);
 }
 .tools-menu-btn[aria-expanded="true"],
-.tools-menu-btn[aria-pressed="true"] {
+.tools-menu-btn[aria-pressed="true"],
+/* The Browse button, while its panel is open. */
+body.browse-open .tools-menu-browse {
     background: var(--accent-o18);
     color: var(--color-accent);
     border-color: var(--color-accent);
