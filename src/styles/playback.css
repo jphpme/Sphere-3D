@@ -83,7 +83,8 @@
     -webkit-backdrop-filter: var(--glass-blur);
     border: 1px solid var(--white-o08);
     border-radius: var(--component-playback-time-label-radius);
-    /* Stays under the globe when it moves aside for a side panel
+    /* Stays in the middle of the space a side panel leaves, under the
+       globe when there is one globe
        (`src/ui/globePanelOffset.ts`). `bottom` eases too, for when the
        transport, pushed further than the label, ends up beneath it and
        timeLabelPosition.ts lifts the label over it. */

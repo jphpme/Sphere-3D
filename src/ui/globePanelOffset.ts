@@ -35,8 +35,14 @@ export interface PanelBox {
 
 /** Below this the panels are sheets over the globe, not columns beside it. */
 const DESKTOP_MIN_WIDTH = 769
-/** A panel that takes more than this share of the window leaves no globe to centre. */
-const MAX_INSET_FRACTION = 0.6
+/**
+ * A panel that takes more than this share of the window is the window
+ * (the browse panel in catalog mode): nothing stands beside it. Short
+ * of that, both panels open at a large UI scale can take three quarters
+ * of a laptop window, and what is left is still where the globe and the
+ * buttons belong.
+ */
+const MAX_INSET_FRACTION = 0.85
 const DURATION_MS = 650
 const EASING = 'cubic-bezier(0.45, 0, 0.15, 1)'
 
@@ -195,23 +201,19 @@ export function initGlobePanelOffset(options: GlobePanelOffsetOptions): GlobePan
       if (rect.width > 0) panels.push({ left: rect.left + offset, right: rect.right + offset })
     }
     const all = occupiedInset(window.innerWidth, panels, rtl())
-    // Both open on a narrow window can be too much for the globe to
-    // centre in; the buttons still clear the browse panel.
     pushButtons(all || bar, bar)
+    const root = document.documentElement.style
+    const sign = rtl() ? 1 : -1
+    // For what is centred on the window (the date label): the middle of
+    // the space left, which is half as far, in any layout.
+    if (all) root.setProperty('--panel-push-globe', `${(sign * all) / 2}px`)
+    else root.removeProperty('--panel-push-globe')
     // Two or four globes share the window; there is no one globe to centre.
     const globe = grid.children.length > 1 ? 0 : all
-    // For what belongs under the globe (the date label): where it goes.
-    const root = document.documentElement.style
-    // And for what is anchored to the inline-end edge of its panel (the
-    // legend, the colorbar, the map's own corner controls): the whole way.
-    const sign = rtl() ? 1 : -1
-    if (globe) {
-      root.setProperty('--panel-push-globe', `${(sign * globe) / 2}px`)
-      root.setProperty('--panel-push-view', `${sign * globe}px`)
-    } else {
-      root.removeProperty('--panel-push-globe')
-      root.removeProperty('--panel-push-view')
-    }
+    // For what is anchored to the inline-end edge of the globe's own
+    // panel (the legend, the colorbar, the map's corner controls).
+    if (globe) root.setProperty('--panel-push-view', `${sign * globe}px`)
+    else root.removeProperty('--panel-push-view')
     moveTo(globe)
   }
 
@@ -224,6 +226,13 @@ export function initGlobePanelOffset(options: GlobePanelOffsetOptions): GlobePan
   if (controls) observer.observe(controls, { ...classes, subtree: true, childList: true })
   // Panels come and go with the layout.
   observer.observe(grid, { childList: true })
+  // The panels change width without changing class: the UI-scale
+  // presets, a section arriving late in the popover.
+  const sizes = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(refresh)
+  for (const id of ['browse-overlay', 'tools-menu-popover']) {
+    const el = document.getElementById(id)
+    if (el) sizes?.observe(el)
+  }
   window.addEventListener('resize', refresh)
   refresh()
 
@@ -231,6 +240,7 @@ export function initGlobePanelOffset(options: GlobePanelOffsetOptions): GlobePan
     refresh,
     dispose(): void {
       observer.disconnect()
+      sizes?.disconnect()
       window.removeEventListener('resize', refresh)
       pushButtons(0, 0)
       document.documentElement.style.removeProperty('--panel-push-globe')
