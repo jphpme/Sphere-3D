@@ -137,7 +137,7 @@ describe('data-encoded palette is confined to the dataset texture', () => {
     expect(SHADER_SRC).toMatch(/bool\s+sampledDataset\s*=\s*true\s*;/)
     // ...and be cleared exactly where the base map is substituted.
     expect(SHADER_SRC).toMatch(
-      /sampledDiffuseColor\s*=\s*texture2D\(\s*uOverlayBaseMap\s*,\s*vMapUv\s*\)\s*;\s*sampledDataset\s*=\s*false\s*;/,
+      /sampledDiffuseColor\s*=\s*texture2D\(\s*uOverlayBaseMap\s*,\s*globeUv\s*\)\s*;\s*sampledDataset\s*=\s*false\s*;/,
     )
     // The palette branch must require it. Without the conjunct the
     // base map's red channel is treated as a measurement.

@@ -354,6 +354,9 @@ export function createVrScene(
       map: earth.baseDiffuseTexture ?? earth.baseEarthTexture,
       specular: new THREE_.Color(0x444444),
       shininess: 30,
+      // AYNI: drawn from inside too, mirrored — see the primary's
+      // material in photorealEarth.
+      side: THREE_.DoubleSide,
     })
     mat.onBeforeCompile = shader => {
       shader.uniforms.uSecDataEncoded = dataEncodedUniform
@@ -369,7 +372,8 @@ export function createVrScene(
       shader.fragmentShader = shader.fragmentShader.replace(
         '#include <map_fragment>',
         `#ifdef USE_MAP
-           vec4 sampledDiffuseColor = texture2D(map, uSecUvRegion.xy + vMapUv * uSecUvRegion.zw);
+           vec2 globeUv = vec2(gl_FrontFacing ? vMapUv.x : 1.0 - vMapUv.x, vMapUv.y);
+           vec4 sampledDiffuseColor = texture2D(map, uSecUvRegion.xy + globeUv * uSecUvRegion.zw);
            if (uSecDataEncoded == 1) {
              vec4 pal = texture2D(uSecColorLut, vec2(sampledDiffuseColor.r, 0.5));
              // No base map is bound on a secondary, so composite
@@ -379,6 +383,11 @@ export function createVrScene(
            }
            diffuseColor *= sampledDiffuseColor;
          #endif`,
+      )
+      shader.fragmentShader = shader.fragmentShader.replace(
+        '#include <normal_fragment_maps>',
+        `#include <normal_fragment_maps>
+         if (!gl_FrontFacing) normal = normalize(vNormal);`,
       )
     }
     let ownedLut: THREE.DataTexture | null = null

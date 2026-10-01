@@ -879,10 +879,23 @@ export function createVrInteraction(
       // mesh-local texture coordinate — already accounting for the
       // globe's rotation — so the dataset readout can go straight
       // from here to a lat/lon without re-deriving anything.
+      //
+      // AYNI: a ray leaving the sphere has hit the inner face, where
+      // the picture is drawn mirrored east-west; mirror the UV with it
+      // so a tap or readout from inside lands on what is shown there.
+      const hit = globeHits[0]
+      const uv = hit.uv ?? null
+      const dir = raycaster.ray.direction
+      const centre = hit.object.position
+      const leaving =
+        dir.x * (hit.point.x - centre.x) +
+        dir.y * (hit.point.y - centre.y) +
+        dir.z * (hit.point.z - centre.z) > 0
+      if (uv && leaving) uv.x = 1 - uv.x
       return {
         kind: 'globe',
-        mesh: globeHits[0].object as THREE.Mesh,
-        uv: globeHits[0].uv ?? null,
+        mesh: hit.object as THREE.Mesh,
+        uv,
       }
     }
 

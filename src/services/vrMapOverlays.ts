@@ -13,6 +13,10 @@
  * material is vrBorders' — premultiplied alpha, depth-tested so lines on
  * the far side of the sphere stay hidden, double-sided for a user who
  * steps inside — plus a tint that redraws line art in white or black.
+ *
+ * Each shell has a twin just inside the surface. The globe draws its
+ * inner face too, which hides the outer shell from a viewer inside; the
+ * twin is what they see, mirrored east-west as the surface is.
  */
 
 import type * as THREE from 'three'
@@ -124,7 +128,7 @@ export function createVrMapOverlays(
         uniform vec4 uRegion;
         varying vec2 vUv;
         void main() {
-          vec2 uv = uRegion.xy + vUv * uRegion.zw;
+          vec2 uv = uRegion.xy + vec2(gl_FrontFacing ? vUv.x : 1.0 - vUv.x, vUv.y) * uRegion.zw;
           vec4 tex = uEncoded
             ? texture2D(uLut, vec2((floor(texture2D(uMap, uv).r * 255.0 + 0.5) + 0.5) / 256.0, 0.5))
             : texture2D(uMap, uv);
@@ -144,12 +148,13 @@ export function createVrMapOverlays(
       premultipliedAlpha: true,
       side: THREE_.DoubleSide,
     })
-    const geometry = new THREE_.SphereGeometry(
-      globeRadius * (BASE_RADIUS_FACTOR + index * STEP_RADIUS_FACTOR),
-      SEGMENTS,
-      SEGMENTS,
-    )
+    const radiusFactor = BASE_RADIUS_FACTOR + index * STEP_RADIUS_FACTOR
+    const geometry = new THREE_.SphereGeometry(globeRadius * radiusFactor, SEGMENTS, SEGMENTS)
     const mesh = new THREE_.Mesh(geometry, material)
+    // The twin: as far inside the surface as the shell is outside it.
+    const interior = new THREE_.Mesh(geometry, material)
+    interior.scale.setScalar((2 - radiusFactor) / radiusFactor)
+    mesh.add(interior)
     const visible = overlay.visible
     if (visible) {
       const opacity = overlay.opacity ?? 1
@@ -159,6 +164,7 @@ export function createVrMapOverlays(
     }
     // After the globe and the borders shell, in stack order.
     mesh.renderOrder = 2 + index
+    interior.renderOrder = mesh.renderOrder
     globe.add(mesh)
     return { mesh, texture, lutTexture, material, geometry }
   }

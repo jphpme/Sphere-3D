@@ -573,6 +573,11 @@ export function createPhotorealEarth(
     shininess: EARTH_SHININESS,
     emissiveMap: null,
     emissive: new THREE_.Color(0xffffff),
+    // AYNI: the surface is drawn from inside too, for a viewer who has
+    // scaled the globe up and stepped into it. The shader patch below
+    // mirrors the inner face east-west so the map reads the right way
+    // round from in there. Opaque, so this is still one draw.
+    side: THREE_.DoubleSide,
   })
 
   // Shader patch: two unrelated jobs sharing one onBeforeCompile.
@@ -661,6 +666,12 @@ export function createPhotorealEarth(
          // branch treats .r as a measurement to look up in the
          // palette, and the base map's red channel is not one.
          bool sampledDataset = true;
+         // AYNI: seen from inside the sphere a texture reads east-west
+         // reversed, like a map held up to the light from behind. The
+         // inner face flips u so geography and any lettering in the
+         // picture read correctly; lon 0 and 180 are where the two
+         // faces agree.
+         vec2 globeUv = vec2(gl_FrontFacing ? vMapUv.x : 1.0 - vMapUv.x, vMapUv.y);
          if (uOverlayHasBbox == 1) {
            // THREE's SphereGeometry puts uv.y == 1 at the NORTH pole
            // (verified: SphereGeometry(1,8,6) gives uv.y 1 at y=+1, 0
@@ -671,7 +682,7 @@ export function createPhotorealEarth(
            // here, so a regional dataset rendered into the mirrored
            // hemisphere - a US bbox landing over the South Pacific.
            float lat = (vMapUv.y - 0.5) * 180.0;
-           float lon = (vMapUv.x - 0.5) * 360.0;
+           float lon = (globeUv.x - 0.5) * 360.0;
            float bn = uOverlayBbox.x;
            float bs = uOverlayBbox.y;
            float bw = uOverlayBbox.z;
@@ -698,7 +709,7 @@ export function createPhotorealEarth(
              if (uOverlayFlipY == 1) bv = 1.0 - bv;
              sampledDiffuseColor = texture2D(map, uOverlayUvRegion.xy + vec2(bu, bv) * uOverlayUvRegion.zw);
            } else if (uOverlayHasBase == 1) {
-             sampledDiffuseColor = texture2D(uOverlayBaseMap, vMapUv);
+             sampledDiffuseColor = texture2D(uOverlayBaseMap, globeUv);
              sampledDataset = false;
            } else {
              discard;
@@ -707,7 +718,7 @@ export function createPhotorealEarth(
            // Full-globe path with optional lonOrigin shift. fract()
            // wraps so a sample at lon < lonOrigin pulls from the
            // texture's right edge (and vice versa).
-           float lon = (vMapUv.x - 0.5) * 360.0;
+           float lon = (globeUv.x - 0.5) * 360.0;
            float fu = fract((lon - uOverlayLonOrigin) / 360.0 + 0.5);
            float fv = (uOverlayFlipY == 1) ? (1.0 - vMapUv.y) : vMapUv.y;
            // uOverlayUvRegion confines the lookup to the map's part of
@@ -757,7 +768,7 @@ export function createPhotorealEarth(
            // render-order change, and reuses the sampler the
            // outside-bbox branch above already binds.
            vec3 overlayBase = (uOverlayHasBase == 1)
-             ? texture2D(uOverlayBaseMap, vMapUv).rgb
+             ? texture2D(uOverlayBaseMap, globeUv).rgb
              : vec3(0.0);
            sampledDiffuseColor = vec4(mix(overlayBase, pal.rgb, pal.a), 1.0);
          } else {
@@ -770,7 +781,7 @@ export function createPhotorealEarth(
            // AYNI: a transparent picture (an alpha stream) shows the
            // layer basemap through its clear regions instead of black.
            if (uOverlayAlphaMix == 1 && sampledDataset) {
-             vec3 layerBase = texture2D(uOverlayBaseMap, vMapUv).rgb;
+             vec3 layerBase = texture2D(uOverlayBaseMap, globeUv).rgb;
              sampledDiffuseColor = vec4(mix(layerBase, sampledDiffuseColor.rgb, sampledDiffuseColor.a), 1.0);
            }
          }
@@ -780,10 +791,27 @@ export function createPhotorealEarth(
     shader.fragmentShader = shader.fragmentShader.replace(
       '#include <emissivemap_fragment>',
       `#ifdef USE_EMISSIVEMAP
-         vec4 emissiveColor = texture2D( emissiveMap, vEmissiveMapUv );
+         vec4 emissiveColor = texture2D( emissiveMap, vec2(gl_FrontFacing ? vEmissiveMapUv.x : 1.0 - vEmissiveMapUv.x, vEmissiveMapUv.y) );
          float nightFactor = smoothstep( 0.0, -0.2, vNdotL );
          totalEmissiveRadiance *= emissiveColor.rgb * nightFactor * ${NIGHT_LIGHT_STRENGTH.toFixed(2)};
        #endif`,
+    )
+    // AYNI: the inner face. The ocean mask follows the mirrored map, and
+    // the surface keeps its outward normal instead of the flipped one a
+    // double-sided material shades with, so the inside shows the same
+    // day and night as the outside rather than their negative. (The
+    // bump map is skipped in there; it is not mirrored.)
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <specularmap_fragment>',
+      `float specularStrength = 1.0;
+       #ifdef USE_SPECULARMAP
+         specularStrength = texture2D( specularMap, vec2(gl_FrontFacing ? vSpecularMapUv.x : 1.0 - vSpecularMapUv.x, vSpecularMapUv.y) ).r;
+       #endif`,
+    )
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <normal_fragment_maps>',
+      `#include <normal_fragment_maps>
+       if (!gl_FrontFacing) normal = normalize(vNormal);`,
     )
   }
 

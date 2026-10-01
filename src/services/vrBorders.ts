@@ -175,7 +175,9 @@ export function createVrBorders(
       varying vec2 vUv;
 
       void main() {
-        vec4 tex = texture2D(uMap, vUv);
+        // Mirrored on the inner face, as the globe's own surface is,
+        // so the lines stay on their coasts for a viewer inside.
+        vec4 tex = texture2D(uMap, vec2(gl_FrontFacing ? vUv.x : 1.0 - vUv.x, vUv.y));
         float lineAlpha = tex.a * uOpacity;
         if (lineAlpha < 0.01) discard;
         gl_FragColor = vec4(uColor * lineAlpha, lineAlpha);
