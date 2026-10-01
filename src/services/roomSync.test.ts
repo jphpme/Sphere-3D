@@ -4,7 +4,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { RoomClientOptions, RoomStatus } from './roomClient'
 import type { RoomLayers, RoomState, RoomView } from './roomProtocol'
-import { followPlayback, leadTime, shouldSend, startRoomSync, viewsDiffer, type RoomSyncHost } from './roomSync'
+import {
+  MAX_RATE_TRIM,
+  followPlayback,
+  leadTime,
+  shouldSend,
+  startRoomSync,
+  viewsDiffer,
+  type RoomSyncHost,
+} from './roomSync'
 
 const playing = { paused: false, time: 10, duration: 120, rate: 1 }
 const state = (over: Partial<RoomState> = {}): RoomState => ({
@@ -33,11 +41,39 @@ describe('followPlayback', () => {
 
   it('leaves a follower alone when it is in step', () => {
     expect(followPlayback(playing, 2, local)).toEqual({ toggle: false, seekTo: null, rate: null })
-    expect(followPlayback(playing, 2, { ...local, time: 12.4 }).seekTo).toBeNull()
+    expect(followPlayback(playing, 2, { ...local, time: 12.08 })).toEqual({ toggle: false, seekTo: null, rate: null })
   })
 
-  it('seeks one that is clearly out of step', () => {
-    expect(followPlayback(playing, 2, { ...local, time: 20 }).seekTo).toBe(12)
+  it('closes a small gap by rate, never by seeking', () => {
+    // The lead is at 12 s. Half a second behind: play a little faster.
+    const behind = followPlayback(playing, 2, { ...local, time: 11.5 })
+    expect(behind.seekTo).toBeNull()
+    expect(behind.rate).toBeCloseTo(1.1, 6)
+    // A quarter of a second ahead: a little slower.
+    const ahead = followPlayback(playing, 2, { ...local, time: 12.25 })
+    expect(ahead.seekTo).toBeNull()
+    expect(ahead.rate).toBeCloseTo(0.95, 6)
+    // Two seconds behind is still a trim, capped.
+    const far = followPlayback(playing, 2, { ...local, time: 10 })
+    expect(far.seekTo).toBeNull()
+    expect(far.rate).toBeCloseTo(1 + MAX_RATE_TRIM, 6)
+  })
+
+  it('goes back to the lead’s rate once in step', () => {
+    expect(followPlayback(playing, 2, { ...local, time: 11.95, rate: 1.1 }).rate).toBe(1)
+  })
+
+  it('seeks only one that is seconds out', () => {
+    const fix = followPlayback(playing, 2, { ...local, time: 20 })
+    expect(fix.seekTo).toBe(12)
+    expect(fix.rate).toBeNull()
+  })
+
+  it('leaves the loop to each device: nothing near either end', () => {
+    // The lead rests on its last frame; the follower is still two seconds short.
+    expect(followPlayback({ ...playing, time: 120 }, 0, { ...local, time: 118 })).toEqual({ toggle: false, seekTo: null, rate: null })
+    // The lead has started over; the follower is resting on its own last frame.
+    expect(followPlayback({ ...playing, time: 1 }, 0, { ...local, time: 119.9 })).toEqual({ toggle: false, seekTo: null, rate: null })
   })
 
   it('holds a paused lead’s frame closely', () => {
@@ -222,6 +258,27 @@ describe('startRoomSync', () => {
     client.onState(state({ playback: { paused: true, time: 60, duration: 120, rate: 1 } }))
     expect(host.playingNow).toBe(false)
     expect(video.currentTime).toBe(60)
+    sync.stop()
+  })
+
+  it('never seeks a video that is not advancing, and puts the rate back when it stops following', () => {
+    const sync = start()
+    client.onStatus(status('follower'))
+    // Held by the browser: the app says playing, the element is paused.
+    const held = video as unknown as { paused: boolean }
+    held.paused = true
+    client.onState(state({ playback: { paused: false, time: 60, duration: 120, rate: 1 } }))
+    vi.advanceTimersByTime(5000)
+    expect(video.currentTime).toBe(10)
+    // Advancing again, a second behind: a trim, not a seek.
+    held.paused = false
+    video.currentTime = 59
+    client.onState(state({ playback: { paused: false, time: 60, duration: 120, rate: 1 } }))
+    expect(video.currentTime).toBe(59)
+    expect(video.playbackRate).toBeCloseTo(1.1, 6)
+    // No longer following: the lead's own rate, not the trimmed one.
+    client.onStatus(status('lead', 1))
+    expect(video.playbackRate).toBe(1)
     sync.stop()
   })
 

@@ -21,9 +21,12 @@
  *     second regardless. A steadily playing video is not a change: a
  *     follower can predict it, so only a playhead that is not where the
  *     last message implies (a seek, a loop, a stall) is worth sending.
- *   - `followPlayback`: a follower seeks only when it is clearly out of
- *     step. A seek stalls the decoder, so chasing small errors would
- *     manufacture the stutter it is trying to remove.
+ *   - `followPlayback`: a follower closes a gap by playing a little
+ *     faster or slower, and seeks only when it is seconds out. A seek
+ *     stalls the decoder: the first version seeked at 0.6 s, and on a
+ *     phone each seek cost more than that, so the follower fell behind
+ *     again while seeking and the dataset played in jerks. A rate trim
+ *     costs nothing and converges.
  *
  * A follower's own controls are not disabled; whatever it changes is put
  * back by the lead's next message. Passing the lead is the room's
@@ -67,12 +70,20 @@ const LEAD_TICK_MS = 100
 const HEARTBEAT_MS = 1000
 /** How often a follower re-checks its playhead against the lead's. */
 const FOLLOW_TICK_MS = 250
-/** A playing follower seeks when further than this from the lead, seconds. */
-const SEEK_PLAYING_S = 0.6
+/** A playing follower within this of the lead is in step, seconds. */
+export const IN_STEP_S = 0.1
+/** A playing follower seeks only when further than this from the lead. */
+export const SEEK_PLAYING_S = 2.5
+/** Between the two it trims its rate: by this much per second of gap… */
+const TRIM_PER_SECOND = 0.2
+/** …up to this fraction of the lead's rate, which the eye does not notice. */
+export const MAX_RATE_TRIM = 0.1
 /** A paused follower holds the lead's frame to within this. */
 const SEEK_PAUSED_S = 0.08
+/** Within this of either end a video is left to its own loop: both devices rest on the last frame and start over by the same rule. */
+const END_ZONE_S = 0.4
 /** After a seek, leave the decoder alone this long. */
-const SEEK_SETTLE_MS = 1500
+const SEEK_SETTLE_MS = 3000
 /** A dataset load is not asked for again within this. */
 const LOAD_RETRY_MS = 10000
 
@@ -97,6 +108,12 @@ export interface PlaybackCorrection {
  * What a follower should do to its video to match the lead's. Positions
  * are compared as fractions of each device's own duration, because two
  * devices can pick renditions of slightly different length.
+ *
+ * Paused, the follower takes the lead's frame. Playing, it is in one of
+ * three bands: in step (the lead's own rate), a gap of up to
+ * SEEK_PLAYING_S (the lead's rate trimmed by up to MAX_RATE_TRIM, faster
+ * when behind and slower when ahead), or further out (one seek). Near
+ * either end of the video it does nothing: the loop is each device's own.
  */
 export function followPlayback(
   playback: RoomPlayback,
@@ -104,13 +121,22 @@ export function followPlayback(
   local: { paused: boolean; time: number; duration: number; rate: number },
 ): PlaybackCorrection {
   const target = (leadTime(playback, elapsedS) / playback.duration) * local.duration
-  const off = Math.abs(local.time - target)
-  const limit = playback.paused ? SEEK_PAUSED_S : SEEK_PLAYING_S
-  return {
-    toggle: playback.paused !== local.paused,
-    seekTo: off > limit ? Math.max(0, Math.min(local.duration, target)) : null,
-    rate: Math.abs(local.rate - playback.rate) > 0.001 ? playback.rate : null,
+  const toggle = playback.paused !== local.paused
+  const setRate = (rate: number): number | null => (Math.abs(local.rate - rate) > 0.004 ? rate : null)
+  const gap = target - local.time
+  if (playback.paused) {
+    return {
+      toggle,
+      seekTo: Math.abs(gap) > SEEK_PAUSED_S ? Math.max(0, Math.min(local.duration, target)) : null,
+      rate: setRate(playback.rate),
+    }
   }
+  const nearEnd = (time: number): boolean => time >= local.duration - END_ZONE_S
+  if (nearEnd(target) || nearEnd(local.time)) return { toggle, seekTo: null, rate: setRate(playback.rate) }
+  if (Math.abs(gap) <= IN_STEP_S) return { toggle, seekTo: null, rate: setRate(playback.rate) }
+  if (Math.abs(gap) > SEEK_PLAYING_S) return { toggle, seekTo: Math.max(0, target), rate: setRate(playback.rate) }
+  const trim = Math.max(-MAX_RATE_TRIM, Math.min(MAX_RATE_TRIM, gap * TRIM_PER_SECOND))
+  return { toggle, seekTo: null, rate: setRate(playback.rate * (1 + trim)) }
 }
 
 /**
@@ -199,6 +225,14 @@ export function startRoomSync(code: string, host: RoomSyncHost, opts: RoomSyncOp
   let followed: { state: RoomState; at: number } | null = null
   let lastSeekAt = -Infinity
   let loadAsked: { id: string; at: number } | null = null
+  /** The lead's own rate, to put back when this device stops following: a trimmed rate is not this video's rate. */
+  let untrimmedRate: number | null = null
+
+  function restoreRate(): void {
+    const video = host.getVideo()
+    if (video && untrimmedRate !== null) video.playbackRate = untrimmedRate
+    untrimmedRate = null
+  }
 
   function follow(): void {
     if (status.role !== 'follower' || !followed) return
@@ -216,14 +250,25 @@ export function startRoomSync(code: string, host: RoomSyncHost, opts: RoomSyncOp
     if (state.layers) host.setLayers(state.layers)
     const video = host.getVideo()
     if (!state.playback || !video || !(video.duration > 0) || video.readyState < 2) return
+    const playing = host.isPlaying()
     const fix = followPlayback(state.playback, (now - at) / 1000, {
-      paused: !host.isPlaying(),
+      paused: !playing,
       time: video.currentTime,
       duration: video.duration,
       rate: video.playbackRate,
     })
-    if (fix.rate !== null) video.playbackRate = fix.rate
     if (fix.toggle) host.togglePlayPause()
+    // A video that is mid-seek, still buffering, or not advancing though
+    // the app has it playing (resting on its last frame between loops, or
+    // held by the browser until the page is tapped) has no position worth
+    // correcting. Steering it would be a seek every few seconds on a
+    // picture that is not moving: a slideshow.
+    const advancing = !video.seeking && video.readyState >= 3 && !(playing && video.paused)
+    if (!state.playback.paused && !advancing) return
+    if (fix.rate !== null) {
+      untrimmedRate = state.playback.rate
+      video.playbackRate = fix.rate
+    }
     if (fix.seekTo !== null && !video.seeking && now - lastSeekAt > SEEK_SETTLE_MS) {
       lastSeekAt = now
       video.currentTime = fix.seekTo
@@ -281,6 +326,7 @@ export function startRoomSync(code: string, host: RoomSyncHost, opts: RoomSyncOp
         // Leading, or cut off: the sphere is this device's own again.
         followed = null
         host.setFollowedGlobe(null)
+        restoreRate()
       }
       // A device that has just become the lead says where things stand at once.
       if (next.role === 'lead' && was !== 'lead') sent = null
@@ -306,6 +352,7 @@ export function startRoomSync(code: string, host: RoomSyncHost, opts: RoomSyncOp
       client.close()
       host.setFollowedGlobe(null)
       host.setLocked(false)
+      restoreRate()
       listeners.clear()
       if (current === handle) current = null
     },

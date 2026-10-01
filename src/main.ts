@@ -1328,7 +1328,7 @@ class InteractiveSphere {
   }
 
   /** AYNI: the layer stack a shared session's lead last asked for, and when. */
-  private roomLayersAsked: { key: string; at: number } | null = null
+  private roomLayersAsked: { key: string; at: number; tries: number } | null = null
 
   /**
    * AYNI: take the lead's layer stack (roomSync). A no-op when it is
@@ -1346,8 +1346,12 @@ class InteractiveSphere {
       return
     }
     const now = Date.now()
-    if (this.roomLayersAsked?.key === want && now - this.roomLayersAsked.at < 6000) return
-    this.roomLayersAsked = { key: want, at: now }
+    const asked = this.roomLayersAsked?.key === want ? this.roomLayersAsked : null
+    // Twice, then no more until the lead asks for something else: a
+    // stack this device cannot produce (an overlay stream that will not
+    // start) must not restart a player every few seconds for good.
+    if (asked && (asked.tries >= 2 || now - asked.at < 6000)) return
+    this.roomLayersAsked = { key: want, at: now, tries: (asked?.tries ?? 0) + 1 }
     if (keyOf(layers.basemapId, layers.overlays, null) !== keyOf(selection.basemapId, selection.overlays, null)) {
       void this.applyMapLayers({ basemapId: layers.basemapId, overlays: layers.overlays }, this.mapLayerSlot)
     }
