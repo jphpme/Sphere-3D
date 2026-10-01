@@ -621,7 +621,14 @@ class InteractiveSphere {
       if (withoutMeetingKey) window.history.replaceState(window.history.state, '', withoutMeetingKey)
       initToolsMenu(this.viewports, {
         onSetLayout: (layout) => this.viewports.setLayout(layout),
-        onOpenBrowse: () => this.openBrowsePanel(),
+        // AYNI: the Browse button closes the panel it opened, as the
+        // Tools button does. Through the panel's own close button, so
+        // both ways out are the same one (hide, announce).
+        onOpenBrowse: () => {
+          const close = document.getElementById('browse-close')
+          if (document.body.classList.contains('browse-open') && close) close.click()
+          else this.openBrowsePanel()
+        },
         onOpenOrbitSettings: () => openChatSettings(),
         onOpenCredits: (trigger) => openCreditsPanel(this.viewports, trigger),
         // AYNI: only on a browser that holds a host key (meetingHost.ts).
