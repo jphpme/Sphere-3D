@@ -7,6 +7,16 @@
     inset-inline-end: calc(0.75rem * var(--ui-scale));
     z-index: 12;
     pointer-events: auto;
+    /* Steps aside for the browse panel and the Tools popover, in step
+       with them and the globe (`src/ui/globePanelOffset.ts`). */
+    translate: var(--panel-push-top, 0px) 0;
+    transition: translate 0.65s cubic-bezier(0.45, 0, 0.15, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    #account-control {
+        transition: none;
+    }
 }
 
 #account-control.hidden {

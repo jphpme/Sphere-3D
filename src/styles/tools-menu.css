@@ -17,8 +17,17 @@
     padding: 0;
     pointer-events: auto;
     z-index: 10;
+    /* Steps aside for the browse panel, in step with it and the globe
+       (`src/ui/globePanelOffset.ts` sets the distance). */
+    translate: var(--panel-push-bar, 0px) 0;
+    transition: translate 0.65s cubic-bezier(0.45, 0, 0.15, 1);
 }
 #map-controls.hidden { display: none; }
+@media (prefers-reduced-motion: reduce) {
+    #map-controls {
+        transition: none;
+    }
+}
 
 .tools-menu-btn {
     display: inline-flex;
@@ -47,7 +56,9 @@
     border-color: rgba(34, 197, 94, 0.45);
 }
 .tools-menu-btn[aria-expanded="true"],
-.tools-menu-btn[aria-pressed="true"] {
+.tools-menu-btn[aria-pressed="true"],
+/* The Browse button, while its panel is open. */
+body.browse-open .tools-menu-browse {
     background: var(--accent-o18);
     color: var(--color-accent);
     border-color: var(--color-accent);
@@ -112,7 +123,7 @@
        scrollable-body pattern. The subtracted offset leaves room
        for the Tools bar below (#map-controls bottom 3.2rem + the
        button), the 0.5rem gap above it, and a small top margin. */
-    max-height: calc(100vh - calc(7rem * var(--ui-scale)));
+    max-height: calc(100vh - calc(6.4rem * var(--ui-scale)));
     padding: calc(0.75rem * var(--ui-scale));
     background: rgba(13, 13, 18, 0.94);
     backdrop-filter: blur(14px);
@@ -127,8 +138,39 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    /* Slides in from the inline-end edge and out to it, in step with
+       the globe moving aside (`src/ui/globePanelOffset.ts`). `display`
+       is in the list so the popover is still there to slide out after
+       `.hidden` lands; `@starting-style` is where it slides in from. */
+    transition:
+        transform 0.65s cubic-bezier(0.45, 0, 0.15, 1),
+        opacity 0.65s cubic-bezier(0.45, 0, 0.15, 1),
+        display 0.65s allow-discrete;
 }
-.tools-menu-popover.hidden { display: none; }
+.tools-menu-popover.hidden {
+    display: none;
+    opacity: 0;
+    transform: translateX(calc(100% + 1.5rem * var(--ui-scale)));
+    /* On its way out it must not take the click meant for the globe. */
+    pointer-events: none;
+}
+:root[dir="rtl"] .tools-menu-popover.hidden {
+    transform: translateX(calc(-100% - 1.5rem * var(--ui-scale)));
+}
+@starting-style {
+    .tools-menu-popover {
+        opacity: 0;
+        transform: translateX(calc(100% + 1.5rem * var(--ui-scale)));
+    }
+    :root[dir="rtl"] .tools-menu-popover {
+        transform: translateX(calc(-100% - 1.5rem * var(--ui-scale)));
+    }
+}
+@media (prefers-reduced-motion: reduce) {
+    .tools-menu-popover {
+        transition: none;
+    }
+}
 
 .tools-menu-popover-header {
     display: flex;
@@ -150,6 +192,24 @@
     overflow-y: auto;
     margin-inline: calc(-0.75rem * var(--ui-scale));
     padding-inline: calc(0.75rem * var(--ui-scale));
+    /* On a window too short for the whole menu, a quiet bar rather
+       than the platform's. */
+    scrollbar-width: thin;
+    scrollbar-color: var(--white-o20) transparent;
+}
+
+/* Desktop: the rows sit a little closer so the whole menu fits a
+   1080p window without scrolling. Touch layouts keep the taller rows. */
+@media (min-width: 769px) {
+    .tools-menu-popover .tools-menu-item {
+        padding-block: calc(0.38rem * var(--ui-scale));
+    }
+    .tools-menu-popover .tools-menu-section {
+        margin-bottom: calc(0.6rem * var(--ui-scale));
+    }
+    .tools-menu-popover .tools-menu-section:last-child {
+        margin-bottom: 0;
+    }
 }
 .tools-menu-popover-title {
     font-size: calc(0.72rem * var(--ui-scale));
@@ -456,7 +516,7 @@
        built-in fallback (0px when unsupported), so this matches the
        base rule on non-notched devices. */
     .tools-menu-popover {
-        max-height: calc(100vh - calc(7rem * var(--ui-scale)) - env(safe-area-inset-bottom));
+        max-height: calc(100vh - calc(6.4rem * var(--ui-scale)) - env(safe-area-inset-bottom));
     }
 }
 

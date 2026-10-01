@@ -144,5 +144,11 @@ export function initTimeLabelPosition(): void {
     }).observe(label.parentElement, { childList: true })
   }
   window.addEventListener('resize', schedule)
+  // The label and what is around it also slide aside for the side
+  // panels (globePanelOffset.ts), by different amounts and with no
+  // change of size or class to observe: measure again where they land.
+  document.addEventListener('transitionend', (event) => {
+    if (event.propertyName === 'translate') schedule()
+  })
   schedule()
 }
