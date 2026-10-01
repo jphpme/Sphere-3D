@@ -54,6 +54,7 @@ import { closeOutputUI, initOutputUI, openOutputUI } from './ui/outputUI'
 import { openCreditsPanel } from './ui/creditsPanel'
 import { initAnchorButton } from './ui/anchorPanel'
 import { initTimeLabelPosition } from './ui/timeLabelPosition'
+import { initGlobePanelOffset } from './ui/globePanelOffset'
 import { initChatUI, openChat, openChatSettings, notifyDatasetChanged, showChatTrigger, hideChatTrigger, closeChat, flushPendingGlobeActions, getImmersiveVoiceState, toggleImmersiveVoice, endImmersiveVoice } from './ui/chatUI'
 import { loadViewPreferences, saveViewPreferences, type ViewPreferences } from './utils/viewPreferences'
 import { renderColorbar, openDisplayControls, closeDisplayControls } from './ui/colorbarUI'
@@ -4623,6 +4624,20 @@ class InteractiveSphere {
     // AYNI: the anchor button under it, and the date at the bottom centre.
     initAnchorButton()
     initTimeLabelPosition()
+    // AYNI: the globe moves aside for the browse panel and the Tools
+    // popover, to the middle of what they leave free.
+    const mapGrid = document.getElementById('map-grid')
+    if (mapGrid) {
+      initGlobePanelOffset({
+        grid: mapGrid,
+        resizeMaps: () => {
+          for (const renderer of this.viewports.getAll()) {
+            // `redraw` paints now rather than on the next frame.
+            renderer.getMap()?.resize().redraw()
+          }
+        },
+      })
+    }
     // AYNI: a page opened with ?room=CODE is in a shared session — the
     // first device in the room leads, the rest follow its dataset,
     // playhead and (in AR) its sphere.
