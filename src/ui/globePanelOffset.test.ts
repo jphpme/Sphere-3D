@@ -35,6 +35,10 @@ describe('occupiedInset', () => {
     expect(occupiedInset(768, [{ left: 348, right: 768 }], false)).toBe(0)
   })
 
+  it('still centres in a quarter of the window, with both panels open at a large UI scale', () => {
+    expect(occupiedInset(1366, [{ left: 334, right: 1366 }], false)).toBe(1032)
+  })
+
   it('leaves the globe alone when the panel takes most of the window', () => {
     expect(occupiedInset(1366, [{ left: 0, right: 1366 }], false)).toBe(0)
   })
@@ -164,7 +168,56 @@ describe('initGlobePanelOffset', () => {
     grid.appendChild(document.createElement('div'))
     openBrowse()
     expect(document.documentElement.style.getPropertyValue('--panel-push-bar')).toBe('-420px')
+    expect(document.documentElement.style.getPropertyValue('--panel-push-view')).toBe('')
     expect(grid.style.insetInlineStart).toBe('')
+  })
+
+  describe('when the window cannot hold both panels', () => {
+    let popover: HTMLElement
+    let closeBrowse: ReturnType<typeof vi.fn<() => void>>
+    let closeTools: ReturnType<typeof vi.fn<() => void>>
+
+    const openTools = (): void => {
+      popover.classList.remove('hidden')
+      handle.refresh()
+    }
+
+    beforeEach(() => {
+      handle.dispose()
+      popover = document.getElementById('tools-menu-popover')!
+      // 240px wide, 12px in from the edge: where the bar has it before
+      // the bar itself is pushed (happy-dom applies no translate).
+      popover.getBoundingClientRect = () => {
+        const right = window.innerWidth - 12
+        return { left: right - 240, right, top: 0, bottom: 600, width: 240, height: 600 } as DOMRect
+      }
+      closeBrowse = vi.fn<() => void>(() => { document.body.classList.remove('browse-open') })
+      closeTools = vi.fn<() => void>(() => { popover.classList.add('hidden') })
+      handle = initGlobePanelOffset({ grid, resizeMaps, closeBrowse, closeTools })
+    })
+
+    it('leaves both open on a window with room to spare', () => {
+      openBrowse()
+      openTools()
+      expect(closeBrowse).not.toHaveBeenCalled()
+      expect(closeTools).not.toHaveBeenCalled()
+    })
+
+    it('closes the browse panel when Tools opens second', () => {
+      Object.defineProperty(window, 'innerWidth', { value: 900, configurable: true })
+      openBrowse()
+      openTools()
+      expect(closeBrowse).toHaveBeenCalledTimes(1)
+      expect(closeTools).not.toHaveBeenCalled()
+    })
+
+    it('closes Tools when the browse panel opens second', () => {
+      Object.defineProperty(window, 'innerWidth', { value: 900, configurable: true })
+      openTools()
+      openBrowse()
+      expect(closeTools).toHaveBeenCalledTimes(1)
+      expect(closeBrowse).not.toHaveBeenCalled()
+    })
   })
 
   it('puts the grid and the buttons back on dispose', () => {
