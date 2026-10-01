@@ -55,6 +55,13 @@ export function occupiedInset(
   return Math.round(inset / 2) * 2
 }
 
+/** How far an element is translated along x right now, mid-transition included. */
+function translateX(el: Element): number {
+  const m = /matrix\(([^)]+)\)/.exec(getComputedStyle(el).transform ?? '')
+  const x = m ? Number(m[1].split(',')[4]) : 0
+  return Number.isFinite(x) ? x : 0
+}
+
 export interface GlobePanelOffsetOptions {
   /** The element that holds the map panels (`#map-grid`). */
   grid: HTMLElement
@@ -87,9 +94,7 @@ export function initGlobePanelOffset(options: GlobePanelOffsetOptions): GlobePan
 
   /** The grid's translation toward the panels, mid-transition included. */
   const readTranslate = (): number => {
-    const m = /matrix\(([^)]+)\)/.exec(getComputedStyle(grid).transform ?? '')
-    const x = m ? Number(m[1].split(',')[4]) : 0
-    if (!Number.isFinite(x)) return 0
+    const x = translateX(grid)
     return rtl() ? -x : x
   }
   const setTranslate = (toward: number): void => {
@@ -152,8 +157,10 @@ export function initGlobePanelOffset(options: GlobePanelOffsetOptions): GlobePan
     }
     const popover = document.getElementById('tools-menu-popover')
     if (popover && !popover.classList.contains('hidden')) {
+      // Where it rests, not where it is while it slides in.
       const rect = popover.getBoundingClientRect()
-      if (rect.width > 0) panels.push({ left: rect.left, right: rect.right })
+      const slid = translateX(popover)
+      if (rect.width > 0) panels.push({ left: rect.left - slid, right: rect.right - slid })
     }
     return occupiedInset(window.innerWidth, panels, rtl())
   }

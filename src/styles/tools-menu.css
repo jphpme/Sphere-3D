@@ -127,8 +127,39 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    /* Slides in from the inline-end edge and out to it, in step with
+       the globe moving aside (`src/ui/globePanelOffset.ts`). `display`
+       is in the list so the popover is still there to slide out after
+       `.hidden` lands; `@starting-style` is where it slides in from. */
+    transition:
+        transform 0.65s cubic-bezier(0.45, 0, 0.15, 1),
+        opacity 0.65s cubic-bezier(0.45, 0, 0.15, 1),
+        display 0.65s allow-discrete;
 }
-.tools-menu-popover.hidden { display: none; }
+.tools-menu-popover.hidden {
+    display: none;
+    opacity: 0;
+    transform: translateX(calc(100% + 1.5rem * var(--ui-scale)));
+    /* On its way out it must not take the click meant for the globe. */
+    pointer-events: none;
+}
+:root[dir="rtl"] .tools-menu-popover.hidden {
+    transform: translateX(calc(-100% - 1.5rem * var(--ui-scale)));
+}
+@starting-style {
+    .tools-menu-popover {
+        opacity: 0;
+        transform: translateX(calc(100% + 1.5rem * var(--ui-scale)));
+    }
+    :root[dir="rtl"] .tools-menu-popover {
+        transform: translateX(calc(-100% - 1.5rem * var(--ui-scale)));
+    }
+}
+@media (prefers-reduced-motion: reduce) {
+    .tools-menu-popover {
+        transition: none;
+    }
+}
 
 .tools-menu-popover-header {
     display: flex;

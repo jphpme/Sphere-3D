@@ -50,6 +50,10 @@ button:hover {
     height: 100%;
     position: relative;
     overflow: hidden;
+    /* `clip` where supported: `hidden` is still a scroll container, and
+       focusing the Tools popover while it slides in from beyond the
+       edge would scroll the whole UI sideways to meet it. */
+    overflow: clip;
 }
 
 canvas {
