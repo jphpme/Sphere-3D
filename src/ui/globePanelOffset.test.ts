@@ -35,6 +35,10 @@ describe('occupiedInset', () => {
     expect(occupiedInset(768, [{ left: 348, right: 768 }], false)).toBe(0)
   })
 
+  it('still centres in a quarter of the window, with both panels open at a large UI scale', () => {
+    expect(occupiedInset(1366, [{ left: 334, right: 1366 }], false)).toBe(1032)
+  })
+
   it('leaves the globe alone when the panel takes most of the window', () => {
     expect(occupiedInset(1366, [{ left: 0, right: 1366 }], false)).toBe(0)
   })
@@ -166,6 +170,9 @@ describe('initGlobePanelOffset', () => {
     grid.appendChild(document.createElement('div'))
     openBrowse()
     expect(document.documentElement.style.getPropertyValue('--panel-push-bar')).toBe('-420px')
+    // The date label still goes to the middle of what is left.
+    expect(document.documentElement.style.getPropertyValue('--panel-push-globe')).toBe('-210px')
+    expect(document.documentElement.style.getPropertyValue('--panel-push-view')).toBe('')
     expect(grid.style.insetInlineStart).toBe('')
   })
 

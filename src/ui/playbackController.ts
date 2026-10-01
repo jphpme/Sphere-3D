@@ -13,6 +13,7 @@ import { logger } from '../utils/logger'
 import { proxyCaptionUrl } from '../utils/captionProxy'
 import { t } from '../i18n'
 import { reportError } from '../analytics'
+import { updateMapControlsPosition } from './mapControlsUI'
 
 // --- Playback constants ---
 /**
@@ -574,8 +575,29 @@ export function seekToDate(
 // --- Info panel positioning ---
 
 /**
- * Observe the info panel and shift #playback-controls up as it expands.
- * Only applies on portrait mobile (≤600px width).
+ * Whether the transport, once it has stepped aside for the browse panel
+ * (`--panel-push-bar`, set by globePanelOffset.ts), lands on the info
+ * panel in the other bottom corner. Measured from where it will rest,
+ * not where it is mid-slide.
+ */
+export function transportMeetsInfoPanel(
+  controls: { left: number; right: number },
+  slid: number,
+  push: number,
+  info: { left: number; right: number },
+  gap: number,
+): boolean {
+  const left = controls.left - slid + push
+  const right = controls.right - slid + push
+  return left < info.right + gap && right > info.left - gap
+}
+
+/**
+ * Observe the info panel and shift #playback-controls up over it where
+ * the two would otherwise share the bottom edge: on portrait mobile
+ * (≤600px width) while the panel is expanded, and on a desktop window
+ * too narrow to hold both side by side once the browse panel has pushed
+ * the transport over.
  */
 export function initPlaybackPositioning(): void {
   const infoPanel = document.getElementById('info-panel')
@@ -586,15 +608,29 @@ export function initPlaybackPositioning(): void {
     if (!controls) return
     const isPortraitMobile = window.innerWidth <= 600
       && window.matchMedia('(orientation: portrait)').matches
-    if (infoPanel.classList.contains('expanded') && isPortraitMobile) {
-      const h = infoPanel.getBoundingClientRect().height
-      controls.style.bottom = `${h + 12}px`
-    } else {
-      controls.style.bottom = '0.75rem'
-    }
+    const info = infoPanel.getBoundingClientRect()
+    const infoShown = !infoPanel.classList.contains('hidden') && info.width > 0
+    const push = parseFloat(document.documentElement.style.getPropertyValue('--panel-push-bar')) || 0
+    const box = controls.getBoundingClientRect()
+    const slid = parseFloat(getComputedStyle(controls).translate ?? '') || 0
+    const pushedOnto = push !== 0 && infoShown && box.width > 0
+      && transportMeetsInfoPanel(box, slid, push, info, 8)
+    const next = (infoPanel.classList.contains('expanded') && isPortraitMobile) || pushedOnto
+      ? `${Math.round(info.height) + 12}px`
+      : '0.75rem'
+    if (controls.style.bottom === next) return
+    controls.style.bottom = next
+    // The Tools bar rests on the transport, wherever that now is.
+    updateMapControlsPosition()
   }
 
   new ResizeObserver(update).observe(infoPanel)
+  // The push is a custom property on the root; the info panel is shown
+  // and hidden by class.
+  const changes = new MutationObserver(update)
+  changes.observe(document.documentElement, { attributes: true, attributeFilter: ['style'] })
+  changes.observe(infoPanel, { attributes: true, attributeFilter: ['class'] })
+  window.addEventListener('resize', update)
 }
 
 // --- Playback state reset ---

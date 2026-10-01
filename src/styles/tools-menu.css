@@ -121,9 +121,11 @@ body.browse-open .tools-menu-browse {
        the popover instead of overflowing off the top of the
        screen. Mirrors the chat/Orbit panel's bounded-height +
        scrollable-body pattern. The subtracted offset leaves room
-       for the Tools bar below (#map-controls bottom 3.2rem + the
-       button), the 0.5rem gap above it, and a small top margin. */
-    max-height: calc(100vh - calc(6.4rem * var(--ui-scale)));
+       for the Tools bar below (wherever `updateMapControlsPosition`
+       put it: `--map-controls-bottom`, which grows with the playback
+       transport under the bar), the button, the 0.5rem gap above it,
+       and a small top margin. */
+    max-height: calc(100vh - var(--map-controls-bottom, calc(3.2rem * var(--ui-scale))) - calc(3.2rem * var(--ui-scale)));
     padding: calc(0.75rem * var(--ui-scale));
     background: rgba(13, 13, 18, 0.94);
     backdrop-filter: blur(14px);
@@ -516,7 +518,7 @@ body.browse-open .tools-menu-browse {
        built-in fallback (0px when unsupported), so this matches the
        base rule on non-notched devices. */
     .tools-menu-popover {
-        max-height: calc(100vh - calc(6.4rem * var(--ui-scale)) - env(safe-area-inset-bottom));
+        max-height: calc(100vh - var(--map-controls-bottom, calc(3.2rem * var(--ui-scale))) - calc(3.2rem * var(--ui-scale)) - env(safe-area-inset-bottom));
     }
 }
 
