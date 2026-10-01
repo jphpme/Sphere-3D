@@ -121,7 +121,7 @@
        scrollable-body pattern. The subtracted offset leaves room
        for the Tools bar below (#map-controls bottom 3.2rem + the
        button), the 0.5rem gap above it, and a small top margin. */
-    max-height: calc(100vh - calc(7rem * var(--ui-scale)));
+    max-height: calc(100vh - calc(6.4rem * var(--ui-scale)));
     padding: calc(0.75rem * var(--ui-scale));
     background: rgba(13, 13, 18, 0.94);
     backdrop-filter: blur(14px);
@@ -190,6 +190,24 @@
     overflow-y: auto;
     margin-inline: calc(-0.75rem * var(--ui-scale));
     padding-inline: calc(0.75rem * var(--ui-scale));
+    /* On a window too short for the whole menu, a quiet bar rather
+       than the platform's. */
+    scrollbar-width: thin;
+    scrollbar-color: var(--white-o20) transparent;
+}
+
+/* Desktop: the rows sit a little closer so the whole menu fits a
+   1080p window without scrolling. Touch layouts keep the taller rows. */
+@media (min-width: 769px) {
+    .tools-menu-popover .tools-menu-item {
+        padding-block: calc(0.38rem * var(--ui-scale));
+    }
+    .tools-menu-popover .tools-menu-section {
+        margin-bottom: calc(0.6rem * var(--ui-scale));
+    }
+    .tools-menu-popover .tools-menu-section:last-child {
+        margin-bottom: 0;
+    }
 }
 .tools-menu-popover-title {
     font-size: calc(0.72rem * var(--ui-scale));
@@ -496,7 +514,7 @@
        built-in fallback (0px when unsupported), so this matches the
        base rule on non-notched devices. */
     .tools-menu-popover {
-        max-height: calc(100vh - calc(7rem * var(--ui-scale)) - env(safe-area-inset-bottom));
+        max-height: calc(100vh - calc(6.4rem * var(--ui-scale)) - env(safe-area-inset-bottom));
     }
 }
 
