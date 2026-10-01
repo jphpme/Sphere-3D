@@ -17,8 +17,17 @@
     padding: 0;
     pointer-events: auto;
     z-index: 10;
+    /* Steps aside for the browse panel, in step with it and the globe
+       (`src/ui/globePanelOffset.ts` sets the distance). */
+    translate: var(--panel-push-bar, 0px) 0;
+    transition: translate 0.65s cubic-bezier(0.45, 0, 0.15, 1);
 }
 #map-controls.hidden { display: none; }
+@media (prefers-reduced-motion: reduce) {
+    #map-controls {
+        transition: none;
+    }
+}
 
 .tools-menu-btn {
     display: inline-flex;

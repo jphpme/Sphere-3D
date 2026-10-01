@@ -145,10 +145,32 @@ describe('initGlobePanelOffset', () => {
     }
   })
 
-  it('puts the grid back on dispose', () => {
+  it('tells the stylesheets how far the corner buttons step aside', () => {
+    const root = document.documentElement
+    openBrowse()
+    expect(root.style.getPropertyValue('--panel-push-top')).toBe('-420px')
+    expect(root.style.getPropertyValue('--panel-push-bar')).toBe('-420px')
+    expect(document.body.classList.contains('buttons-beside-panel')).toBe(true)
+
+    closeBrowse()
+    expect(root.style.getPropertyValue('--panel-push-top')).toBe('')
+    expect(root.style.getPropertyValue('--panel-push-bar')).toBe('')
+    expect(document.body.classList.contains('buttons-beside-panel')).toBe(false)
+  })
+
+  it('moves the buttons, though not the globe, while several globes share the window', () => {
+    grid.appendChild(document.createElement('div'))
+    openBrowse()
+    expect(document.documentElement.style.getPropertyValue('--panel-push-bar')).toBe('-420px')
+    expect(grid.style.insetInlineStart).toBe('')
+  })
+
+  it('puts the grid and the buttons back on dispose', () => {
     openBrowse()
     handle.dispose()
     expect(grid.style.insetInlineStart).toBe('')
     expect(grid.style.transform).toBe('')
+    expect(document.documentElement.style.getPropertyValue('--panel-push-top')).toBe('')
+    expect(document.body.classList.contains('buttons-beside-panel')).toBe(false)
   })
 })

@@ -20,6 +20,11 @@
  * from the old centre to the new one is a CSS transition on `transform`:
  * the grid is first translated back to where the globe was, then let go.
  * The maps are resized once per change, never per frame.
+ *
+ * The buttons in the inline-end corners (account chip, Help, Enter AR,
+ * the Tools bar) step aside by the same measurement, in any layout: this
+ * module publishes how far as custom properties and the stylesheets
+ * translate them, on the same time and curve.
  */
 
 /** A panel's horizontal extent, in viewport coordinates. */
@@ -59,6 +64,12 @@ export function occupiedInset(
 function translateX(el: Element): number {
   const m = /matrix\(([^)]+)\)/.exec(getComputedStyle(el).transform ?? '')
   const x = m ? Number(m[1].split(',')[4]) : 0
+  return Number.isFinite(x) ? x : 0
+}
+
+/** How far the `translate` property has an element pushed along x right now. */
+function pushedX(el: Element): number {
+  const x = parseFloat(getComputedStyle(el).translate ?? '')
   return Number.isFinite(x) ? x : 0
 }
 
@@ -141,9 +152,25 @@ export function initGlobePanelOffset(options: GlobePanelOffsetOptions): GlobePan
     settleTimer = window.setTimeout(settle, DURATION_MS + 50)
   }
 
-  const measure = (): number => {
-    // Two or four globes share the window; there is no one globe to centre.
-    if (grid.children.length > 1) return 0
+  /**
+   * The corner buttons step aside too, by CSS: the account chip, Help
+   * and Enter AR by everything that is open (`--panel-push-top`), the
+   * Tools bar by the browse panel alone (`--panel-push-bar`), since the
+   * popover hangs off that bar. `buttons-beside-panel` tells the
+   * stylesheets the buttons now stand clear of the browse panel and
+   * need not be hidden under it.
+   */
+  const pushButtons = (top: number, bar: number): void => {
+    const sign = rtl() ? 1 : -1
+    const root = document.documentElement.style
+    if (top) root.setProperty('--panel-push-top', `${sign * top}px`)
+    else root.removeProperty('--panel-push-top')
+    if (bar) root.setProperty('--panel-push-bar', `${sign * bar}px`)
+    else root.removeProperty('--panel-push-bar')
+    document.body.classList.toggle('buttons-beside-panel', bar > 0)
+  }
+
+  const refresh = (): void => {
     const panels: PanelBox[] = []
     const browse = document.getElementById('browse-overlay')
     if (
@@ -155,17 +182,25 @@ export function initGlobePanelOffset(options: GlobePanelOffsetOptions): GlobePan
       const width = browse.offsetWidth
       panels.push(rtl() ? { left: 0, right: width } : { left: window.innerWidth - width, right: window.innerWidth })
     }
+    const bar = occupiedInset(window.innerWidth, panels, rtl())
     const popover = document.getElementById('tools-menu-popover')
     if (popover && !popover.classList.contains('hidden')) {
-      // Where it rests, not where it is while it slides in.
+      // Where it rests, not where it is while it slides in — and its
+      // bar may itself still be on its way to where the browse panel
+      // pushes it.
       const rect = popover.getBoundingClientRect()
-      const slid = translateX(popover)
-      if (rect.width > 0) panels.push({ left: rect.left - slid, right: rect.right - slid })
+      const controls = document.getElementById('map-controls')
+      const barLag = (rtl() ? bar : -bar) - (controls ? pushedX(controls) : 0)
+      const offset = barLag - translateX(popover)
+      if (rect.width > 0) panels.push({ left: rect.left + offset, right: rect.right + offset })
     }
-    return occupiedInset(window.innerWidth, panels, rtl())
+    const all = occupiedInset(window.innerWidth, panels, rtl())
+    // Both open on a narrow window can be too much for the globe to
+    // centre in; the buttons still clear the browse panel.
+    pushButtons(all || bar, bar)
+    // Two or four globes share the window; there is no one globe to centre.
+    moveTo(grid.children.length > 1 ? 0 : all)
   }
-
-  const refresh = (): void => moveTo(measure())
 
   // Both panels are opened and closed by class: `browse-open` on the
   // body, `hidden` on the popover (which the Tools bar may rebuild).
@@ -184,6 +219,7 @@ export function initGlobePanelOffset(options: GlobePanelOffsetOptions): GlobePan
     dispose(): void {
       observer.disconnect()
       window.removeEventListener('resize', refresh)
+      pushButtons(0, 0)
       target = 0
       settle()
     },
