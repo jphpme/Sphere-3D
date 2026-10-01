@@ -155,8 +155,8 @@ export function initGlobePanelOffset(options: GlobePanelOffsetOptions): GlobePan
   /**
    * The corner buttons step aside too, by CSS: the account chip, Help
    * and Enter AR by everything that is open (`--panel-push-top`), the
-   * Tools bar by the browse panel alone (`--panel-push-bar`), since the
-   * popover hangs off that bar. `buttons-beside-panel` tells the
+   * Tools bar and the playback transport under it by the browse panel
+   * alone (`--panel-push-bar`), since the popover hangs off that bar. `buttons-beside-panel` tells the
    * stylesheets the buttons now stand clear of the browse panel and
    * need not be hidden under it.
    */
@@ -199,7 +199,12 @@ export function initGlobePanelOffset(options: GlobePanelOffsetOptions): GlobePan
     // centre in; the buttons still clear the browse panel.
     pushButtons(all || bar, bar)
     // Two or four globes share the window; there is no one globe to centre.
-    moveTo(grid.children.length > 1 ? 0 : all)
+    const globe = grid.children.length > 1 ? 0 : all
+    // For what belongs under the globe (the date label): where it goes.
+    const root = document.documentElement.style
+    if (globe) root.setProperty('--panel-push-globe', `${((rtl() ? 1 : -1) * globe) / 2}px`)
+    else root.removeProperty('--panel-push-globe')
+    moveTo(globe)
   }
 
   // Both panels are opened and closed by class: `browse-open` on the
@@ -220,6 +225,7 @@ export function initGlobePanelOffset(options: GlobePanelOffsetOptions): GlobePan
       observer.disconnect()
       window.removeEventListener('resize', refresh)
       pushButtons(0, 0)
+      document.documentElement.style.removeProperty('--panel-push-globe')
       target = 0
       settle()
     },
