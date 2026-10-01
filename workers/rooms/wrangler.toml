@@ -1,0 +1,25 @@
+# AYNI — the shared-session room Worker (docs/SHARED_AR_PLAN.md).
+#
+# Holds one Durable Object class, `Room`, which the Pages project binds as
+# `ROOMS` (see the repo's root wrangler.toml). A Pages project cannot
+# define a Durable Object class itself, hence this companion.
+#
+# Deployed by hand, not by CI:
+#   npx wrangler deploy --config workers/rooms/wrangler.toml
+#
+# It must exist before the site deploys: a Pages binding to a script that
+# is not there fails the whole deploy.
+
+name = "ayni-rooms"
+main = "src/index.ts"
+compatibility_date = "2025-09-01"
+# Reached only through the site's binding; no public address of its own.
+workers_dev = false
+
+[[durable_objects.bindings]]
+name = "ROOMS"
+class_name = "Room"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Room"]

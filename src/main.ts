@@ -129,7 +129,10 @@ import {
   parseInitialLayout,
 } from './utils/posterDeepLinks'
 import { initVrButton } from './ui/vrButton'
-import { flyToOnGlobe, isVrActive } from './services/vrSession'
+import { flyToOnGlobe, getRoomGlobe, isVrActive, setFollowedRoomGlobe } from './services/vrSession'
+import { roomCodeFromSearch } from './services/roomClient'
+import { startRoomSync } from './services/roomSync'
+import { mountRoomChip } from './ui/roomChip'
 import type { VrDatasetTexture } from './services/vrScene'
 import { buildReleaseLut, releaseCropRect, resolveDashRelease } from './services/dashRelease'
 import { fetchGeoMediaMarkers, pickGeoMediaMarker, type GeoMediaMarker } from './services/geoMedia'
@@ -4558,6 +4561,24 @@ class InteractiveSphere {
     // AYNI: the anchor button under it, and the date at the bottom centre.
     initAnchorButton()
     initTimeLabelPosition()
+    // AYNI: a page opened with ?room=CODE is in a shared session — the
+    // first device in the room leads, the rest follow its dataset,
+    // playhead and (in AR) its sphere.
+    const roomCode = roomCodeFromSearch()
+    if (roomCode) {
+      const room = startRoomSync(roomCode, {
+        getDatasetId: () => this.appState.currentDataset?.id ?? null,
+        loadDataset: (id) => { void this.loadDataset(id) },
+        getVideo: () => this.hlsService?.video ?? null,
+        isPlaying: () => this.appState.isPlaying,
+        togglePlayPause: () => togglePlayPause(
+          this.hlsService, this.appState, (m) => this.announce(m),
+        ),
+        getGlobe: getRoomGlobe,
+        setFollowedGlobe: setFollowedRoomGlobe,
+      })
+      mountRoomChip(document.getElementById('xr-dom-overlay') ?? document.body, room.onStatus)
+    }
 
     // Browse panel opens via the Tools menu's Browse button (see
     // openBrowsePanel). No standalone peek-out toggle tab.

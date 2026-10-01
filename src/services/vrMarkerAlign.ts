@@ -35,6 +35,7 @@ import {
   type MarkerFrame,
   type Vec3,
 } from './sharedMarkerPose'
+import { joinedRoomCode } from './roomClient'
 import { logger } from '../utils/logger'
 
 /** What the scan is waiting for, for the hint and the debug panel. */
@@ -77,11 +78,19 @@ export interface VrMarkerAlignHandle {
 const SCAN_INTERVAL_MS = 120
 /** Readings in a row that must agree. */
 const READINGS_NEEDED = 4
-/** Is the marker scan asked for? Opt-in by `?marker=1` until rooms exist. */
-export function isMarkerAlignRequested(
-  search: string = typeof window === 'undefined' ? '' : window.location.search,
-): boolean {
-  return new URLSearchParams(search).get('marker') === '1'
+/**
+ * The page's address when this module loaded. The app rewrites the
+ * address bar when a dataset loads, so by the time AR is entered a
+ * parameter that was there at launch may be gone.
+ */
+const SEARCH_AT_LOAD = typeof window === 'undefined' ? '' : window.location.search
+
+/**
+ * Is the marker scan asked for? By `?marker=1`, or by being in a shared
+ * session, whose whole point is one sphere in one place.
+ */
+export function isMarkerAlignRequested(search: string = SEARCH_AT_LOAD): boolean {
+  return new URLSearchParams(search).get('marker') === '1' || joinedRoomCode() !== null
 }
 
 /** The parts of raw camera access the WebXR type definitions do not carry yet. */

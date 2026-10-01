@@ -19,12 +19,21 @@
  * version, and a change to the layout in `sharedMarker.ts` means a new
  * upload under the next one.
  *
+ * Beside the marker is a QR code that joins a shared session: scanned
+ * with a phone's camera it opens the site in the room this anchor stands
+ * for, where the first phone to arrive leads and the rest follow
+ * (`roomSync.ts`). The anchor's own device does not join; it is furniture.
+ * Its room code is kept for the tab's life, so closing and reopening the
+ * anchor does not strand the people already in the room.
+ *
  * While open it asks for fullscreen and for the screen to stay awake,
  * both best-effort: a marker that dims or locks mid-session stops being
  * one.
  */
 
 import { t } from '../i18n'
+import { joinedRoomCode } from '../services/roomClient'
+import { newRoomCode, normalizeRoomCode } from '../services/roomProtocol'
 
 /** The marker's key on the stream host. Immutable: bump the version with the layout. */
 export const ANCHOR_MARKER_KEY = 'shared/xr/ayni-xr-anchor-v1.svg'
@@ -46,6 +55,65 @@ export function anchorMarkerUrl(
 
 interface WakeLockSentinelLike {
   release(): Promise<void>
+}
+
+const ROOM_CODE_STORAGE_KEY = 'ayni-anchor-room'
+
+/**
+ * The room this anchor stands for: the one this page is already in, else
+ * the one this tab's anchor showed before, else a new one.
+ */
+export function anchorRoomCode(): string {
+  const joined = joinedRoomCode()
+  if (joined) return joined
+  try {
+    const kept = normalizeRoomCode(sessionStorage.getItem(ROOM_CODE_STORAGE_KEY))
+    if (kept) return kept
+  } catch {
+    // No session storage (private mode): a code that lasts while the page does.
+  }
+  const fresh = newRoomCode()
+  try {
+    sessionStorage.setItem(ROOM_CODE_STORAGE_KEY, fresh)
+  } catch {
+    // As above.
+  }
+  return fresh
+}
+
+/** The address that joins room `code` on this site. */
+export function roomJoinUrl(code: string, origin: string = window.location.origin): string {
+  return `${origin}/?room=${code}`
+}
+
+/**
+ * Draw `text` as a QR code into `host`. The encoder is loaded on demand:
+ * only a device showing an anchor needs it.
+ */
+async function drawQr(host: HTMLElement, text: string): Promise<void> {
+  const { default: qrcode } = await import('qrcode-generator')
+  const qr = qrcode(0, 'M')
+  qr.addData(text)
+  qr.make()
+  const count = qr.getModuleCount()
+  const quiet = 4
+  const size = count + 2 * quiet
+  const NS = 'http://www.w3.org/2000/svg'
+  const svg = document.createElementNS(NS, 'svg')
+  svg.setAttribute('viewBox', `0 0 ${size} ${size}`)
+  svg.setAttribute('shape-rendering', 'crispEdges')
+  svg.setAttribute('aria-hidden', 'true')
+  let path = ''
+  for (let row = 0; row < count; row++) {
+    for (let col = 0; col < count; col++) {
+      if (qr.isDark(row, col)) path += `M${col + quiet} ${row + quiet}h1v1h-1z`
+    }
+  }
+  const modules = document.createElementNS(NS, 'path')
+  modules.setAttribute('d', path)
+  modules.setAttribute('fill', '#000')
+  svg.appendChild(modules)
+  host.replaceChildren(svg)
 }
 
 let closeOpenPanel: (() => void) | null = null
@@ -112,7 +180,25 @@ export function openAnchorPanel(
   image.addEventListener('error', onImageError)
   image.src = source
 
-  panel.append(header, image)
+  // The way in for everyone else: a QR code for this anchor's room.
+  const code = anchorRoomCode()
+  const join = document.createElement('div')
+  join.className = 'anchor-panel-join'
+  const qrHost = document.createElement('div')
+  qrHost.className = 'anchor-panel-qr'
+  const caption = document.createElement('p')
+  caption.className = 'anchor-panel-join-caption'
+  caption.textContent = t('anchor.join.caption', { code })
+  join.append(qrHost, caption)
+  void drawQr(qrHost, roomJoinUrl(code)).catch(() => {
+    // Without the encoder the code in the caption is still the way in.
+    qrHost.remove()
+  })
+
+  const body = document.createElement('div')
+  body.className = 'anchor-panel-body'
+  body.append(image, join)
+  panel.append(header, body)
   document.body.appendChild(panel)
 
   // Keep the screen on. The lock is dropped by the browser whenever the

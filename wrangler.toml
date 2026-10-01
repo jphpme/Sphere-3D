@@ -168,6 +168,19 @@ id = "fc9ecc345f8a4f078469ceba7d9c78fe"
 binding = "LAYERS_R2"
 bucket_name = "ayni-catalog-production"
 
+# AYNI — shared sessions (docs/SHARED_AR_PLAN.md). `ROOMS` is the `Room`
+# Durable Object of the companion Worker `ayni-rooms` (workers/rooms),
+# one object per room code; functions/api/room/[code].ts hands sockets to
+# it. A Pages project cannot define a Durable Object class itself.
+#
+# The Worker is deployed by hand and must exist before this file is:
+# a binding to a script that is not there fails the whole deploy.
+#   npx wrangler deploy --config workers/rooms/wrangler.toml
+[[durable_objects.bindings]]
+name = "ROOMS"
+class_name = "Room"
+script_name = "ayni-rooms"
+
 # Vectorize index for the docent's semantic search, Phase 1c
 # onward. Holds 768-dim embeddings — one per published dataset —
 # produced from `@cf/baai/bge-base-en-v1.5` against the canonical

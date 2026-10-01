@@ -47,6 +47,8 @@ async function main(): Promise<void> {
     // panel, not the way to it.
     await page.locator('#anchor-btn[data-wired="true"]').waitFor({ state: 'attached' })
     await page.evaluate(() => document.getElementById('anchor-btn')?.click())
+    const qr = page.locator(".anchor-panel-qr svg path")
+    await qr.waitFor({ state: "attached" })
     const marker = page.locator('.anchor-panel-marker')
     await marker.waitFor({ state: 'visible' })
     await page.waitForFunction(() => {
@@ -58,7 +60,7 @@ async function main(): Promise<void> {
     const found = detectMarker(cameraPixelsToGray(new Uint8Array(png.data), png.width, png.height, false))
     // The square should take the whole short side, less the header in portrait-ish layouts.
     const short = Math.min(device.width, device.height)
-    const fills = box.width >= short - 60 && Math.abs(box.width - box.height) < 1
+    const fills = box.width >= short - 230 && Math.abs(box.width - box.height) < 1
     const inside = box.x >= -0.5 && box.y >= -0.5 && box.x + box.width <= device.width + 0.5 && box.y + box.height <= device.height + 0.5
     const ok = found !== null && fills && inside
     if (!ok) failures++

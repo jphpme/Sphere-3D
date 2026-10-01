@@ -1,8 +1,9 @@
 # Shared AR Plan
 
-**Status: draft for review.** Phase 1 (the marker) is built and tested in
-code and in a headless browser; it has **not** run on a phone yet. Phases
-2 to 4 are design only.
+**Status: draft for review.** Phase 1 (the marker) is built
+and works on phones. Phases 2 and 3 (the room, and what it shares) are
+built and tested between two browsers, not yet between two phones in AR.
+Phase 4 is design only.
 
 Last reviewed: 2026-10-01
 
@@ -163,29 +164,48 @@ What is **not** verified, and needs a phone:
 6. Repeat on a second phone. Both should show the sphere in the same
    spot, with the same continent facing the marker's bottom edge.
 
-### Phase 2: the room
+### Phase 2 and 3: the room and what it shares (built)
 
-A Durable Object per room relays WebSocket messages. Pages Functions
-cannot host a Durable Object class, so it lives in a small companion
-Worker bound into `wrangler.toml`.
+A page opened with `?room=CODE` is in a shared session. The anchor
+screen shows a QR code for that address beside the marker, so the way in
+is: scan the small code with the phone's camera, enter AR, scan the large
+one.
 
-- **Join:** the host's screen shows a QR code for `?room=<code>`. Opening
-  it lands in a lobby listing who is there.
-- **Start:** the host starts the session. Each participant then taps
-  **Join AR** themselves, because a browser will not open an immersive
-  session without a tap on that device.
-- **Control:** the room holds the controller's id and relays state only
-  from them. The host can reassign it.
+| Piece | Where |
+|---|---|
+| The room: who leads, relaying the lead's state | `workers/rooms` (Durable Object `Room`, Worker `ayni-rooms`) |
+| The door to it | `functions/api/room/[code].ts`, binding `ROOMS` |
+| Messages and their validation | `src/services/roomProtocol.ts` |
+| The socket, reconnecting | `src/services/roomClient.ts` |
+| Leading and following | `src/services/roomSync.ts` |
+| The sphere's pose in the marker's frame | `vrSession.ts` (`getRoomGlobe`, `setFollowedRoomGlobe`) |
+| "You lead" / "following" | `src/ui/roomChip.ts` |
+| The join QR | `src/ui/anchorPanel.ts` |
 
-### Phase 3: shared state
+- **Who leads:** the device that has been in the room longest. When it
+  leaves, the next longest takes over. The anchor's own screen does not
+  join. Handing the lead to a chosen person is not built.
+- **What travels:** the dataset's id, the playhead (paused, time,
+  duration, rate) and, in AR, the sphere's orientation and scale. The
+  orientation is given in the marker's frame when the lead scanned the
+  marker, so a follower who scanned the same marker sees the same side of
+  the sphere from where they stand. Each device loads and decodes the
+  dataset itself; a room costs a few hundred bytes a second.
+- **Followers are not locked.** Whatever a follower changes is put back
+  by the lead's next message, at most a second later.
+- **Not shared yet:** the layer stack and palette, tours, the Orbit chat,
+  and the 2D globe's camera.
+- **A Quest can join** a room as lead or follower for the dataset and
+  playhead; without a marker scan its sphere is its own.
 
-The multi-monitor feature already has a one-controller, many-followers
-state protocol (`src/services/multiOutput/`): ordered diffs, full
-snapshots for late joiners, a heartbeat, and playback carried as date,
-ratio and rate. On the web build the publish side already runs, into an
-empty listener set. Phase 3 puts the room's socket where Tauri's IPC is,
-and adds what AR needs that a wall of monitors does not: the sphere's
-orientation, scale and position **in the marker's frame**.
+The room Worker is deployed by hand, before any site deploy that binds
+it: `npx wrangler deploy --config workers/rooms/wrangler.toml`.
+
+Verified with `scripts/experiments/room-sync-check.ts`: two browser
+pages against a local room — roles, the follower loading the lead's
+dataset, playing in step, pause and seek followed, and succession when
+the lead leaves. The sphere's orientation between two phones needs
+phones.
 
 ### Phase 4: headsets and fallbacks
 

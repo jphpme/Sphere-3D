@@ -45,6 +45,7 @@ import { createVrRotateTouch, type VrRotateTouchHandle } from '../ui/vrRotateTou
 import { tiltGlobe } from './vrGlobeTilt'
 import { createVrMarkerAlign, isMarkerAlignRequested } from './vrMarkerAlign'
 import type { MarkerFrame } from './sharedMarkerPose'
+import type { RoomGlobe } from './roomProtocol'
 import { createVrMarkerAlignTouch, type VrMarkerAlignTouchHandle } from '../ui/vrMarkerAlignTouch'
 import { createVrDebugPanel, type VrDebugPanelHandle } from './vrDebugPanel'
 import { GLOBE_RADIUS, MAX_GLOBE_SCALE, MIN_GLOBE_SCALE } from './vrScene'
@@ -439,6 +440,36 @@ const LOADING_READY_PAUSE_S = 0.25
 /** AYNI: clear air between a marker and the underside of the sphere above it, metres. */
 const MARKER_GLOBE_GAP_M = 0.12
 
+/**
+ * AYNI: the shared marker's frame in this session, once a scan has placed
+ * the sphere from it; null before a scan, and again after a placement by
+ * hand. It is what lets the sphere's orientation be said in terms every
+ * device in a room shares (see getRoomGlobe / setFollowedRoomGlobe).
+ */
+let markerFrame: { orientation: THREE.Quaternion; baseY: number } | null = null
+/** AYNI: the lead's sphere, while this device follows one in a shared session. */
+let followedGlobe: RoomGlobe | null = null
+
+/**
+ * AYNI: this session's sphere as a shared session describes it — its
+ * orientation in the marker's frame when it was placed from the marker,
+ * else in this session's own space — or null outside a session.
+ */
+export function getRoomGlobe(): RoomGlobe | null {
+  if (!active) return null
+  const q = active.scene.globe.quaternion.clone()
+  if (markerFrame) q.premultiply(markerFrame.orientation.clone().invert())
+  return { q: [q.x, q.y, q.z, q.w], scale: active.scene.globe.scale.x, aligned: markerFrame !== null }
+}
+
+/**
+ * AYNI: make the sphere follow the lead's (applied each frame in the
+ * render loop), or hand it back to this device's own controls with null.
+ */
+export function setFollowedRoomGlobe(globe: RoomGlobe | null): void {
+  followedGlobe = globe
+}
+
 /** True while a VR session is live. */
 export function isVrActive(): boolean {
   return active !== null
@@ -595,6 +626,7 @@ export type VrMode = 'vr' | 'ar'
 export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promise<void> {
   appliedMapLayers = undefined
   debugFrameCount = 0
+  markerFrame = null
   if (active) {
     logger.warn(`[VR] enterImmersive(${mode}) called while a session is already active`)
     return
@@ -718,6 +750,7 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     // because the browser puts a camera prompt in front of the session
     // for it; headset browsers do not offer it at all.
     if (isMarkerAlignRequested() && isHandheldArUserAgent(navigator.userAgent)) {
+      // (A page in a shared session always asks: see isMarkerAlignRequested.)
       optionalFeatures.push('camera-access')
     }
   }
@@ -1325,6 +1358,8 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     // tracking takes over.
     scene.globe.position.copy(target)
     setPlacing(false)
+    // AYNI: placed by hand, so no longer in the marker's frame.
+    markerFrame = null
 
     // Create a system-tracked anchor from the raw hit-test
     // result. The anchor stays bolted to the real surface even
@@ -1406,6 +1441,12 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     scene.globe.quaternion
       .set(found.orientation.x, found.orientation.y, found.orientation.z, found.orientation.w)
       .multiply(new THREE_.Quaternion().setFromAxisAngle(new THREE_.Vector3(0, 1, 0), -Math.PI / 2))
+    markerFrame = {
+      orientation: new THREE_.Quaternion(
+        found.orientation.x, found.orientation.y, found.orientation.z, found.orientation.w,
+      ),
+      baseY: found.position.y,
+    }
     // The previous anchor would pull the sphere back on the next frame.
     if (currentAnchor) {
       try { currentAnchor.delete() } catch { /* already gone */ }
@@ -1727,6 +1768,8 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
   const tourControlsOffset = new THREE_.Vector3(0, -0.95, 0.15)
   /** Scratch reused per-frame for position math; avoids GC churn. */
   const scratchPos = new THREE_.Vector3()
+  /** AYNI: scratch for the followed sphere's target orientation. */
+  const followTarget = new THREE_.Quaternion()
   /** Scratch vector reused every frame by the billboard-lookAt block below. */
   const scratchCamPos = new THREE_.Vector3()
   /** Headset forward direction, reused by the VR gaze + height placement path. */
@@ -1855,6 +1898,12 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     // (placementHeightOffset), NOT a fixed lift — applying it here
     // is what makes the height step actually stick in AR. Writing
     // directly into globe.position avoids per-frame allocation.
+    // AYNI: a sphere placed from the marker rests a fixed gap above it
+    // at any size, so growing it never sinks it into the table.
+    if (markerFrame) {
+      placementHeightOffset = GLOBE_RADIUS * active.scene.globe.scale.x + MARKER_GLOBE_GAP_M
+      if (!currentAnchor) active.scene.globe.position.y = markerFrame.baseY + placementHeightOffset
+    }
     if (currentAnchor && frame && active.refSpace) {
       const anchorPose = frame.getPose(currentAnchor.anchorSpace, active.refSpace)
       if (anchorPose) {
@@ -1992,6 +2041,21 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
         pendingFlyTo = null
         done.resolve()
       }
+    }
+
+    // AYNI: following a shared session's lead. After this device's own
+    // inputs, so the lead's pose wins, and eased so ten messages a second
+    // read as motion. An orientation given in the marker's frame is
+    // brought into this session through this device's own scan of the
+    // same marker; without one, it is applied as it stands.
+    if (followedGlobe) {
+      const g = followedGlobe
+      followTarget.set(g.q[0], g.q[1], g.q[2], g.q[3])
+      if (g.aligned && markerFrame) followTarget.premultiply(markerFrame.orientation)
+      active.scene.globe.quaternion.slerp(followTarget, 0.3)
+      const scale = active.scene.globe.scale.x
+      const nextScale = scale + (Math.max(MIN_GLOBE_SCALE, Math.min(MAX_GLOBE_SCALE, g.scale)) - scale) * 0.3
+      active.scene.globe.scale.setScalar(nextScale)
     }
 
     // Scene-level per-frame sync (e.g. ground shadow scale matching
@@ -2199,6 +2263,7 @@ export async function enterImmersive(mode: VrMode, ctx: VrSessionContext): Promi
     a.interaction.dispose()
     a.disposeZoomOverlay()
     markerAlign?.dispose()
+    markerFrame = null
     if (debugPanel) {
       a.scene.scene.remove(debugPanel.mesh)
       debugPanel.dispose()

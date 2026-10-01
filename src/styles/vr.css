@@ -356,16 +356,96 @@ body.tour-authoring-open #anchor-btn {
     outline-offset: 2px;
 }
 
-/* The largest square the screen leaves under the header. The picture
-   carries its own white margin, so it may touch the edges. */
+/* The marker and, beside it, the QR code that joins the session: under
+   each other on an upright screen, side by side on a wide one. */
+.anchor-panel-body {
+    --anchor-join: calc(10.5rem * var(--ui-scale));
+    flex: 1;
+    min-height: 0;
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: space-evenly;
+}
+
+/* The largest square the screen leaves beside the header and the QR
+   block. The picture carries its own white margin, so it may touch the
+   edges. */
 .anchor-panel-marker {
     flex: none;
-    width: min(100vw, 100vh - var(--anchor-header));
-    width: min(100vw, 100dvh - var(--anchor-header));
+    width: min(100vw, 100vh - var(--anchor-header) - var(--anchor-join));
+    width: min(100vw, 100dvh - var(--anchor-header) - var(--anchor-join));
     aspect-ratio: 1;
-    margin-block: auto;
     user-select: none;
     -webkit-user-select: none;
+}
+
+.anchor-panel-join {
+    flex: none;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: calc(0.3rem * var(--ui-scale));
+}
+
+.anchor-panel-qr {
+    width: calc(8rem * var(--ui-scale));
+    height: calc(8rem * var(--ui-scale));
+}
+
+.anchor-panel-qr svg {
+    display: block;
+    width: 100%;
+    height: 100%;
+}
+
+.anchor-panel-join-caption {
+    margin: 0;
+    font-size: calc(0.8rem * var(--ui-scale));
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-align: center;
+}
+
+@media (orientation: landscape) {
+    .anchor-panel-body {
+        flex-direction: row;
+    }
+    .anchor-panel-marker {
+        width: min(100vh - var(--anchor-header), 100vw - var(--anchor-join));
+        width: min(100dvh - var(--anchor-header), 100vw - var(--anchor-join));
+    }
+}
+
+/* AYNI — the shared-session line (roomChip.ts): under the home and
+   anchor buttons on the page, and in the same corner over the camera
+   picture in AR. */
+.room-chip {
+    position: fixed;
+    top: calc(0.75rem + 72px + 1rem);
+    inset-inline-start: 0.75rem;
+    z-index: 950;
+    max-width: calc(100vw - 1.5rem);
+    padding: calc(0.3rem * var(--ui-scale)) calc(0.7rem * var(--ui-scale));
+    background: var(--glass-bg);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
+    border: 1px solid var(--white-o12);
+    border-radius: calc(14px * var(--ui-scale));
+    color: var(--color-text);
+    font-size: calc(0.72rem * var(--ui-scale));
+    letter-spacing: 0.02em;
+    pointer-events: none;
+}
+
+.room-chip[data-role="lead"] {
+    border-color: var(--color-accent);
+    color: var(--color-accent);
+}
+
+body.browse-open .room-chip {
+    display: none;
 }
 
 /* AYNI — a passing note (showVrNotice in src/ui/vrButton.ts): a small
