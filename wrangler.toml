@@ -144,12 +144,21 @@ id = "fc9ecc345f8a4f078469ceba7d9c78fe"
 #     in `.dev.vars` (or `MOCK_R2=true` for the contributor
 #     walkthrough, which skips signing).
 #
-# Declared here, so the deployment binds this bucket. The bucket name
-# override knob is `CATALOG_R2_BUCKET` in `.dev.vars` (default
-# `terraviz-assets`, matching `bucket_name` below).
-[[r2_buckets]]
-binding = "CATALOG_R2"
-bucket_name = "terraviz-assets"
+# The bucket name override knob is `CATALOG_R2_BUCKET` in `.dev.vars`
+# (default `terraviz-assets`).
+#
+# AYNI: not bound. The owner removed the `terraviz-assets` bucket from the
+# account (2026-10-01), and a binding to a bucket that does not exist
+# fails the whole deploy ("R2 bucket 'terraviz-assets' not found"), not
+# just the routes that use it. Commented out means absent from the
+# deployment: `CATALOG_R2` is optional in the Functions' Env, and every
+# route that needs it (publisher uploads, frame manifests, tour media,
+# event images, the node logo) answers 503 `binding_missing` instead.
+# The public site reads none of them. To bring the publisher's asset
+# pipeline back, create a bucket and restore the block below.
+# [[r2_buckets]]
+# binding = "CATALOG_R2"
+# bucket_name = "terraviz-assets"
 
 # AYNI — the signed AYNI catalog (Pachamama Studios), read-only here: the
 # basemaps and overlays the globe stacks around a dataset are its
