@@ -99,13 +99,20 @@ describe('messages', () => {
 
   it('reads the room’s three messages', () => {
     expect(parseServerMessage(JSON.stringify({ t: 'welcome', you: 'a', lead: 'b', count: 2, state }))).toEqual({
-      t: 'welcome', you: 'a', lead: 'b', count: 2, state,
+      t: 'welcome', you: 'a', lead: 'b', count: 2, state, meeting: false, seat: null,
     })
     expect(parseServerMessage(JSON.stringify({ t: 'welcome', you: 'a', lead: 'a', count: 1, state: null }))).toEqual({
-      t: 'welcome', you: 'a', lead: 'a', count: 1, state: null,
+      t: 'welcome', you: 'a', lead: 'a', count: 1, state: null, meeting: false, seat: null,
     })
     expect(parseServerMessage(JSON.stringify({ t: 'roster', lead: null, count: 0 }))).toEqual({
-      t: 'roster', lead: null, count: 0,
+      t: 'roster', lead: null, count: 0, meeting: false,
+    })
+    // A meeting: every connection has a seat, and one it does not recognise is the audience's.
+    expect(parseServerMessage(JSON.stringify({ t: 'welcome', you: 'a', lead: null, count: 1, state: null, meeting: true, seat: 'moderator' }))).toMatchObject({
+      meeting: true, seat: 'moderator',
+    })
+    expect(parseServerMessage(JSON.stringify({ t: 'welcome', you: 'a', lead: null, count: 1, state: null, meeting: true, seat: 'emperor' }))).toMatchObject({
+      meeting: true, seat: 'audience',
     })
     expect(parseServerMessage(JSON.stringify({ t: 'state', s: state }))).toEqual({ t: 'state', s: state })
   })

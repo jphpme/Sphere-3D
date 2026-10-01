@@ -22,6 +22,7 @@ import {
   normalizeRoomCode,
   parseServerMessage,
   type RoomClientMessage,
+  type RoomSeat,
   type RoomState,
 } from './roomProtocol'
 import { logger } from '../utils/logger'
@@ -33,6 +34,12 @@ export interface RoomStatus {
   role: 'lead' | 'follower' | null
   /** People in the room, this device included. */
   count: number
+  /** Whether the room is a meeting: only a presenter leads. */
+  meeting: boolean
+  /** This device's seat in a meeting; null in an open room or before the room has answered. */
+  seat: RoomSeat | null
+  /** Whether anyone leads right now. False in a meeting whose presenter has not arrived. */
+  hasLead: boolean
 }
 
 export interface RoomClientOptions {
@@ -42,6 +49,8 @@ export interface RoomClientOptions {
   onStatus: (status: RoomStatus) => void
   /** Where the room is; defaults to this site's own route. */
   url?: string
+  /** The signed link's token (`?st=`), which names this device's seat in a meeting. */
+  token?: string | null
   /** Socket constructor, for tests. */
   createSocket?: (url: string) => WebSocket
 }
@@ -72,15 +81,25 @@ export function roomCodeFromSearch(
   return normalizeRoomCode(new URLSearchParams(search).get('room'))
 }
 
-/** The room's WebSocket address for a code. */
+/** The signed-link token in a page address (`?st=`), or null. */
+export function roomTokenFromSearch(
+  search: string = typeof window === 'undefined' ? '' : window.location.search,
+): string | null {
+  const token = new URLSearchParams(search).get('st')?.trim()
+  return token && token.length <= 400 ? token : null
+}
+
+/** The room's WebSocket address for a code, carrying the signed link's token when there is one. */
 export function roomSocketUrl(
   code: string,
   override: string | undefined = import.meta.env.VITE_ROOM_WS_URL as string | undefined,
   location: { protocol: string; host: string } = window.location,
+  token: string | null = null,
 ): string {
   const base = override?.trim()
-  if (base) return `${base.endsWith('/') ? base : `${base}/`}${code}`
-  return `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/api/room/${code}`
+  const query = token ? `?st=${encodeURIComponent(token)}` : ''
+  if (base) return `${base.endsWith('/') ? base : `${base}/`}${code}${query}`
+  return `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/api/room/${code}${query}`
 }
 
 /** First retry after this long, doubling up to the cap. */
@@ -89,19 +108,23 @@ const RETRY_MAX_MS = 15000
 
 export function connectRoom(code: string, opts: RoomClientOptions): RoomClientHandle {
   joinedCode = code
-  const url = opts.url ?? roomSocketUrl(code)
+  const url = opts.url ?? roomSocketUrl(code, undefined, undefined, opts.token ?? null)
   const createSocket = opts.createSocket ?? ((u: string) => new WebSocket(u))
   let socket: WebSocket | null = null
   let closed = false
   let retryMs = RETRY_FIRST_MS
   let retryTimer: ReturnType<typeof setTimeout> | null = null
   let myId: string | null = null
-  const status: RoomStatus = { code, connected: false, role: null, count: 0 }
+  const status: RoomStatus = { code, connected: false, role: null, count: 0, meeting: false, seat: null, hasLead: false }
 
   const publish = (): void => opts.onStatus({ ...status })
-  const setRoster = (lead: string | null, count: number): void => {
+  const setRoster = (lead: string | null, count: number, meeting: boolean): void => {
     status.role = myId === null || lead === null ? null : lead === myId ? 'lead' : 'follower'
     status.count = count
+    status.meeting = meeting
+    status.hasLead = lead !== null
+    // A room that stopped being a meeting has no seats.
+    if (!meeting) status.seat = null
     publish()
   }
 
@@ -126,10 +149,11 @@ export function connectRoom(code: string, opts: RoomClientOptions): RoomClientHa
       if (!msg) return
       if (msg.t === 'welcome') {
         myId = msg.you
-        setRoster(msg.lead, msg.count)
+        status.seat = msg.seat
+        setRoster(msg.lead, msg.count, msg.meeting)
         if (msg.state && status.role === 'follower') opts.onState(msg.state)
       } else if (msg.t === 'roster') {
-        setRoster(msg.lead, msg.count)
+        setRoster(msg.lead, msg.count, msg.meeting)
       } else if (status.role !== 'lead') {
         opts.onState(msg.s)
       }
@@ -140,6 +164,7 @@ export function connectRoom(code: string, opts: RoomClientOptions): RoomClientHa
       myId = null
       status.connected = false
       status.role = null
+      status.hasLead = false
       publish()
       scheduleRetry()
     }

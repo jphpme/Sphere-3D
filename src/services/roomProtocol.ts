@@ -6,9 +6,11 @@
  * what one device tells the others so that everyone sees the same sphere
  * doing the same thing.
  *
- * One device leads and the rest follow. The lead is the participant who
- * has been in the room longest; when it leaves, the next longest takes
- * over. Only the lead's state is relayed.
+ * One device leads and the rest follow. In an open room the lead is the
+ * participant who has been there longest; when it leaves, the next
+ * longest takes over. In a meeting only a presenter leads, and each
+ * connection has a seat (presenter, moderator, audience) that the site
+ * assigns from a signed link. Only the lead's state is relayed.
  *
  * Imported by the browser (`roomClient`, `roomSync`), by the room's
  * Durable Object (`workers/rooms`) and by the Pages route in front of it,
@@ -73,6 +75,14 @@ export interface RoomGlobe {
   aligned: boolean
 }
 
+/** A connection's seat in a meeting. */
+export type RoomSeat = 'presenter' | 'moderator' | 'audience'
+
+/** A seat as named on the wire, or null. */
+export function parseRoomSeat(raw: unknown): RoomSeat | null {
+  return raw === 'presenter' || raw === 'moderator' || raw === 'audience' ? raw : null
+}
+
 /** Browser → room. */
 export type RoomClientMessage = { t: 'state'; s: RoomState }
 
@@ -88,14 +98,20 @@ export type RoomServerMessage =
       count: number
       /** The lead's latest state, for someone arriving mid-session. */
       state: RoomState | null
+      /** Whether the room is a meeting. */
+      meeting: boolean
+      /** This connection's seat in a meeting; null in an open room. */
+      seat: RoomSeat | null
     }
-  | { t: 'roster'; lead: string | null; count: number }
+  | { t: 'roster'; lead: string | null; count: number; meeting: boolean }
   | { t: 'state'; s: RoomState }
 
 /** Largest message either side accepts, in characters. */
 export const ROOM_MAX_MESSAGE_CHARS = 2048
-/** Most people in one room. */
+/** Most people in one open room. */
 export const ROOM_MAX_PEOPLE = 40
+/** Most people in one meeting. */
+export const MEETING_MAX_PEOPLE = 500
 
 /** Room codes: letters and digits that are hard to misread aloud or on paper. */
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
@@ -206,8 +222,18 @@ export function parseServerMessage(text: unknown): RoomServerMessage | null {
   }
   if (msg.t !== 'welcome' && msg.t !== 'roster') return null
   if (!idOrNull(msg.lead) || !finite(msg.count) || msg.count < 0) return null
-  if (msg.t === 'roster') return { t: 'roster', lead: msg.lead, count: msg.count }
+  // Absent on a room from before meetings existed: an open room.
+  const meeting = msg.meeting === true
+  if (msg.t === 'roster') return { t: 'roster', lead: msg.lead, count: msg.count, meeting }
   if (typeof msg.you !== 'string' || msg.you.length === 0 || msg.you.length > 64) return null
   const state = msg.state === null || msg.state === undefined ? null : parseRoomState(msg.state)
-  return { t: 'welcome', you: msg.you, lead: msg.lead, count: msg.count, state }
+  return {
+    t: 'welcome',
+    you: msg.you,
+    lead: msg.lead,
+    count: msg.count,
+    state,
+    meeting,
+    seat: meeting ? (parseRoomSeat(msg.seat) ?? 'audience') : null,
+  }
 }

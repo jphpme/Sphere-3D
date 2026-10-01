@@ -18,7 +18,14 @@ import type { RoomStatus } from '../services/roomClient'
 /** The chip's wording for a status. */
 export function roomChipText(status: RoomStatus): string {
   const params = { code: status.code, count: status.count }
-  if (!status.connected || status.role === null) return t('room.chip.connecting', params)
+  if (!status.connected) return t('room.chip.connecting', params)
+  if (status.meeting) {
+    // A meeting with nobody presenting is a lobby: say so, to every seat.
+    if (!status.hasLead) return t('meeting.chip.waiting', params)
+    if (status.role === 'lead') return t('meeting.chip.presenter', params)
+    return t(status.seat === 'moderator' ? 'meeting.chip.moderator' : 'meeting.chip.audience', params)
+  }
+  if (status.role === null) return t('room.chip.connecting', params)
   return t(status.role === 'lead' ? 'room.chip.lead' : 'room.chip.follower', params)
 }
 

@@ -10,6 +10,9 @@ const status = (over: Partial<RoomStatus> = {}): RoomStatus => ({
   connected: true,
   role: 'lead',
   count: 3,
+  meeting: false,
+  seat: null,
+  hasLead: true,
   ...over,
 })
 
@@ -22,6 +25,20 @@ describe('roomChipText', () => {
   it('says connecting until the room has answered', () => {
     expect(roomChipText(status({ connected: false, role: null }))).toBe('Shared session AB12CD · connecting…')
     expect(roomChipText(status({ role: null }))).toBe('Shared session AB12CD · connecting…')
+  })
+})
+
+describe('roomChipText, in a meeting', () => {
+  const meeting = (over: Partial<RoomStatus> = {}): RoomStatus => status({ meeting: true, seat: 'audience', role: 'follower', ...over })
+
+  it('names each seat', () => {
+    expect(roomChipText(meeting({ role: 'lead', seat: 'presenter' }))).toBe('Meeting AB12CD · you present · 3 here')
+    expect(roomChipText(meeting())).toBe('Meeting AB12CD · watching · 3 here')
+    expect(roomChipText(meeting({ seat: 'moderator' }))).toBe('Meeting AB12CD · moderating · 3 here')
+  })
+
+  it('is a lobby until a presenter arrives', () => {
+    expect(roomChipText(meeting({ role: null, hasLead: false }))).toBe('Meeting AB12CD · waiting for the presenter · 3 here')
   })
 })
 

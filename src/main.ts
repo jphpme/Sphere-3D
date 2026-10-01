@@ -134,6 +134,9 @@ import { roomCodeFromSearch } from './services/roomClient'
 import { startRoomSync } from './services/roomSync'
 import type { RoomLayers } from './services/roomProtocol'
 import { mountRoomChip } from './ui/roomChip'
+import { hasMeetingKey, takeMeetingKeyParam } from './services/meetingHost'
+import { openMeetingPanel } from './ui/meetingPanel'
+import { roomTokenFromSearch } from './services/roomClient'
 import type { VrDatasetTexture } from './services/vrScene'
 import { buildReleaseLut, releaseCropRect, resolveDashRelease } from './services/dashRelease'
 import { fetchGeoMediaMarkers, pickGeoMediaMarker, type GeoMediaMarker } from './services/geoMedia'
@@ -611,11 +614,17 @@ class InteractiveSphere {
       // the same reason `startMultiOutput` runs first, and why the
       // desktop host defers its Tauri import rather than being awaited.
       this.initWindowChrome()
+      // AYNI: a host key in the address (?meetingKey=) is stored and taken
+      // out of the address bar before the menu decides what to offer.
+      const withoutMeetingKey = takeMeetingKeyParam(window.location.href)
+      if (withoutMeetingKey) window.history.replaceState(window.history.state, '', withoutMeetingKey)
       initToolsMenu(this.viewports, {
         onSetLayout: (layout) => this.viewports.setLayout(layout),
         onOpenBrowse: () => this.openBrowsePanel(),
         onOpenOrbitSettings: () => openChatSettings(),
         onOpenCredits: (trigger) => openCreditsPanel(this.viewports, trigger),
+        // AYNI: only on a browser that holds a host key (meetingHost.ts).
+        onOpenMeeting: hasMeetingKey() ? (trigger) => openMeetingPanel(trigger) : undefined,
         // Desktop-only: on web `startMultiOutput` hands back the shared
         // inert handle, this is `undefined`, and the menu renders no
         // Outputs section at all.
@@ -1291,6 +1300,31 @@ class InteractiveSphere {
     const scale = dataset.renderEncoding === RENDER_ENCODING_DATA_LUMA ? dataset.colorScale : undefined
     if (scale) return measureCoverage(source, { kind: 'palette', lut: buildColorScaleLut(scale) })
     return measureCoverage(source, { kind: 'alpha' })
+  }
+
+  /** AYNI: the globe's input handlers that were on when a meeting took the globe, to put back. */
+  private lockedHandlers: { enable(): unknown; disable(): unknown }[] | null = null
+
+  /**
+   * AYNI: take the browser globe out of this device's hands, or give it
+   * back (roomSync, for the audience of a meeting). Only the handlers
+   * that were on are turned off, and only those are turned back on.
+   */
+  private setGlobeLocked(locked: boolean): void {
+    if (locked === (this.lockedHandlers !== null)) return
+    if (!locked) {
+      for (const handler of this.lockedHandlers ?? []) handler.enable()
+      this.lockedHandlers = null
+      return
+    }
+    const map = this.viewports.getPrimary()?.getMap()
+    if (!map) return
+    const handlers = [
+      map.dragPan, map.scrollZoom, map.touchZoomRotate, map.dragRotate,
+      map.doubleClickZoom, map.keyboard, map.touchPitch, map.boxZoom,
+    ]
+    this.lockedHandlers = handlers.filter((handler) => handler.isEnabled())
+    for (const handler of this.lockedHandlers) handler.disable()
   }
 
   /** AYNI: the layer stack a shared session's lead last asked for, and when. */
@@ -4640,7 +4674,8 @@ class InteractiveSphere {
           rt: this.rtOverlay?.id ?? null,
         }),
         setLayers: (layers) => this.applyRoomLayers(layers),
-      })
+        setLocked: (locked) => this.setGlobeLocked(locked),
+      }, { token: roomTokenFromSearch() })
       mountRoomChip(document.getElementById('xr-dom-overlay') ?? document.body, room.onStatus)
     }
 

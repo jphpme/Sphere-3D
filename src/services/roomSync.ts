@@ -53,6 +53,12 @@ export interface RoomSyncHost {
   getLayers(): RoomLayers | null
   /** Put that layer stack on; a no-op when it already is. */
   setLayers(layers: RoomLayers): void
+  /**
+   * Take the browser globe out of this device's hands, or give it back.
+   * Locked for the audience of a meeting while a presenter is leading:
+   * there the globe is the presenter's to move.
+   */
+  setLocked(locked: boolean): void
 }
 
 /** How often the lead looks at its own state, ms. */
@@ -171,6 +177,8 @@ export interface RoomSyncOptions {
   nowMs?: () => number
   /** Build the connection, for tests. */
   connect?: typeof connectRoom
+  /** The signed link's token, when the page was opened from one. */
+  token?: string | null
 }
 
 let current: RoomSyncHandle | null = null
@@ -185,7 +193,7 @@ export function startRoomSync(code: string, host: RoomSyncHost, opts: RoomSyncOp
   current?.stop()
   const nowMs = opts.nowMs ?? (() => performance.now())
   const listeners = new Set<(status: RoomStatus) => void>()
-  let status: RoomStatus = { code, connected: false, role: null, count: 0 }
+  let status: RoomStatus = { code, connected: false, role: null, count: 0, meeting: false, seat: null, hasLead: false }
 
   // --- follower side ---
   let followed: { state: RoomState; at: number } | null = null
@@ -255,6 +263,7 @@ export function startRoomSync(code: string, host: RoomSyncHost, opts: RoomSyncOp
   }
 
   const client: RoomClientHandle = (opts.connect ?? connectRoom)(code, {
+    token: opts.token ?? null,
     onState: (state) => {
       followed = { state, at: nowMs() }
       host.setFollowedGlobe(state.globe)
@@ -275,6 +284,7 @@ export function startRoomSync(code: string, host: RoomSyncHost, opts: RoomSyncOp
       }
       // A device that has just become the lead says where things stand at once.
       if (next.role === 'lead' && was !== 'lead') sent = null
+      host.setLocked(next.meeting && next.role === 'follower')
       for (const listener of listeners) listener({ ...status })
     },
   })
@@ -295,6 +305,7 @@ export function startRoomSync(code: string, host: RoomSyncHost, opts: RoomSyncOp
       clearInterval(followTimer)
       client.close()
       host.setFollowedGlobe(null)
+      host.setLocked(false)
       listeners.clear()
       if (current === handle) current = null
     },

@@ -206,6 +206,13 @@ export interface ToolsMenuCallbacks {
    * there is no second place for the two to disagree.
    */
   onOpenOutputs?: (trigger: HTMLElement) => void
+  /**
+   * AYNI: user clicked Start a meeting. Absent renders no entry: hosting
+   * is for a browser that holds a host key (`meetingHost.ts`), and
+   * `main.ts` supplies this only then — the callback's presence is the
+   * gate, as with Credits and Outputs.
+   */
+  onOpenMeeting?: (trigger: HTMLElement) => void
   /** Announce something for screen readers. */
   announce?: (message: string) => void
   /** Get the currently loaded dataset (used by the Share action).
@@ -238,7 +245,7 @@ export function initToolsMenu(
   // its Orbit character, so the link is never offered here.
   const gateMeetOrbit = true
 
-  const { onSetLayout, onOpenBrowse, onOpenOrbitSettings, onToggleDatasetInfo, onToggleLegend, onOpenCredits, onOpenOutputs, announce } = callbacks
+  const { onSetLayout, onOpenBrowse, onOpenOrbitSettings, onToggleDatasetInfo, onToggleLegend, onOpenCredits, onOpenOutputs, onOpenMeeting, announce } = callbacks
   const currentLayout = viewports.getLayout()
   // A phone cannot hold four video decoders — the third crashes the tab
   // while still loading (terraviz#230) — so the option is turned off
@@ -388,6 +395,14 @@ export function initToolsMenu(
           <span class="tools-menu-item-label">${tHtml('tools.actions.playlists')}</span>
         </button>
       </section>
+      ${onOpenMeeting ? `
+      <section class="tools-menu-section" aria-label="${tAttr('tools.section.meeting.aria')}">
+        <h4 class="tools-menu-section-title">${tHtml('tools.section.meeting')}</h4>
+        <button type="button" class="tools-menu-item" id="tools-menu-meeting">
+          <span class="tools-menu-item-check" aria-hidden="true"></span>
+          <span class="tools-menu-item-label">${tHtml('tools.actions.meeting')}</span>
+        </button>
+      </section>` : ''}
       ${onOpenOutputs ? `
       <section class="tools-menu-section" aria-label="${tAttr('tools.section.outputs.aria')}">
         <h4 class="tools-menu-section-title">${tHtml('tools.section.outputs')}</h4>
@@ -701,6 +716,16 @@ export function initToolsMenu(
       // above, so it can't reliably receive focus on close.
       onOpenCredits(toggleBtn)
       announce?.(t('tools.announce.creditsOpened'))
+    })
+  }
+
+  if (onOpenMeeting) {
+    const meetingBtn = document.getElementById('tools-menu-meeting') as HTMLButtonElement | null
+    meetingBtn?.addEventListener('click', () => {
+      closePopover()
+      // The toggle button, not the menu item: see Credits above.
+      onOpenMeeting(toggleBtn)
+      announce?.(t('tools.announce.meetingOpened'))
     })
   }
 

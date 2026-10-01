@@ -212,6 +212,61 @@ a drag, a layer switched on the lead appearing on the follower, and
 succession when the lead leaves. The sphere's orientation between two phones needs
 phones.
 
+### Meetings
+
+A meeting is a room only its presenter drives, open to anyone to watch:
+the web counterpart of the desktop apps' Meeting mode, without their
+weak point. There the sphere reaches guests as video, which needs a
+public stream host; here each viewer draws their own sphere from the
+presenter's state, so a meeting adds only people and their voices.
+
+**Step 1: seats and signed links (built).**
+
+| Piece | Where |
+|---|---|
+| Who may host; signing and checking links | `functions/api/meeting/_meeting-lib.ts` |
+| Starting a meeting | `POST /api/meeting` (`functions/api/meeting/index.ts`) |
+| Seating each connection | `functions/api/room/[code].ts` |
+| Meeting rules in the room | `workers/rooms` |
+| The host key and the create call | `src/services/meetingHost.ts` |
+| The three links | `src/ui/meetingPanel.ts` (Tools → Start a meeting) |
+
+- **Hosting** is for the holder of the host key (`MEETING_API_KEY`, a
+  Pages secret). A browser becomes a host by being opened once with
+  `?meetingKey=<key>`. `mayHostMeeting` is the one function to change
+  when hosting is sold: it then asks about an account and its plan.
+- **Seats:** presenter, moderator, audience. The presenter's and
+  moderator's links carry a signed token (`?st=`), valid for that room
+  and for eight hours; the audience's link is the plain room link. The
+  scheme and the secret names are the desktop meeting server's, so the
+  products can share one set of secrets.
+- **The room** is told it is a meeting by the site, never by a
+  connection. In a meeting only a presenter leads. With no presenter
+  connected nobody does: the room is a lobby ("waiting for the
+  presenter"), and the audience arriving first does not make it the lead.
+  When the presenter leaves, the room waits again. Up to 500 people.
+- **The audience's globe is locked** while a presenter leads; in AR they
+  still walk around their own sphere.
+- The moderator's seat exists and does nothing yet.
+
+Verified with `scripts/experiments/meeting-check.ts`, locally and on
+the deployed site: the lobby, the three seats, a forged presenter link
+turned away, the audience unable to move the globe while the presenter
+moves it for them, and no succession when the presenter leaves.
+
+**Still to build**, in order:
+
+2. The presenter's voice and picture, through the same Cloudflare
+   Realtime (SFU) app the desktop meeting server uses, with the audience
+   receiving only. Needs `CALLS_APP_ID` and `CALLS_APP_SECRET` on this
+   project. A "Join" tap, which browsers require before audio, is the
+   lobby's door.
+3. Chat: audience messages to the moderator, approved ones onward; then
+   the moderator's microphone.
+4. In a headset, the presenter's picture as a panel in the scene. For a
+   remote audience with no shared marker, "the same side of the sphere"
+   as the side facing each viewer.
+
 ### Phase 4: headsets and fallbacks
 
 - **Headsets:** two taps with the controller on two marked corners of the

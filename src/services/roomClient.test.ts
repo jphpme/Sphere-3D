@@ -2,7 +2,14 @@
 // Copyright 2026 The Zyra Project
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { connectRoom, joinedRoomCode, roomCodeFromSearch, roomSocketUrl, type RoomStatus } from './roomClient'
+import {
+  connectRoom,
+  joinedRoomCode,
+  roomCodeFromSearch,
+  roomSocketUrl,
+  roomTokenFromSearch,
+  type RoomStatus,
+} from './roomClient'
 import type { RoomState } from './roomProtocol'
 
 /** A socket the test drives from the room's side. */
@@ -78,7 +85,7 @@ describe('connectRoom', () => {
     expect(joinedRoomCode()).toBe('AB12CD')
     sockets[0].open()
     sockets[0].receive({ t: 'welcome', you: 'me', lead: 'me', count: 1, state: null })
-    expect(room.status()).toEqual({ code: 'AB12CD', connected: true, role: 'lead', count: 1 })
+    expect(room.status()).toEqual({ code: 'AB12CD', connected: true, role: 'lead', count: 1, meeting: false, seat: null, hasLead: true })
     sockets[0].receive({ t: 'roster', lead: 'other', count: 2 })
     expect(room.status().role).toBe('follower')
     room.close()
@@ -123,6 +130,24 @@ describe('connectRoom', () => {
     vi.advanceTimersByTime(1)
     expect(sockets).toHaveLength(3)
     room.close()
+  })
+
+  it('takes its seat in a meeting from the room, and knows a lobby when it is in one', () => {
+    const room = connect()
+    sockets[0].open()
+    sockets[0].receive({ t: 'welcome', you: 'me', lead: null, count: 1, state: null, meeting: true, seat: 'audience' })
+    expect(room.status()).toMatchObject({ meeting: true, seat: 'audience', role: null, hasLead: false })
+    sockets[0].receive({ t: 'roster', lead: 'presenter-id', count: 2, meeting: true })
+    expect(room.status()).toMatchObject({ role: 'follower', hasLead: true })
+    room.close()
+  })
+
+  it('carries a signed link\u2019s token to the room', () => {
+    expect(roomSocketUrl('AB12CD', undefined, { protocol: 'https:', host: 'vr.example' }, 'AB12CD.presenter.9.sig')).toBe(
+      'wss://vr.example/api/room/AB12CD?st=AB12CD.presenter.9.sig',
+    )
+    expect(roomTokenFromSearch('?room=AB12CD&st=tok')).toBe('tok')
+    expect(roomTokenFromSearch('?room=AB12CD')).toBeNull()
   })
 
   it('stays closed once closed', () => {

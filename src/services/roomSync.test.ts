@@ -128,9 +128,18 @@ describe('startRoomSync', () => {
     view: RoomView | null
     views: RoomView[]
     layers: RoomLayers[]
+    locked: boolean
   }
 
-  const status = (role: RoomStatus['role'], count = 2): RoomStatus => ({ code: 'ROOM42', connected: true, role, count })
+  const status = (role: RoomStatus['role'], count = 2, meeting = false): RoomStatus => ({
+    code: 'ROOM42',
+    connected: true,
+    role,
+    count,
+    meeting,
+    seat: meeting ? (role === 'lead' ? 'presenter' : 'audience') : null,
+    hasLead: role !== null,
+  })
 
   beforeEach(() => {
     vi.useFakeTimers()
@@ -156,6 +165,8 @@ describe('startRoomSync', () => {
       setView: (v) => { host.views.push(v); host.view = v },
       getLayers: () => null,
       setLayers: (l) => { host.layers.push(l) },
+      locked: false,
+      setLocked: (locked) => { host.locked = locked },
     }
   })
 
@@ -247,6 +258,20 @@ it('as a follower, moves its camera when the lead\u2019s moves, and not when it 
     host.datasetId = 'DS_2'
     vi.advanceTimersByTime(250)
     expect(host.layers.at(-1)).toEqual(layers)
+    sync.stop()
+  })
+
+it('locks the globe for a meeting\u2019s audience, and for nobody else', () => {
+    const sync = start()
+    client.onStatus(status('follower')) // an open room: followers keep their hands on the globe
+    expect(host.locked).toBe(false)
+    client.onStatus(status('follower', 2, true))
+    expect(host.locked).toBe(true)
+    client.onStatus(status('lead', 2, true)) // the presenter
+    expect(host.locked).toBe(false)
+    client.onStatus(status('follower', 2, true))
+    client.onStatus(status(null, 1, true)) // the presenter left: the room waits, unlocked
+    expect(host.locked).toBe(false)
     sync.stop()
   })
 
