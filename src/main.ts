@@ -48,7 +48,7 @@ import {
   skipNext as skipNextPlaylistEntry,
 } from './services/playlistPlayback'
 import { updateMapControlsPosition } from './ui/mapControlsUI'
-import { initToolsMenu, syncToolsMenuState, syncToolsMenuLayout, pulseBrowseButton } from './ui/toolsMenuUI'
+import { initToolsMenu, closeToolsMenu, syncToolsMenuState, syncToolsMenuLayout, pulseBrowseButton } from './ui/toolsMenuUI'
 import { initAccountUI } from './ui/accountUI'
 import { closeOutputUI, initOutputUI, openOutputUI } from './ui/outputUI'
 import { openCreditsPanel } from './ui/creditsPanel'
@@ -4647,6 +4647,9 @@ class InteractiveSphere {
             renderer.getMap()?.resize().redraw()
           }
         },
+        // Through the panel's own close button: hide and announce.
+        closeBrowse: () => document.getElementById('browse-close')?.click(),
+        closeTools: closeToolsMenu,
       })
     }
     // AYNI: a page opened with ?room=CODE is in a shared session — the

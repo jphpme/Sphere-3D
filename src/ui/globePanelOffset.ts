@@ -43,6 +43,13 @@ const DESKTOP_MIN_WIDTH = 769
  * buttons belong.
  */
 const MAX_INSET_FRACTION = 0.85
+/**
+ * The least width the two panels together must leave. Under it the info
+ * panel, the transport and the corner buttons cannot stand in what is
+ * left, and at a large UI scale on a small window the popover would be
+ * pushed off the far edge: the panels then take turns instead.
+ */
+const MIN_FREE_WIDTH = 320
 const DURATION_MS = 650
 const EASING = 'cubic-bezier(0.45, 0, 0.15, 1)'
 
@@ -87,6 +94,14 @@ export interface GlobePanelOffsetOptions {
    * browser paints, so the widened grid never shows a stale canvas.
    */
   resizeMaps: () => void
+  /**
+   * Close the browse panel / the Tools popover. Called when both are
+   * open and leave less than `MIN_FREE_WIDTH`: the one opened last
+   * stays and the other is closed through these. Without them both
+   * stay open.
+   */
+  closeBrowse?: () => void
+  closeTools?: () => void
 }
 
 export interface GlobePanelOffsetHandle {
@@ -106,6 +121,10 @@ export function initGlobePanelOffset(options: GlobePanelOffsetOptions): GlobePan
   /** The inset the globe is centred for, or on its way to. */
   let target = 0
   let settleTimer: number | null = null
+  /** Which panel was opened last, and what was open at the last look. */
+  let lastOpened: 'browse' | 'tools' = 'browse'
+  let wasBrowse = false
+  let wasTools = false
 
   const rtl = (): boolean => document.documentElement.dir === 'rtl'
 
@@ -189,6 +208,7 @@ export function initGlobePanelOffset(options: GlobePanelOffsetOptions): GlobePan
       panels.push(rtl() ? { left: 0, right: width } : { left: window.innerWidth - width, right: window.innerWidth })
     }
     const bar = occupiedInset(window.innerWidth, panels, rtl())
+    let toolsBox: PanelBox | null = null
     const popover = document.getElementById('tools-menu-popover')
     if (popover && !popover.classList.contains('hidden')) {
       // Where it rests, not where it is while it slides in — and its
@@ -198,7 +218,28 @@ export function initGlobePanelOffset(options: GlobePanelOffsetOptions): GlobePan
       const controls = document.getElementById('map-controls')
       const barLag = (rtl() ? bar : -bar) - (controls ? pushedX(controls) : 0)
       const offset = barLag - translateX(popover)
-      if (rect.width > 0) panels.push({ left: rect.left + offset, right: rect.right + offset })
+      if (rect.width > 0) {
+        toolsBox = { left: rect.left + offset, right: rect.right + offset }
+        panels.push(toolsBox)
+      }
+    }
+    const browseOpen = panels.length > 0 && panels[0] !== toolsBox
+    const toolsOpen = toolsBox !== null
+    if (browseOpen && !wasBrowse) lastOpened = 'browse'
+    if (toolsOpen && !wasTools) lastOpened = 'tools'
+    wasBrowse = browseOpen
+    wasTools = toolsOpen
+    if (browseOpen && toolsOpen && window.innerWidth >= DESKTOP_MIN_WIDTH) {
+      const taken = Math.max(...panels.map((box) => (rtl() ? box.right : window.innerWidth - box.left)))
+      if (window.innerWidth - taken < MIN_FREE_WIDTH) {
+        // No room for both: the one just opened stays. The class change
+        // that closing makes brings this function round again.
+        const close = lastOpened === 'tools' ? options.closeBrowse : options.closeTools
+        if (close) {
+          close()
+          return
+        }
+      }
     }
     const all = occupiedInset(window.innerWidth, panels, rtl())
     pushButtons(all || bar, bar)

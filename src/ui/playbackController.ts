@@ -609,15 +609,30 @@ export function initPlaybackPositioning(): void {
     const isPortraitMobile = window.innerWidth <= 600
       && window.matchMedia('(orientation: portrait)').matches
     const info = infoPanel.getBoundingClientRect()
-    const infoShown = !infoPanel.classList.contains('hidden') && info.width > 0
     const push = parseFloat(document.documentElement.style.getPropertyValue('--panel-push-bar')) || 0
     const box = controls.getBoundingClientRect()
     const slid = parseFloat(getComputedStyle(controls).translate ?? '') || 0
-    const pushedOnto = push !== 0 && infoShown && box.width > 0
-      && transportMeetsInfoPanel(box, slid, push, info, 8)
-    const next = (infoPanel.classList.contains('expanded') && isPortraitMobile) || pushedOnto
-      ? `${Math.round(info.height) + 12}px`
-      : '0.75rem'
+    // What lives in the other bottom corner: the info panel, and the
+    // chat trigger that rides above it (or sits there alone when the
+    // panel is switched off). The transport goes over whichever of
+    // them the push would land it on.
+    let clearOf = Infinity
+    if (push !== 0 && box.width > 0) {
+      for (const el of [infoPanel, document.getElementById('chat-trigger')]) {
+        if (!el || el.classList.contains('hidden')) continue
+        const there = el.getBoundingClientRect()
+        if (there.width > 0 && transportMeetsInfoPanel(box, slid, push, there, 8)) {
+          clearOf = Math.min(clearOf, there.top)
+        }
+      }
+    }
+    let next = '0.75rem'
+    if (clearOf !== Infinity) {
+      const floor = controls.offsetParent?.getBoundingClientRect().bottom ?? window.innerHeight
+      next = `${Math.round(floor - clearOf) + 8}px`
+    } else if (infoPanel.classList.contains('expanded') && isPortraitMobile) {
+      next = `${Math.round(info.height) + 12}px`
+    }
     if (controls.style.bottom === next) return
     controls.style.bottom = next
     // The Tools bar rests on the transport, wherever that now is.
@@ -630,6 +645,9 @@ export function initPlaybackPositioning(): void {
   const changes = new MutationObserver(update)
   changes.observe(document.documentElement, { attributes: true, attributeFilter: ['style'] })
   changes.observe(infoPanel, { attributes: true, attributeFilter: ['class'] })
+  // The chat trigger is moved by inline style as the info panel grows.
+  const chatTrigger = document.getElementById('chat-trigger')
+  if (chatTrigger) changes.observe(chatTrigger, { attributes: true, attributeFilter: ['class', 'style'] })
   window.addEventListener('resize', update)
 }
 
