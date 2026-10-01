@@ -115,7 +115,9 @@ body.browse-open .tools-menu-browse {
     bottom: calc(100% + calc(0.5rem * var(--ui-scale)));
     inset-inline-end: 0;
     min-width: var(--component-tools-menu-popover-min-width);
-    max-width: calc(100vw - calc(1.5rem * var(--ui-scale)));
+    /* A menu, not a page: whatever a section puts in it, it stays a
+       column beside the globe. */
+    max-width: min(calc(100vw - calc(1.5rem * var(--ui-scale))), calc(340px * var(--ui-scale)));
     /* Cap the popover to the space above the Tools bar so a tall
        menu (many sections, or a large --ui-scale) scrolls inside
        the popover instead of overflowing off the top of the
@@ -320,6 +322,12 @@ body.browse-open .tools-menu-browse {
 .tools-menu-language-select {
     flex: 1;
     min-width: 0;
+    /* A select is as wide as its longest option, and `min-width: 0`
+       only lets it shrink once laid out: it still counts at full width
+       when the popover sizes itself to its content. One long option
+       name makes the whole popover two or three times as wide.
+       From zero, `flex: 1` grows it to the row. */
+    width: 0;
     padding: calc(0.4rem * var(--ui-scale)) calc(1.6rem * var(--ui-scale)) calc(0.4rem * var(--ui-scale)) calc(0.55rem * var(--ui-scale));
     font: inherit;
     font-size: calc(0.78rem * var(--ui-scale));
