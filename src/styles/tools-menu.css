@@ -17,8 +17,17 @@
     padding: 0;
     pointer-events: auto;
     z-index: 10;
+    /* Steps aside for the browse panel, in step with it and the globe
+       (`src/ui/globePanelOffset.ts` sets the distance). */
+    translate: var(--panel-push-bar, 0px) 0;
+    transition: translate 0.65s cubic-bezier(0.45, 0, 0.15, 1);
 }
 #map-controls.hidden { display: none; }
+@media (prefers-reduced-motion: reduce) {
+    #map-controls {
+        transition: none;
+    }
+}
 
 .tools-menu-btn {
     display: inline-flex;
@@ -47,7 +56,9 @@
     border-color: rgba(77, 166, 255, 0.45);
 }
 .tools-menu-btn[aria-expanded="true"],
-.tools-menu-btn[aria-pressed="true"] {
+.tools-menu-btn[aria-pressed="true"],
+/* The Browse button, while its panel is open. */
+body.browse-open .tools-menu-browse {
     background: var(--accent-o18);
     color: var(--color-accent);
     border-color: var(--color-accent);
@@ -127,8 +138,39 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    /* Slides in from the inline-end edge and out to it, in step with
+       the globe moving aside (`src/ui/globePanelOffset.ts`). `display`
+       is in the list so the popover is still there to slide out after
+       `.hidden` lands; `@starting-style` is where it slides in from. */
+    transition:
+        transform 0.65s cubic-bezier(0.45, 0, 0.15, 1),
+        opacity 0.65s cubic-bezier(0.45, 0, 0.15, 1),
+        display 0.65s allow-discrete;
 }
-.tools-menu-popover.hidden { display: none; }
+.tools-menu-popover.hidden {
+    display: none;
+    opacity: 0;
+    transform: translateX(calc(100% + 1.5rem * var(--ui-scale)));
+    /* On its way out it must not take the click meant for the globe. */
+    pointer-events: none;
+}
+:root[dir="rtl"] .tools-menu-popover.hidden {
+    transform: translateX(calc(-100% - 1.5rem * var(--ui-scale)));
+}
+@starting-style {
+    .tools-menu-popover {
+        opacity: 0;
+        transform: translateX(calc(100% + 1.5rem * var(--ui-scale)));
+    }
+    :root[dir="rtl"] .tools-menu-popover {
+        transform: translateX(calc(-100% - 1.5rem * var(--ui-scale)));
+    }
+}
+@media (prefers-reduced-motion: reduce) {
+    .tools-menu-popover {
+        transition: none;
+    }
+}
 
 .tools-menu-popover-header {
     display: flex;

@@ -431,7 +431,11 @@ export function initToolsMenu(
 
   browseBtn.addEventListener('click', (ev) => {
     ev.stopPropagation()
-    closePopover()
+    // On a desktop the two stand side by side — the bar, and the
+    // popover on it, move over for the browse panel — so Browse leaves
+    // the popover as it is. On a narrow window the browse panel covers
+    // everything and an open popover would be left underneath it.
+    if (window.innerWidth <= 768) closePopover()
     onOpenBrowse?.()
   })
 
@@ -459,7 +463,7 @@ export function initToolsMenu(
   const fullscreenBtn = document.getElementById('tools-menu-fullscreen') as HTMLButtonElement | null
   fullscreenBtn?.addEventListener('click', (ev) => {
     ev.stopPropagation()
-    closePopover()
+    // Fullscreen changes the window, not what is open in it.
     void toggleFullscreen()
   })
   // Adopted before the first sync, so the button's initial label
