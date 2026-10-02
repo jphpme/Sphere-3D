@@ -657,6 +657,15 @@ async function fetchGeoMediaDatasets(): Promise<Dataset[]> {
   }
 }
 
+/**
+ * A real-time Sun stream (NASA SDO: photosphere, 171 Å corona, 304 Å
+ * chromosphere): matched on the publisher's org slug or R2 path, not the
+ * row ids, so a new SDO channel is covered too.
+ */
+export function isSunStream(entry: Pick<RealtimeDashEntry, 'organizationSlug' | 'mpd'>): boolean {
+  return entry.organizationSlug === 'nasa-sdo' || /(^|\/)nasa-sdo\//.test(entry.mpd ?? '')
+}
+
 /** One index row as a `Dataset`, given the URL the loader starts from. */
 function realtimeDashDataset(
   entry: RealtimeDashEntry,
@@ -691,7 +700,8 @@ function realtimeDashDataset(
     timelineLink: resolveRealtimeDashAsset(entry.dsa, baseUrl),
     tags,
     realtimeKind: kind,
-    defaultBordersVisible: true,
+    // AYNI — no layer is ever placed automatically on the Sun (mapLayers.defaultLayers).
+    ...(isSunStream(entry) ? { autoLayersOff: true, defaultBordersVisible: false } : { defaultBordersVisible: true }),
     // AYNI: a global stream with transparency can be layered over
     // another dataset as its real-time overlay (main.ts): an alpha MPD,
     // or a value-encoded release whose palette leaves clear areas clear.

@@ -58,6 +58,11 @@ export interface DatasetLayerFacts {
   readonly transparent: boolean
   /** Fraction (0..1) of the first frame that hides the Earth, or null when unmeasured. */
   readonly coverage: number | null
+  /**
+   * Nothing is placed automatically: the real-time Sun streams and any
+   * other non-Earth body (owner's rule, 2026-10-02). Wins over the rest.
+   */
+  readonly autoLayersOff?: boolean
 }
 
 /** From this measured coverage the data has no transparency (0.1 % tolerated), and borders go on top. */
@@ -88,6 +93,7 @@ function tintFor(layer: CatalogLayer): MapLayerTint {
 
 /** The layers a dataset starts with. */
 export function defaultLayers(layers: readonly CatalogLayer[], facts: DatasetLayerFacts): LayerSelection {
+  if (facts.autoLayersOff) return NO_LAYERS
   const basemaps = layers.filter(l => l.kind === 'basemap')
   const basemap = facts.transparent
     ? basemaps.find(l => l.id === PREFERRED_BASEMAP) ?? basemaps[0] ?? null

@@ -171,6 +171,14 @@ export interface Dataset {
    * dataset (sparse transparent DASH overlays). */
   defaultBordersVisible?: boolean
 
+  /**
+   * AYNI — never place a basemap or overlay on this dataset
+   * automatically (owner's rule, 2026-10-02): the real-time Sun streams,
+   * whose opaque pictures would otherwise get the borders.
+   * A viewer can still tick a layer by hand.
+   */
+  autoLayersOff?: boolean
+
   /** Globe longitude rotation reference in degrees. Omitted == 0
    * (prime-meridian-centered). Non-zero values (±180 in the SOS
    * snapshot) are dateline-centered, useful for Pacific-focused

@@ -21,7 +21,7 @@ import {
   type LayerSelection,
 } from './services/mapLayers'
 import type { MapLayerImages } from './services/earthTileLayer'
-import { carriesAlphaStream } from './services/datasetOverlayOptions'
+import { carriesAlphaStream, isEarthBody } from './services/datasetOverlayOptions'
 import { mountLayerPicker, type LayerPickerHandle } from './ui/mapLayersUI'
 import { ViewportManager, type ViewLayout } from './services/viewportManager'
 
@@ -1283,7 +1283,11 @@ class InteractiveSphere {
     const coverage = transparent ? await this.measureDatasetCoverage(dataset, slot) : null
     if (gen !== this.mapLayerGen) return
     const streamed = dataset.format === 'application/dash+xml'
-    await this.applyMapLayers(withBordersChoice(defaultLayers(layers, { streamed, transparent, coverage }), this.viewerBorders, layers), slot, gen)
+    // The Sun (and any other body) starts bare: not even a viewer's
+    // standing "borders on" from an Earth dataset carries over to it.
+    const autoLayersOff = !!dataset.autoLayersOff || !isEarthBody(dataset.celestialBody)
+    const defaults = defaultLayers(layers, { streamed, transparent, coverage, autoLayersOff })
+    await this.applyMapLayers(autoLayersOff ? defaults : withBordersChoice(defaults, this.viewerBorders, layers), slot, gen)
   }
 
   /** Fraction of the slot's first frame that hides the Earth, or null if it cannot be read. */

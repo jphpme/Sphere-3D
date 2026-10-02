@@ -3,6 +3,7 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  NO_LAYERS,
   bordersChoice,
   coverageOfPixels,
   defaultLayers,
@@ -70,6 +71,12 @@ describe('defaultLayers', () => {
 
   it('adds no borders while a transparent stream\'s coverage is unmeasured', () => {
     expect(defaultLayers(LIVE, { streamed: true, transparent: true, coverage: null }).overlays).toEqual([])
+  })
+
+  it('places nothing on the Sun, though its stream is opaque (owner, 2026-10-02)', () => {
+    const withBorders = [...LIVE, ...streamHostLayers('https://streams.example/')]
+    expect(defaultLayers(withBorders, { streamed: true, transparent: false, coverage: null, autoLayersOff: true })).toEqual(NO_LAYERS)
+    expect(defaultLayers(withBorders, { streamed: true, transparent: true, coverage: 1, autoLayersOff: true })).toEqual(NO_LAYERS)
   })
 
   it('offers nothing when the catalog has no layers', () => {

@@ -6,6 +6,7 @@ import {
   dataService,
   deriveAvailableFor,
   HIDDEN_TOUR_IDS,
+  isSunStream,
   normaliseSourceFormat,
   sosOnlyIdSlug,
   synthesizeSosOnlyDatasets,
@@ -489,5 +490,20 @@ describe('effectiveCatalogTtl (Phase Z4)', () => {
     const at = (period: string) => [{ id: 'a', period, endTime: '2026-06-11T11:59:00Z' } as never]
     expect(effectiveCatalogTtl(at('PT15M'), HOUR, NOW)).toBe(15 * 60 * 1000)
     expect(effectiveCatalogTtl(at('PT1M'), HOUR, NOW)).toBe(5 * 60 * 1000)
+  })
+})
+
+describe('isSunStream', () => {
+  it('matches the three SDO Sun rows of the live index, by slug or by R2 path', () => {
+    expect(isSunStream({ organizationSlug: 'nasa-sdo', mpd: 'global/realtime/nasa-sdo/sun_surface_grouped/stream.mpd' })).toBe(true)
+    expect(isSunStream({ organizationSlug: 'nasa-sdo' })).toBe(true)
+    expect(isSunStream({ mpd: 'global/realtime/nasa-sdo/sun_corona_171_grouped/stream.mpd' })).toBe(true)
+    expect(isSunStream({ mpd: 'global/realtime/nasa-sdo/sun_chromosphere_304_grouped/stream.mpd' })).toBe(true)
+  })
+
+  it('leaves Earth streams alone', () => {
+    expect(isSunStream({ organizationSlug: 'noaa', mpd: 'global/realtime/noaa/sst/stream.mpd' })).toBe(false)
+    expect(isSunStream({ organizationSlug: 'not-nasa-sdo', mpd: 'global/realtime/xnasa-sdo/a/stream.mpd' })).toBe(false)
+    expect(isSunStream({})).toBe(false)
   })
 })
